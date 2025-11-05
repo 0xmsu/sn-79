@@ -2,8 +2,11 @@
     <Agents>
         <MultiBookExchangeAgent name="EXCHANGE" priceDecimals="4" volumeDecimals="8" baseDecimals="8" quoteDecimals="10" 
             remoteAgentCount="2" maxLeverage="4" maxLoan = "5000" maintenanceMargin = "0.1">
-            <FeePolicy type="static" makerFee="0.0005" takerFee="0.001" agentIdLowerBound="-100" agentIdUpperBound="-1"/>
+            <!-- <FeePolicy type="static" makerFee="0.0005" takerFee="0.001" agentIdLowerBound="-100" agentIdUpperBound="-1"/> -->
             <!-- <FeePolicy type="vip" makerFee="0.2" takerFee="0.01" agentIdLowerBound="0" agentIdUpperBound="1"/> -->
+            <FeePolicy type="tiered" historySlots="30" slotPeriod="864">
+                <Tier volumeRequired="0" makerFee="0.0" takerFee="0.00023" />
+            </FeePolicy>
             <Books instanceCount="1" algorithm="PriceTime" maxDepth="21"/>
             <Balances>
                 <Base total="100.0" maxLeverage = "5" maxLoan = "10000"/>

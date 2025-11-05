@@ -58,6 +58,9 @@ INSTANTIATE_TEST_SUITE_P(
             .value = DEC(-29358.2416619814), .decimalPlaces = 7, .refValue = DEC(-29358.2416619)
         },
         RoundUpTestParams{
+            .value = DEC(-420.6921), .decimalPlaces = 2, .refValue = DEC(-420.69)
+        },
+        RoundUpTestParams{
             .value = DEC(10000.1), .decimalPlaces = 0, .refValue = DEC(10001.0)
         }
     ));
@@ -69,7 +72,7 @@ struct PackUnpackTest : TestWithParam<decimal_t> {};
 TEST_P(PackUnpackTest, WorksCorrectly)
 {
     const decimal_t packee = GetParam();
-    const uint64_t packed = util::packDecimal(packee);
+    const auto packed = util::packDecimal(packee);
     const decimal_t unpacked = util::unpackDecimal(packed);
     EXPECT_EQ(packee, unpacked);
 }

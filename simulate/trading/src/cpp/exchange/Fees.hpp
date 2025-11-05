@@ -20,6 +20,26 @@ struct Fees
     decimal_t maker{};
     decimal_t taker{};
 
+    Fees operator+(const Fees& other) const noexcept {
+        return {maker + other.maker, taker + other.taker};
+    }
+
+    Fees operator-(const Fees& other) const noexcept {
+        return {maker - other.maker, taker - other.taker};
+    }
+
+    Fees& operator+=(const Fees& other) noexcept {
+        maker += other.maker;
+        taker += other.taker;
+        return *this;
+    }
+
+    Fees& operator-=(const Fees& other) noexcept {
+        maker -= other.maker;
+        taker -= other.taker;
+        return *this;
+    }
+
     MSGPACK_DEFINE_MAP(maker, taker);
 };
 

@@ -20,6 +20,8 @@ struct FeeLogEvent
     exchange::Fees fees;
     decimal_t price;
     decimal_t volume;
+    decimal_t restingRatio;
+    decimal_t aggressingRatio;
 };
 
 }  // namespace taosim

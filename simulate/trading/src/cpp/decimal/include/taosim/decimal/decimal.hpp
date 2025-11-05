@@ -21,7 +21,12 @@
 namespace taosim
 {
 
-using decimal_t = BloombergLP::bdldfp::Decimal64;
+using decimal_t = BloombergLP::bdldfp::Decimal128;
+
+struct PackedDecimal
+{
+    uint8_t data[sizeof(decimal_t)]{};
+};
 
 }  // namespace taosim
 
@@ -56,19 +61,17 @@ inline constexpr uint32_t kDefaultDecimalPlaces = 8;
     return round(decimal_t{val}, decimalPlaces);
 }
 
-[[nodiscard]] inline uint64_t packDecimal(decimal_t val)
+[[nodiscard]] inline PackedDecimal packDecimal(decimal_t val)
 {
-    uint64_t packed;
-    BloombergLP::bdldfp::DecimalConvertUtil::decimalToDPD(
-        std::bit_cast<uint8_t*>(&packed), val);
+    PackedDecimal packed;
+    BloombergLP::bdldfp::DecimalConvertUtil::decimalToDPD(packed.data, val);
     return packed;
 }
 
-[[nodiscard]] inline decimal_t unpackDecimal(uint64_t val)
+[[nodiscard]] inline decimal_t unpackDecimal(PackedDecimal val)
 {
     decimal_t unpacked;
-    BloombergLP::bdldfp::DecimalConvertUtil::decimalFromDPD(
-        &unpacked, std::bit_cast<uint8_t*>(&val));
+    BloombergLP::bdldfp::DecimalConvertUtil::decimalFromDPD(&unpacked, val.data);
     return unpacked;
 }
 
@@ -118,6 +121,17 @@ namespace taosim::literals
 
 //-------------------------------------------------------------------------
 
+static inline void trim(std::span<char> span)
+{
+    const size_t len = std::strlen(span.data());
+    if (len <= 3uz) return;
+    size_t i = len - 1;
+    while (i > 1 && span[i] == '0' && span[i - 1] != '.') {
+        --i;
+    }
+    span[i + 1] = '\0';
+}
+
 template<>
 struct fmt::formatter<taosim::decimal_t>
 {
@@ -127,12 +141,13 @@ struct fmt::formatter<taosim::decimal_t>
     auto format(taosim::decimal_t val, FormatContext& ctx) const
     {
         using namespace taosim::literals;
-        char buf[32]{};
+        char buf[64]{};
         std::ospanstream oss{buf};
         if (val == 0_dec) [[unlikely]] {
             oss << "0.0";
         } else {
             oss << val;
+            trim(buf);
         }
         return fmt::format_to(ctx.out(), "{}", buf);
     }

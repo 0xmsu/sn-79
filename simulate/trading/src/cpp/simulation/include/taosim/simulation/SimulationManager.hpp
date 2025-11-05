@@ -6,6 +6,7 @@
 
 #include <Simulation.hpp>
 #include "taosim/ipc/ipc.hpp"
+#include "taosim/replay/ReplayManager.hpp"
 #include "net.hpp"
 
 #include <boost/asio.hpp>
@@ -41,9 +42,8 @@ class SimulationManager
 {
 public:
     void runSimulations();
-    void runReplay(
-        const fs::path& replayDir, BookId bookId, std::span<const std::string> replacedAgents);
-    void runReplayAdvanced(const fs::path& replayDir, std::span<const std::string> replacedAgents);
+    void runReplay();
+    void runReplayAdvanced();
     void publishStartInfo();
     void publishEndInfo();
     void publishState();
@@ -62,7 +62,7 @@ public:
     }
 
     static std::unique_ptr<SimulationManager> fromConfig(const fs::path& path);
-    static std::unique_ptr<SimulationManager> fromReplay(const fs::path& replayDir);
+    static std::unique_ptr<SimulationManager> fromReplay(const replay::ReplayDesc& desc);
 
     // TODO: ENV?
     static constexpr std::string_view s_validatorReqMessageQueueName{"taosim-req"};
@@ -83,6 +83,7 @@ private:
     std::unique_ptr<ipc::PosixMessageQueue> m_validatorResMessageQueue;
     bool m_disallowPublish{};
     bool m_useMessagePack{};
+    std::unique_ptr<replay::ReplayManager> m_replayManager;
 
     void setupLogDir(pugi::xml_node node);
 

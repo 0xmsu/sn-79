@@ -31,46 +31,53 @@ FuturesSignal::FuturesSignal(
 
 void FuturesSignal::update(Timestamp timestamp)
 {
-    if (timestamp - m_last_seed_time >= m_seedInterval) {
-        if ( fs::exists( m_seedfile ) ) {
-            int count = m_last_count;
-            float seed = 0.0;
-            try {
-                std::vector<std::string> lines = taosim::util::getLastLines(m_seedfile, 2);
-                if (lines.size() >= 2) {
-                    std::vector<std::string> line = taosim::util::split(lines[lines.size() - 2],',');
-                    if (line.size() >= 2) {
-                        count = std::stoi(line[0]);
-                        seed = std::stof(line[1]);
-                        if (auto simulation = dynamic_cast<Simulation*>(m_simulation)) {
-                            simulation->logDebug("FuturesSignal::update : READ {}", lines[lines.size() - 2]);
+    if (m_values.empty()) {
+        if (timestamp - m_last_seed_time >= m_seedInterval) {
+            if ( fs::exists( m_seedfile ) ) {
+                int count = m_last_count;
+                float seed = 0.0;
+                try {
+                    std::vector<std::string> lines = taosim::util::getLastLines(m_seedfile, 2);
+                    if (lines.size() >= 2) {
+                        std::vector<std::string> line = taosim::util::split(lines[lines.size() - 2],',');
+                        if (line.size() >= 2) {
+                            count = std::stoi(line[0]);
+                            seed = std::stof(line[1]);
+                            if (auto simulation = dynamic_cast<Simulation*>(m_simulation)) {
+                                simulation->logDebug("FuturesSignal::update : READ {}", lines[lines.size() - 2]);
+                            }
+                        } else {
+                            fmt::println("FuturesSignal::update : FAILED TO GET SEED FROM LINE - {}", lines[lines.size() - 2]);
                         }
                     } else {
-                        fmt::println("FuturesSignal::update : FAILED TO GET SEED FROM LINE - {}", lines[lines.size() - 2]);
+                        if (m_last_count > 0) {
+                            fmt::println("FuturesSignal::update : FAILED TO GET SEED FROM FILE - NO DATA ({} LINES READ)", lines.size());
+                        }                    
                     }
-                } else {
-                    if (m_last_count > 0) {
-                        fmt::println("FuturesSignal::update : FAILED TO GET SEED FROM FILE - NO DATA ({} LINES READ)", lines.size());
-                    }                    
+                } catch (const std::exception &exc) {
+                    fmt::println("FuturesSignal::update : ERROR GETTING SEED FROM FILE - {}", exc.what());
                 }
-            } catch (const std::exception &exc) {
-                fmt::println("FuturesSignal::update : ERROR GETTING SEED FROM FILE - {}", exc.what());
-            }
-            if (count != m_last_count) {
-                m_value = seed;
-                m_valueSignal(m_value);
-                m_last_count = count;
-                m_last_seed = seed;
-                m_last_seed_time = timestamp;
-                if (auto simulation = dynamic_cast<Simulation*>(m_simulation)) {
-                    simulation->logDebug("FuturesSignal::update : PUBLISH {}", m_value);
+                if (count != m_last_count) {
+                    m_value = seed;
+                    m_valueSignal(m_value);
+                    m_last_count = count;
+                    m_last_seed = seed;
+                    m_last_seed_time = timestamp;
+                    if (auto simulation = dynamic_cast<Simulation*>(m_simulation)) {
+                        simulation->logDebug("FuturesSignal::update : PUBLISH {}", m_value);
+                    }
                 }
+            } else {
+                if (m_last_count > 0) {
+                    fmt::println("FuturesSignal::update : NO SEED FILE PRESENT AT {}", m_seedfile);
+                }            
             }
-        } else {
-            if (m_last_count > 0) {
-                fmt::println("FuturesSignal::update : NO SEED FILE PRESENT AT {}", m_seedfile);
-            }            
         }
+    }
+    else {
+        m_value = m_values.at(m_valueIdx);
+        m_valueIdx = std::min(m_valueIdx + 1, m_values.size() - 1);
+        m_valueSignal(m_value);
     }
 }
 

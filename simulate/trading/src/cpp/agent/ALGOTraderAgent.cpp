@@ -541,8 +541,10 @@ void ALGOTraderAgent::execute(BookId bookId, ALGOTraderState& state)
     const decimal_t volume = std::min(drawnQty,
                                          state.volumeToBeExecuted);
     const decimal_t volumeToExecute = state.direction == OrderDirection::BUY ? 
-    std::min(volume, balances.quote.getFree()/m_lastPrice.at(bookId))
-        : std::min(volume, baseBalance.getFree());
+    std::min(volume, (balances.quote.getFree()* decimal_t{0.99}) /m_lastPrice.at(bookId))
+        : std::min(volume, (baseBalance.getFree() * (decimal_t{0.99}) ));
+    
+
 
 
     simulation()->logDebug(

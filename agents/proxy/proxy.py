@@ -25,7 +25,6 @@ from taos.im.neurons.validator import Validator
 from taos.im.protocol import MarketSimulationStateUpdate, MarketSimulationConfig, FinanceAgentResponse, FinanceEventNotification
 from taos.im.protocol.simulator import SimulatorResponseBatch
 from taos.im.protocol.events import SimulationStartEvent
-from taos.im.validator.forward import validate_responses
 from taos.im.validator.reward import set_delays
 
 from ypyjson import YpyObject
@@ -155,17 +154,46 @@ class Proxy(Validator):
             receive_start = time.time()
             bt.logging.info(f"Received state update from simulator (msgpack)")
             byte_size_req = int.from_bytes(msg, byteorder="little")
-            shm_req = posix_ipc.SharedMemory("/state", flags=posix_ipc.O_CREAT)
-            with mmap.mmap(shm_req.fd, byte_size_req, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
-                shm_req.close_fd()
-                packed_data = mm.read(byte_size_req)
+            shm_req = posix_ipc.SharedMemory("/state")
+            start = time.time()
+            packed_data = None
+            for attempt in range(1, 6):
+                try:
+                    with mmap.mmap(shm_req.fd, byte_size_req, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
+                        packed_data = mm.read(byte_size_req)
+                    bt.logging.info(f"Unpacked state update ({time.time() - start:.4f}s)")
+                    break
+                except Exception as ex:
+                    if attempt < 5:
+                        bt.logging.error(f"mmap read failed (attempt {attempt}/5): {ex}")
+                        time.sleep(0.005)
+                    else:
+                        bt.logging.error(f"mmap read failed on all 5 attempts: {ex}")
+                        self.pagerduty_alert(f"Failed to mmap read after 5 attempts : {ex}", details={"trace" : traceback.format_exc()})
+                        raise ex
+                finally:
+                    if packed_data is not None or attempt >= 5:
+                        shm_req.close_fd()
             bt.logging.info(f"Retrieved State Update ({time.time() - receive_start}s)")
             start = time.time()
-            result = msgpack.unpackb(packed_data, raw=False, use_list=False, strict_map_key=False)
-            bt.logging.info(f"Unpacked state update ({time.time() - start}s)")
+            result = None
+            for attempt in range(1, 6):
+                try:
+                    result = msgpack.unpackb(packed_data, raw=False, use_list=True, strict_map_key=False)
+                    bt.logging.info(f"Unpacked state update ({time.time() - start:.4f}s)")
+                    break
+                except Exception as ex:
+                    if attempt < 5:
+                        bt.logging.error(f"Msgpack unpack failed (attempt {attempt}/5): {ex}")
+                        time.sleep(0.005)
+                    else:
+                        bt.logging.error(f"Msgpack unpack failed on all 5 attempts: {ex}")
+                        self.pagerduty_alert(f"Failed to unpack simulator state after 5 attempts : {ex}", details={"trace" : traceback.format_exc()})
+                        raise ex
             return result, receive_start
 
         def respond(response) -> dict:
+            self.last_response = response
             packed_res = msgpack.packb(response, use_bin_type=True)
             byte_size_res = len(packed_res)
             mq_res = posix_ipc.MessageQueue("/taosim-res", flags=posix_ipc.O_CREAT, max_messages=1, max_message_size=8)
@@ -175,7 +203,6 @@ class Proxy(Validator):
                 mm.write(packed_res)
             mq_res.send(byte_size_res.to_bytes(8, byteorder="little"))
             mq_res.close()
-        
         while True:
             response = {"responses" : []}
             try:

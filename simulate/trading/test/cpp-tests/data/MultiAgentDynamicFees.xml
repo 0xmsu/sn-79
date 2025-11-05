@@ -1,0 +1,26 @@
+<Simulation start="0" duration="11" mode="test">
+    <Agents>
+        <MultiBookExchangeAgent name="EXCHANGE" priceDecimals="2" volumeDecimals="4" baseDecimals="4" quoteDecimals="10" 
+            remoteAgentCount="2" maxLeverage="4" maxLoan = "5000" maintenanceMargin = "0.1">
+            <!-- <FeePolicy type="static" makerFee="0.0005" takerFee="0.001" agentIdLowerBound="-100" agentIdUpperBound="-1"/> -->
+            <!-- <FeePolicy type="vip" makerFee="0.2" takerFee="0.01" agentIdLowerBound="0" agentIdUpperBound="1"/> -->
+            <FeePolicy type="dynamic" historySlots="300"
+                makerFee="0.002" takerFee="0.005" maxMakerRate="0.005" maxTakerRate="0.0045" 
+                targetMTR="0.7" shapeMakerFee="3.2" shapeMakerRebate="2.2"/>
+                
+            <Books instanceCount="1" algorithm="PriceTime" maxDepth="21"/>
+            <Balances>
+                <!-- <Base total="100.0" maxLeverage = "5" maxLoan = "10000"/>
+                <Quote total="123.6817777778" maxLeverage = "5" maxLoan = "10000"/> -->
+                <Base total="10000.0" maxLeverage = "5" maxLoan = "10000"/>
+                <Quote total="500000.0" maxLeverage = "5" maxLoan = "10000"/>
+            </Balances>
+        </MultiBookExchangeAgent>
+        <DistributedProxyAgent>
+            <!-- <FeePolicy type="dynamic" historySlots="300"
+                makerFee="0.1" takerFee="0.2" maxMakerRate="0.005" maxTakerRate="0.0045" 
+                targetMTR="0.7" shapeMakerFee="3.2" shapeMakerRebate="2.2"/> -->
+
+        </DistributedProxyAgent>
+    </Agents>
+</Simulation>

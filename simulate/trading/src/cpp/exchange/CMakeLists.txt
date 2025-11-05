@@ -3,8 +3,10 @@ add_library(exchange STATIC
     Exchange.cpp
     ExchangeConfig.cpp
     ExchangeSignals.cpp
-    FeePolicy.cpp
+    include/taosim/exchange/FeePolicy.hpp
+    TieredFeePolicy.cpp
     FeePolicyWrapper.cpp
+    DynamicFeePolicy.cpp
     OrderPlacementValidator.cpp
     ReplayEventLogger.cpp
 )
@@ -34,6 +36,7 @@ target_link_libraries(exchange
         taosim::book
         taosim::event
         taosim::message
+        taosim::replay
         taosim::simulation
         bdl
         pybind11::embed

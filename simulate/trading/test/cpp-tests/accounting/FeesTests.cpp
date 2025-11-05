@@ -4,7 +4,8 @@
  */
 
 #include "taosim/decimal/decimal.hpp"
-#include "taosim/exchange/FeePolicy.hpp"
+#include "taosim/exchange/TieredFeePolicy.hpp"
+#include "taosim/exchange/DynamicFeePolicy.hpp"
 #include "taosim/exchange/FeePolicyWrapper.hpp"
 #include "taosim/message/PayloadFactory.hpp"
 #include "formatting.hpp"
@@ -26,7 +27,7 @@
 #include <gtest/gtest.h>
 #include <pugixml.hpp>
 
-
+#include <typeinfo>
 #include <regex>
 #include <cassert>
 #include <filesystem>
@@ -134,13 +135,13 @@ std::pair<LimitOrder::Ptr, OrderErrorCode> placeLimitOrder(
 
 //-------------------------------------------------------------------------
 
-class FeePolicyPublic: public FeePolicy
+class FeePolicyPublic: public TieredFeePolicy
 {
 public:
     friend class TieredFeePolicyTest;
 
-    using FeePolicy::findTierForAgent;
-    using FeePolicy::findTierForVolume;
+    using TieredFeePolicy::findTierForAgent;
+    using TieredFeePolicy::findTierForVolume;
 };
 
 //-------------------------------------------------------------------------
@@ -167,6 +168,47 @@ protected:
         feePolicyWrapper = exchange->clearingManager().feePolicy();
         auto feePolicyPrivate = feePolicyWrapper->defaultPolicy();
         feePolicy = reinterpret_cast<FeePolicyPublic*>(feePolicyPrivate);
+        simulation->setDebug(true);
+    }
+
+};
+
+
+//-------------------------------------------------------------------------
+
+// class DyFeePolicyPublic: public DynamicFeePolicy
+// {
+// public:
+//     friend class TieredFeePolicyTest;
+
+//     using TieredFeePolicy::findTierForAgent;
+//     using TieredFeePolicy::findTierForVolume;
+// };
+
+//-------------------------------------------------------------------------
+
+
+class DynamicFeePolicyTest
+    : public testing::TestWithParam<std::pair<Timestamp, fs::path>>
+{
+public:
+
+    taosim::util::Nodes nodes;
+    std::unique_ptr<Simulation> simulation;
+    MultiBookExchangeAgent* exchange;
+    FeePolicyWrapper* feePolicyWrapper;
+    DynamicFeePolicy* feePolicy;
+
+protected:
+    void SetUp() override
+    {
+        nodes = taosim::util::parseSimulationFile(kTestDataPath / "MultiAgentDynamicFees.xml");
+        simulation = std::make_unique<Simulation>();
+        simulation->configure(nodes.simulation);
+        exchange = simulation->exchange();
+        feePolicyWrapper = exchange->clearingManager().feePolicy();
+        auto feePolicyPrivate = feePolicyWrapper->defaultPolicy();
+        feePolicy = reinterpret_cast<DynamicFeePolicy*>(feePolicyPrivate);
         simulation->setDebug(true);
     }
 
@@ -379,6 +421,115 @@ TEST_F(NegativeTieredFeePolicyTest, trackVolumes)
 
 
 
+//-------------------------------------------------------------------------
+
+
+TEST_F(DynamicFeePolicyTest, trackVolumes)
+{
+    const AgentId agent1 = -3, agent2 = -4;
+    const AgentId agent_1 = -1, agent_2 = -2;
+    const BookId bookId{};
+    auto book = exchange->books()[bookId];
+    
+    // exchange->accounts().registerRemote();
+    // exchange->accounts().registerRemote();
+    exchange->accounts().registerLocal("agent_1");
+    exchange->accounts().registerLocal("agent_2");
+    exchange->accounts().registerLocal("stylized_3");
+    exchange->accounts().registerLocal("stylized_4");
+
+    for (AgentId agId = -4; agId < 0; agId++){
+        if (agId == 0) continue;
+        printBalances(exchange->accounts()[agId][bookId], agId);
+    }
+
+
+    for (AgentId agId = -4; agId < 0; agId++){
+        // EXPECT_EQ(feePolicy->findTierForAgent(bookId, agId).volumeRequired, tiers[0].volumeRequired);
+        if (agId == 0) continue;
+        fmt::println("FeeRates for agent#{} is ({} | {})",
+            agId,
+            feePolicyWrapper->getRates(bookId, agId).maker,
+            feePolicyWrapper->getRates(bookId, agId).taker);
+    }
+    
+    placeLimitOrder(exchange, agent1, bookId, OrderDirection::SELL, 61_dec, 10_dec, DEC(0.));
+
+    exchange->simulation()->step();
+
+    placeLimitOrder(exchange, agent2, bookId, OrderDirection::BUY, 6_dec, 10_dec, DEC(1.));
+    placeLimitOrder(exchange, agent_1, bookId, OrderDirection::BUY, 25_dec, 10_dec, DEC(1.));
+    exchange->simulation()->step();
+
+    placeLimitOrder(exchange, agent1, bookId, OrderDirection::SELL, 61_dec, 10_dec, DEC(0.));
+
+    exchange->simulation()->step();
+
+    for (AgentId agId = -4; agId < 0; agId++){
+        // EXPECT_EQ(feePolicy->findTierForAgent(bookId, agId).volumeRequired, tiers[0].volumeRequired);
+        if (agId == 0) continue;
+        fmt::println("FeeRates for agent#{} is ({} | {})",
+            agId,
+            feePolicyWrapper->getRates(bookId, agId).maker,
+            feePolicyWrapper->getRates(bookId, agId).taker);
+    }
+
+    placeLimitOrder(exchange, agent2, bookId, OrderDirection::BUY, 6_dec, 10_dec, DEC(1.));
+    placeLimitOrder(exchange, agent_1, bookId, OrderDirection::BUY, 25_dec, 10_dec, DEC(1.));
+    exchange->simulation()->step();
+    placeLimitOrder(exchange, agent_2, bookId, OrderDirection::BUY, 25_dec, 10_dec, DEC(1.));
+    placeLimitOrder(exchange, agent1, bookId, OrderDirection::SELL, 25_dec, 10_dec, DEC(1.));
+
+    // EXPECT_EQ(feePolicy->agentVolumes().at(agent1).at(bookId).back(), 610_dec);
+    // EXPECT_EQ(feePolicy->agentVolumes().at(agent2).at(bookId).back(), 120_dec);
+    // EXPECT_EQ(feePolicy->agentVolumes().at(agent3).at(bookId).back(), 490_dec);
+
+    // for (AgentId agId = -1; agId > -4; agId--){
+    //     EXPECT_EQ(feePolicy->findTierForAgent(bookId, agId).volumeRequired, tiers[0].volumeRequired);
+    // }
+
+    // feePolicy->updateAgentsTiers();
+
+    for (AgentId agId = -4; agId < 0; agId++){
+        // EXPECT_EQ(feePolicy->findTierForAgent(bookId, agId).volumeRequired, tiers[0].volumeRequired);
+        if (agId == 0) continue;
+        fmt::println("FeeRates for agent#{} is ({} | {})",
+            agId,
+            feePolicyWrapper->getRates(bookId, agId).maker,
+            feePolicyWrapper->getRates(bookId, agId).taker);
+    }
+
+    // EXPECT_EQ(feePolicy->findTierForAgent(bookId, agent1).volumeRequired, tiers[2].volumeRequired);
+    // EXPECT_EQ(feePolicy->findTierForAgent(bookId, agent2).volumeRequired, tiers[1].volumeRequired);
+    // EXPECT_EQ(feePolicy->findTierForAgent(bookId, agent3).volumeRequired, tiers[1].volumeRequired);
+
+    // for (AgentId agId = -1; agId > -4; agId--){
+    //     printBalances(exchange->accounts()[agId][bookId], agId);
+    // }
+
+    // for (const auto& tier: feePolicy->agentTiers())
+    //     fmt::println("Agent #{} is in tier {} now", tier.first, tier.second.at(bookId));
+        
+
+    // placeLimitOrder(exchange, agent1, bookId, OrderDirection::SELL, 30_dec, 10_dec, DEC(0.));
+    // placeLimitOrder(exchange, agent2, bookId, OrderDirection::BUY, 10_dec, 10_dec, DEC(1.));
+    // placeLimitOrder(exchange, agent3, bookId, OrderDirection::BUY, 5_dec, 10_dec, DEC(1.));
+    
+    // feePolicy->resetHistory();
+    
+    // for (AgentId agId = -1; agId > -4; agId--){
+    //     EXPECT_EQ(feePolicy->findTierForAgent(bookId, agId).volumeRequired, tiers[0].volumeRequired);
+    //     fmt::println("FeeRates for agent#{} is ({} | {})",
+    //         agId,
+    //         feePolicyWrapper->getRates(bookId, agId).maker,
+    //         feePolicyWrapper->getRates(bookId, agId).taker);
+    // }    
+
+}
+
+
+
+//-------------------------------------------------------------------------
 
 
 

@@ -106,32 +106,7 @@ void PlaceOrderMarketPayload::jsonSerialize(
 void PlaceOrderMarketPayload::checkpointSerialize(
     rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("direction", rapidjson::Value{std::to_underlying(direction)}, allocator);
-        json.AddMember("volume", rapidjson::Value{taosim::util::packDecimal(volume)}, allocator);
-        json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
-        json.AddMember("currency", rapidjson::Value{std::to_underlying(currency)}, allocator);
-        taosim::json::setOptionalMember(json, "clientOrderId", clientOrderId);
-        json.AddMember(
-            "stpFlag",
-            rapidjson::Value{magic_enum::enum_name(stpFlag).data(), allocator},
-            allocator);
-        json.AddMember("leverage", rapidjson::Value{taosim::util::decimal2double(leverage)}, allocator);
-        std::visit([&](auto&& flag) {
-            using T = std::remove_cvref_t<decltype(flag)>;
-            if constexpr (std::is_same_v<T, SettleType>) {
-                json.AddMember(
-                    "settleFlag",
-                    rapidjson::Value{magic_enum::enum_name(flag).data(), allocator},
-                    allocator);
-            } else if constexpr (std::is_same_v<T, OrderID>) {
-                json.AddMember("settleFlag", rapidjson::Value{flag}, allocator);
-            }
-        }, settleFlag);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------
@@ -319,39 +294,7 @@ void PlaceOrderLimitPayload::jsonSerialize(
 void PlaceOrderLimitPayload::checkpointSerialize(
     rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [&](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("direction", rapidjson::Value{std::to_underlying(direction)}, allocator);
-        json.AddMember("volume", rapidjson::Value{taosim::util::packDecimal(volume)}, allocator);
-        json.AddMember("price", rapidjson::Value{taosim::util::packDecimal(price)}, allocator);
-        json.AddMember("leverage", rapidjson::Value{taosim::util::packDecimal(leverage)}, allocator);
-        json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
-        json.AddMember("currency", rapidjson::Value{std::to_underlying(currency)}, allocator);
-        taosim::json::setOptionalMember(json, "clientOrderId", clientOrderId);
-        json.AddMember("postOnly", rapidjson::Value{postOnly}, allocator);
-        json.AddMember(
-            "timeInForce",
-            rapidjson::Value{magic_enum::enum_name(timeInForce).data(), allocator},
-            allocator);
-        taosim::json::setOptionalMember(json, "expiryPeriod", expiryPeriod);
-        json.AddMember(
-            "stpFlag",
-            rapidjson::Value{magic_enum::enum_name(stpFlag).data(), allocator},
-            allocator);
-        std::visit([&](auto&& flag) {
-            using T = std::remove_cvref_t<decltype(flag)>;
-            if constexpr (std::is_same_v<T, SettleType>) {
-                json.AddMember(
-                    "settleFlag",
-                    rapidjson::Value{magic_enum::enum_name(flag).data(), allocator},
-                    allocator);
-            } else if constexpr (std::is_same_v<T, OrderID>) {
-                json.AddMember("settleFlag", rapidjson::Value{flag}, allocator);
-            }
-        }, settleFlag);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------
@@ -1052,25 +995,7 @@ void RetrieveL1ResponsePayload::jsonSerialize(
 void RetrieveL1ResponsePayload::checkpointSerialize(
     rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("timestamp", rapidjson::Value{time}, allocator);
-        json.AddMember(
-            "bestAskPrice", rapidjson::Value{taosim::util::packDecimal(bestAskPrice)}, allocator);
-        json.AddMember(
-            "bestAskVolume", rapidjson::Value{taosim::util::packDecimal(bestAskVolume)}, allocator);
-        json.AddMember(
-            "askTotalVolume", rapidjson::Value{taosim::util::packDecimal(askTotalVolume)}, allocator);
-        json.AddMember(
-            "bestBidPrice", rapidjson::Value{taosim::util::packDecimal(bestBidPrice)}, allocator);
-        json.AddMember(
-            "bestBidVolume", rapidjson::Value{taosim::util::packDecimal(bestBidVolume)}, allocator);
-        json.AddMember(
-            "bidTotalVolume", rapidjson::Value{taosim::util::packDecimal(bidTotalVolume)}, allocator);
-        json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------

@@ -28,6 +28,7 @@ target_link_libraries(simulation
         taosim::ipc
         taosim::message
         taosim::net
+        taosim::replay
         taosim::serialization
         Boost::boost
         pybind11::embed

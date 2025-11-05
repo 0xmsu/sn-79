@@ -8,9 +8,9 @@
             priceDecimals="2" volumeDecimals="4" baseDecimals="4" quoteDecimals="10"
             maxLeverage="4" maxLoan="10000" maintenanceMargin="0.10" maxOpenOrders="100"
             initialPrice="300.0" minOrderSize="0.01">
-            <FeePolicy type="tiered" historySlots="24" slotPeriod="3600000000000">
-                <Tier volumeRequired="0" makerFee="0.0" takerFee="0.00023" />
-            </FeePolicy>
+		     <FeePolicy type="dynamic" historySlots="300"
+                makerFee="0.000" takerFee="0.00023" maxMakerRate="0.005" maxTakerRate="0.005"
+                targetMTR="0.7" shapeMakerFee="2" shapeMakerRebate="2"/>
             <Books instanceCount="5" algorithm="PriceTime" maxDepth="21" detailedDepth="5">
                 <Processes>
                     <FundamentalPrice name="fundamental" seedInterval="30000000000" mu="0.0" sigma="0.068"
@@ -42,9 +42,6 @@
                 <Base total="100.0" maxLeverage="0" maxLoan="0" />
                 <Quote total="30000.0" maxLeverage="0" maxLoan="0" />
             </Balances>
-            <FeePolicy type="tiered" historySlots="24" slotPeriod="3600000000000">
-                <Tier volumeRequired="0" makerFee="0.0" takerFee="0.0" />
-            </FeePolicy>
         </InitializationAgent>
         <ALGOTraderAgent
             name="ALGO_TRADER_AGENT"
@@ -72,9 +69,6 @@
                 <Base total="167000.0" maxLeverage="1" maxLoan="10000"/>
                 <Quote total="50000000.0" maxLeverage="1" maxLoan="10000"/>
             </Balances>
-            <FeePolicy type="tiered" historySlots="24" slotPeriod="3600000000000">
-                <Tier volumeRequired="0" makerFee="0.0" takerFee="0.0"/>
-            </FeePolicy>
         </ALGOTraderAgent>     
         <HighFrequencyTraderAgent
             name="HIGH_FREQUENCY_TRADER_AGENT"
@@ -99,9 +93,6 @@
                 <Base total="500" maxLeverage="4" maxLoan="10000" />
                 <Quote total="150000.0" maxLeverage="4" maxLoan="10000" />
             </Balances>
-            <FeePolicy type="tiered" historySlots="24" slotPeriod="3600000000000">
-                <Tier volumeRequired="0" makerFee="0.0" takerFee="0.0" />
-            </FeePolicy>
         </HighFrequencyTraderAgent>
         <FuturesTraderAgent
             name="FUTURES_TRADER_AGENT"
@@ -122,9 +113,6 @@
                 <Base total="500" maxLeverage="1" maxLoan="10000" />
                 <Quote total="150000.0" maxLeverage="1" maxLoan="10000" />
             </Balances>
-            <FeePolicy type="tiered" historySlots="24" slotPeriod="3600000000000">
-                <Tier volumeRequired="0" makerFee="0.0" takerFee="0.0" />
-            </FeePolicy>
         </FuturesTraderAgent>
         <StylizedTraderAgent
             name="STYLIZED_TRADER_AGENT"
@@ -161,9 +149,6 @@
                 cap="3000000.0"
                 price="300.0"
             />
-            <FeePolicy type="tiered" historySlots="24" slotPeriod="3600000000000">
-                <Tier volumeRequired="0" makerFee="0.0" takerFee="0.0" />
-            </FeePolicy>
         </StylizedTraderAgent>
         <DistributedProxyAgent />
     </Agents>

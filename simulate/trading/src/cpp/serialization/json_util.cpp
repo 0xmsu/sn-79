@@ -98,11 +98,34 @@ rapidjson::Document loadJson(const std::filesystem::path& path)
 
 decimal_t getDecimal(const rapidjson::Value& json)
 {
-    if (json.IsUint64()) [[likely]] {
-        return util::unpackDecimal(json.GetUint64());
-    } else if (json.IsDouble()) [[unlikely]] {
+    if (json.IsArray() && json.GetArray().Size() == 2) [[likely]] {
+        const auto& arrJson = json.GetArray();
+        const uint64_t left = arrJson[0].GetUint64();
+        const uint64_t right = arrJson[1].GetUint64();
+        PackedDecimal packed;
+        std::memcpy(
+            packed.data,
+            std::bit_cast<const uint8_t*>(&left),
+            sizeof(uint64_t));
+        std::memcpy(
+            packed.data + sizeof(uint64_t),
+            std::bit_cast<const uint8_t*>(&right),
+            sizeof(uint64_t));
+        return util::unpackDecimal(packed);
+    }
+    else if (json.IsUint64()) [[unlikely]] {
+        return decimal_t{[&] {
+            const uint64_t packed = json.GetUint64();
+            BloombergLP::bdldfp::Decimal64 res;
+            BloombergLP::bdldfp::DecimalConvertUtil::decimalFromDPD(
+                &res, reinterpret_cast<const uint8_t*>(&packed));
+            return res;
+        }()};
+    }
+    else if (json.IsDouble()) [[unlikely]] {
         return decimal_t{json.GetDouble()};
-    } else {
+    }
+    else {
         throw std::invalid_argument{fmt::format(
             "{}: Ill-formed Json value to form a decimal with: {}",
             std::source_location::current().function_name(),

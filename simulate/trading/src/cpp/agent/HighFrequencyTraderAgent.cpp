@@ -31,7 +31,7 @@ void HighFrequencyTraderAgent::configure(const pugi::xml_node &node)
 {
     Agent::configure(node);
     m_rng = &simulation()->rng();
-    m_wealthFrac = 1.0;
+    m_wealthFrac = 0.99;
 
     pugi::xml_attribute attr;
     static constexpr auto ctx = std::source_location::current().function_name();

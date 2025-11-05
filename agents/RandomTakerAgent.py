@@ -22,6 +22,7 @@ class RandomTakerAgent(FinanceSimulationAgent):
         self.max_quantity = self.config.max_quantity
         self.min_leverage = self.config.min_leverage if hasattr(self.config, 'min_leverage') else 0.0
         self.max_leverage = self.config.max_leverage if hasattr(self.config, 'max_leverage') else 0.0
+        self.max_fee_rate = self.config.max_fee_rate if hasattr(self.config, 'max_fee_rate') else 0.002
         # Initialize a variable which allows to maintain the same direction of trade for a defined period
         self.direction = {}
 
@@ -58,6 +59,16 @@ class RandomTakerAgent(FinanceSimulationAgent):
             if not book_id in self.direction or state.timestamp % 100_000_000_000 == 0:
                 # Randomly select a new trade direction for the agent on this book
                 self.direction[book_id] = random.choice([OrderDirection.BUY,OrderDirection.SELL])
+
+            # NEW: Maker and taker fees will be dynamically moving under the DIS fee policy
+            # The below demonstrates a simple approach for reacting to the changing rates in trading logic
+            previous_taker_rate = self.accounts[book_id].fees.taker_fee_rate
+            # Positive rate implies a fee is to be paid, negative rate results in rebates to the trader
+            # Check the rate against the configured tolerance
+            if previous_taker_rate > self.max_fee_rate:
+                # If taker rate is above tolerance, do not place orders this round
+                continue
+             
             # Attach a market order instruction in the current trade direction for a random quantity within bounds defined by the parameters
             bt.logging.info(f"BOOK {book_id} | QUOTE : {self.accounts[book_id].quote_balance.total} [LOAN {self.accounts[book_id].quote_loan} | COLLAT {self.accounts[book_id].quote_collateral}]")
             bt.logging.info(f"BOOK {book_id} | BASE : {self.accounts[book_id].base_balance.total} [LOAN {self.accounts[book_id].base_loan} | COLLAT {self.accounts[book_id].base_collateral}]")
@@ -98,7 +109,7 @@ class RandomTakerAgent(FinanceSimulationAgent):
                     leverage=leverage,
                     settlement_option=settlement
                 )
-                bt.logging.info(f"SUBMITTING SELL MARKET ORDER FOR {str(round(1+leverage,2))+'x' if leverage > 0 else ''}{quantity}")
+                # bt.logging.info(f"SUBMITTING SELL MARKET ORDER FOR {str(round(1+leverage,2))+'x' if leverage > 0 else ''}{quantity}")
         # Return the response with instructions appended
         # The response will be serialized and sent back to the validator for processing
         return response
@@ -106,6 +117,6 @@ class RandomTakerAgent(FinanceSimulationAgent):
 if __name__ == "__main__":
     """
     Example command for local standalone testing execution using Proxy:
-    python RandomTakerAgent.py --port 8888 --agent_id 0 --params min_quantity=0.1 max_quantity=1.0 min_leverage=0.0 max_leverage=1.0
+    python RandomTakerAgent.py --port 8888 --agent_id 0 --params min_quantity=0.1 max_quantity=1.0 min_leverage=0.0 max_leverage=1.0 max_fee_rate=0.002
     """
     launch(RandomTakerAgent)

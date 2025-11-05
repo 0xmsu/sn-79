@@ -10,6 +10,7 @@ add_subdirectory(message)
 add_subdirectory(mp)
 add_subdirectory(net)
 add_subdirectory(process)
+add_subdirectory(replay)
 add_subdirectory(serialization)
 add_subdirectory(simulation)
 add_subdirectory(stats)
@@ -51,6 +52,7 @@ target_link_libraries(simulator
         taosim::message
         taosim::mp
         taosim::net
+        taosim::replay
         taosim::serialization
         taosim::simulation
         taosim::stats

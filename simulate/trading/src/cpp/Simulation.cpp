@@ -33,11 +33,19 @@ Simulation::Simulation() noexcept
 
 //-------------------------------------------------------------------------
 
-Simulation::Simulation(uint32_t blockIdx, const fs::path& baseLogDir)
+Simulation::Simulation(
+    uint32_t blockIdx,
+    uint32_t blockDim,
+    const fs::path& baseLogDir,
+    bool replayMode,
+    taosim::replay::ReplayDesc replayDesc)
     : IMessageable{this, "SIMULATION"},
       m_blockIdx{blockIdx},
+      m_blockDim{blockDim},
       m_baseLogDir{baseLogDir},
-      m_localAgentManager{std::make_unique<LocalAgentManager>(this)}
+      m_localAgentManager{std::make_unique<LocalAgentManager>(this)},
+      m_replayMode{replayMode},
+      m_replayDesc{replayDesc}
 {}
 
 //-------------------------------------------------------------------------
@@ -538,16 +546,34 @@ void Simulation::configureAgents(pugi::xml_node node)
                     auto feePolicy = m_exchange->clearingManager().feePolicy();
                     const auto agentBaseName = agentNode.attribute("name").as_string();
                     if (feePolicy->contains(agentBaseName)) return;
-                    (*feePolicy)[agentBaseName] =
-                        taosim::exchange::FeePolicy::fromXML(feePolicyNode, this);
-                    logDebug("TIERED FEE POLICY - {}", agentBaseName);
-                    int c = 0;
-                    for (taosim::exchange::Tier tier : (*feePolicy)[agentBaseName]->tiers()) {
-                        logDebug("TIER {} : VOL >= {} | MAKER {} TAKER {}", c, 
-                            tier.volumeRequired, 
-                            tier.makerFeeRate, tier.takerFeeRate
-                        );
-                        c++;
+
+                    if (std::string(agentNode.child("FeePolicy").attribute("type").as_string()) == "tiered") {
+                        if (!feePolicy->isTiered()){
+                            throw std::runtime_error(fmt::format(
+                                "{}'s fee policy type must be the same as default", std::string(agentBaseName)));
+                        }
+                        (*feePolicy)[agentBaseName] =
+                            taosim::exchange::TieredFeePolicy::fromXML(feePolicyNode, this);
+                        logDebug("TIERED FEE POLICY - {}", agentBaseName);
+                        int c = 0;
+                        if (auto* tiered = dynamic_cast<TieredFeePolicy*>((*feePolicy)[agentBaseName].get())) {
+                            for (auto& tier : tiered->tiers()) {
+                                logDebug("TIER {} : VOL >= {} | MAKER {} TAKER {}", c, 
+                                    tier.volumeRequired, 
+                                    tier.makerFeeRate, tier.takerFeeRate
+                                );
+                                c++;
+                            }
+                        }
+                    } else {
+                        if (feePolicy->isTiered()) {
+                            if (auto* tiered = dynamic_cast<TieredFeePolicy*>(feePolicy->defaultPolicy())) {
+                                (*feePolicy)[agentBaseName] = std::make_unique<TieredFeePolicy>(*tiered);
+                                logDebug("DEFAULT TIERED FEE POLICY - {}", agentBaseName);
+                            } else {
+                                throw std::runtime_error("Default policy is not TieredFeePolicy as expected");
+                            }
+                        } 
                     }
                 }
             }();
@@ -642,7 +668,7 @@ void Simulation::deliverMessage(Message::Ptr msg)
 
 void Simulation::start()
 {
-    if (!m_exchange->replayMode()) {
+    if (!m_replayMode) {
         dispatchMessage(
             m_time.start,
             0,
@@ -658,19 +684,28 @@ void Simulation::start()
             "EVENT_SIMULATION_END",
             MessagePayload::create<EmptyPayload>());
     }
-    else if (!m_replacedAgents.empty()) {
+    else if (!m_replayDesc.replacedAgents.empty()) {
+        auto replacedAgentNames = m_localAgentManager->agents()
+            | views::filter([this](auto&& agent) {
+                const std::regex pat{fmt::format(
+                    "^({})_(\\d+)$", fmt::join(m_replayDesc.replacedAgents, "|"))};
+                return std::regex_match(agent->name(), pat);
+            })
+            | views::transform([](auto&& agent) {
+                return agent->name();
+            });
         dispatchMessage(
             m_time.start,
             0,
             "SIMULATION",
-            fmt::format("{}", fmt::join(m_replacedAgents, "|")),
+            fmt::format("{}", fmt::join(replacedAgentNames, "|")),
             "EVENT_SIMULATION_START",
             MessagePayload::create<StartSimulationPayload>(logDir().generic_string()));
         dispatchMessage(
             m_time.start,
             m_time.duration - 1,
             "SIMULATION",
-            fmt::format("{}", fmt::join(m_replacedAgents, "|")),
+            fmt::format("{}", fmt::join(replacedAgentNames, "|")),
             "EVENT_SIMULATION_END",
             MessagePayload::create<EmptyPayload>());
     }
@@ -714,14 +749,26 @@ void Simulation::stop()
 
 //-------------------------------------------------------------------------
 
-bool Simulation::isReplacedAgent(const std::string& name)
+bool Simulation::isReplacedAgent(const std::string& name) const noexcept
 {
     auto name2BaseName = [](auto&& name) {
         std::string res = name;
         boost::algorithm::erase_regex(res, boost::regex("(_\\d+)$"));
         return res;
     };
-    return m_replacedAgents.contains(name2BaseName(name));
+    return m_replayDesc.replacedAgents.contains(name2BaseName(name));
+}
+
+//-------------------------------------------------------------------------
+
+bool Simulation::isInitAgent(const std::string& name) const noexcept
+{
+    auto name2BaseName = [](auto&& name) {
+        std::string res = name;
+        boost::algorithm::erase_regex(res, boost::regex("(_\\d+)$"));
+        return res;
+    };
+    return name2BaseName(name) == "INITIALIZATION_AGENT";
 }
 
 //-------------------------------------------------------------------------

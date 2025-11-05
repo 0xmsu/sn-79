@@ -23,12 +23,15 @@ public:
 
     [[nodiscard]] auto&& valueSignal(this auto&& self) noexcept { return self.m_valueSignal; }
     [[nodiscard]] auto&& updatePeriod(this auto&& self) noexcept { return self.m_updatePeriod; }
+    [[nodiscard]] auto&& values(this auto&& self) noexcept { return self.m_values; }
 
 protected:
     Process() noexcept = default;
 
     ValueSignal m_valueSignal;
     Timestamp m_updatePeriod{1};
+    std::vector<double> m_values;
+    size_t m_valueIdx{};
 };
 
 //-------------------------------------------------------------------------

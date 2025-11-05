@@ -303,6 +303,7 @@ void StylizedTraderAgent::configure(const pugi::xml_node& node)
         boost::algorithm::erase_regex(res, boost::regex("(_\\d+)$"));
         return res;
     }();
+
 }
 
 //-------------------------------------------------------------------------
@@ -577,9 +578,9 @@ void StylizedTraderAgent::placeOrderChiarella(BookId bookId)
 
 
     const auto freeBase =
-        taosim::util::decimal2double(simulation()->account(name()).at(bookId).base.getFree());
+        taosim::util::decimal2double(simulation()->account(name()).at(bookId).base.getFree())*0.99;
     const auto freeQuote =
-        taosim::util::decimal2double(simulation()->account(name()).at(bookId).quote.getFree());
+        taosim::util::decimal2double(simulation()->account(name()).at(bookId).quote.getFree())*0.99;
     const auto [indifferencePrice, indifferencePriceConverged] =
         calculateIndifferencePrice(forecastResult, freeBase, freeQuote);
     if (!indifferencePriceConverged) return;

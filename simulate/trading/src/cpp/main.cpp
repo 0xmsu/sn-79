@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
+#include "taosim/replay/ReplayDesc.hpp"
+#include "taosim/replay/helpers.hpp"
 #include "taosim/simulation/SimulationManager.hpp"
 #include "common.hpp"
 
@@ -31,21 +33,33 @@ int main(int argc, char* argv[])
     initGroup->add_option("-c,--checkpoint-file", checkpoint, "Checkpoint file")
         ->check(CLI::ExistingFile);
 
-    fs::path replayDir;
-    auto optReplayDir = initGroup->add_option(
-        "-r,--replay-dir", replayDir, "Log directory to use in a replay context")
-        ->check(CLI::ExistingDirectory);
+    taosim::replay::ReplayDesc replayDesc;
 
-    std::optional<BookId> bookId;
-    app.add_option("--book-id", bookId, "Book to replay")
+    auto optReplayDir = initGroup->add_option(
+        "-r,--replay-dir", replayDesc.dir, "Log directory to use in a replay context")
+        ->check(CLI::ExistingDirectory)
+        ->transform(&taosim::replay::helpers::cleanReplayPath);
+
+    app.add_option("--book-id", replayDesc.bookId, "Book to replay")
         ->needs(optReplayDir);
 
-    std::vector<std::string> replacedAgents;
     app.add_option(
         "--replaced-agents",
-        replacedAgents,
+        replayDesc.replacedAgents,
         "Comma-separated list of agent base names which to replace during replay")
         ->delimiter(',')
+        ->needs(optReplayDir);
+
+    app.add_flag(
+        "--adjust-limit-prices",
+        replayDesc.adjustLimitPrices,
+        "Adjust limit prices of passive agents using historical mid price data")
+        ->needs(optReplayDir);
+
+    app.add_flag(
+        "--rm,--remove-existing-dir",
+        replayDesc.removeExistingDir,
+        "Remove potentially existing replay directory (DOESN'T DO ANYTHING CURRENTLY)")
         ->needs(optReplayDir);
 
     initGroup->require_option(1);
@@ -57,12 +71,12 @@ int main(int argc, char* argv[])
     if (!checkpoint.empty()) {
         throw std::runtime_error{"Loading from checkpoint currently unsupported!"};
     }
-    if (!replayDir.empty()) {
-        auto mngr = taosim::simulation::SimulationManager::fromReplay(replayDir);
-        if (bookId) {
-            mngr->runReplay(replayDir, *bookId, replacedAgents);
+    if (!replayDesc.dir.empty()) {
+        auto mngr = taosim::simulation::SimulationManager::fromReplay(replayDesc);
+        if (replayDesc.bookId) {
+            mngr->runReplay();
         } else {
-            mngr->runReplayAdvanced(replayDir, replacedAgents);
+            mngr->runReplayAdvanced();
         }
     }
     else {

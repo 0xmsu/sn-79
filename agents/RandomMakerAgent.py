@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 import bittensor as bt
 from taos.common.agents import launch
-from taos.im.agents import FinanceSimulationAgent
+from taos.im.agents import FinanceSimulationAgent, LimitOrderPlacementEvent, OrderCancellationEvent, OrderPlacementEvent, TradeEvent
 from taos.im.protocol.models import *
 from taos.im.protocol.instructions import *
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
@@ -22,8 +22,9 @@ class RandomMakerAgent(FinanceSimulationAgent):
         self.max_quantity = self.config.max_quantity
         self.min_leverage = self.config.min_leverage if hasattr(self.config, 'min_leverage') else 0.0
         self.max_leverage = self.config.max_leverage if hasattr(self.config, 'max_leverage') else 0.0
+        self.max_fee_rate = self.config.max_fee_rate if hasattr(self.config, 'max_fee_rate') else 0.005
         self.expiry_period = self.config.expiry_period
-        self.open_order = {}
+        self.open_orders = {}
 
     def quantity(self):
         """
@@ -54,6 +55,24 @@ class RandomMakerAgent(FinanceSimulationAgent):
         response = FinanceAgentResponse(agent_id=self.uid)
         # Iterate over all the book realizations in the state message
         for book_id, book in state.books.items():
+
+            # NEW: Maker and taker fees will be dynamically moving under the DIS fee policy
+            # The below demonstrates a simple approach for reacting to the changing rates in trading logic
+            previous_maker_rate = self.accounts[book_id].fees.maker_fee_rate
+            # Positive rate implies a fee is to be paid, negative rate results in rebates to the trader
+            # Check the rate against the configured tolerance
+            if previous_maker_rate > self.max_fee_rate:
+                # If the rate exceeds the tolerance, cancel the order closest to the best level,
+                bidOrders = {order.price : order for order in self.accounts[book_id].orders if order.side == OrderDirection.BUY}
+                if bidOrders:
+                    topBid = max(bidOrders.keys())
+                    response.cancel_order(book_id, bidOrders[topBid].id)
+                askOrders = {order.price : order for order in self.accounts[book_id].orders if order.side == OrderDirection.SELL}
+                if askOrders:
+                    topAsk = min(askOrders.keys())
+                    response.cancel_order(book_id, askOrders[topAsk].id)
+                continue
+            
             # If the book is populated (it of course always should be)
             if len(book.bids) > 0 and len(book.asks) > 0:
                 # Calculate placement prices for new orders to be a random distance between the current best bid and best ask
@@ -126,10 +145,10 @@ class RandomMakerAgent(FinanceSimulationAgent):
         # Return the response with instructions appended
         # The response will be serialized and sent back to the validator for processing
         return response
-
+    
 if __name__ == "__main__":
     """
     Example command for local standalone testing execution using Proxy:
-    python RandomMakerAgent.py --port 8888 --agent_id 0 --params min_quantity=0.1 max_quantity=1.0 min_leverage=0.0 max_leverage=1.0 expiry_period=200000000000
+    python RandomMakerAgent.py --port 8888 --agent_id 0 --params min_quantity=0.1 max_quantity=1.0 min_leverage=0.0 max_leverage=1.0 expiry_period=200000000000 max_fee_rate=0.002
     """
     launch(RandomMakerAgent)

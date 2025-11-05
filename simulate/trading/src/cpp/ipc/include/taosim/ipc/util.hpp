@@ -17,13 +17,12 @@ namespace taosim::ipc
 {
     timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    auto total = ts.tv_nsec + ns;
-    static constexpr size_t nsInSecs = 1'000'000'000;
-    ts.tv_sec += ns / nsInSecs;
-    ts.tv_nsec += ns % nsInSecs;
-    if (ts.tv_nsec >= nsInSecs) {
+    static constexpr size_t nanos = 1'000'000'000;
+    ts.tv_sec += ns / nanos;
+    ts.tv_nsec += ns % nanos;
+    if (ts.tv_nsec >= nanos) {
         ++ts.tv_sec;
-        ts.tv_nsec -= nsInSecs;
+        ts.tv_nsec -= nanos;
     }
     return ts;
 }

@@ -33,11 +33,16 @@ JumpDiffusion::JumpDiffusion(double X0, double mu, double sigma, double dt, doub
 
 void JumpDiffusion::update(Timestamp timestamp)
 {
-    m_t += m_dt;
-    m_W += m_gaussian(m_rng);
-    m_dJ += m_poisson(m_rng)* m_jump(m_rng);
-    
-    m_value = m_X0 * std::exp((m_mu - 0.5 * m_sigma * m_sigma) * m_t + m_sigma * m_W + m_dJ);
+    if (m_values.empty()) {
+        m_t += m_dt;
+        m_W += m_gaussian(m_rng);
+        m_dJ += m_poisson(m_rng) * m_jump(m_rng);
+        m_value = m_X0 * std::exp((m_mu - 0.5 * m_sigma * m_sigma) * m_t + m_sigma * m_W + m_dJ);
+    }
+    else {
+        m_value = m_values.at(m_valueIdx);
+        m_valueIdx = std::min(m_valueIdx + 1, m_values.size() - 1);
+    }
     m_valueSignal(m_value);
 }
 

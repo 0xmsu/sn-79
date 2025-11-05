@@ -68,18 +68,7 @@ void Trade::jsonSerialize(rapidjson::Document& json, const std::string& key) con
 
 void Trade::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("tradeId", rapidjson::Value{m_id}, allocator);
-        json.AddMember("timestamp", rapidjson::Value{m_timestamp}, allocator);
-        json.AddMember("direction", rapidjson::Value{std::to_underlying(m_direction)}, allocator);
-        json.AddMember("aggressingOrderId", rapidjson::Value{m_aggressingOrderID}, allocator);
-        json.AddMember("restingOrderId", rapidjson::Value{m_restingOrderID}, allocator);
-        json.AddMember("volume", rapidjson::Value{taosim::util::packDecimal(m_volume)}, allocator);
-        json.AddMember("price", rapidjson::Value{taosim::util::packDecimal(m_price)}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------

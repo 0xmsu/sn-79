@@ -87,15 +87,7 @@ void BasicOrder::jsonSerialize(rapidjson::Document& json, const std::string& key
 
 void BasicOrder::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("orderId", rapidjson::Value{m_id}, allocator);
-        json.AddMember("timestamp", rapidjson::Value{m_timestamp}, allocator);
-        json.AddMember("volume", rapidjson::Value{taosim::util::packDecimal(m_volume)}, allocator);
-        json.AddMember("leverage", rapidjson::Value{taosim::util::packDecimal(m_leverage)}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------
@@ -385,12 +377,7 @@ void LimitOrder::jsonSerialize(rapidjson::Document &json, const std::string &key
 
 void LimitOrder::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        Order::checkpointSerialize(json);
-        auto& allocator = json.GetAllocator();
-        json.AddMember("price", rapidjson::Value{taosim::util::packDecimal(m_price)}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------

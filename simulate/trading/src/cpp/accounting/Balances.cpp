@@ -177,7 +177,8 @@ std::vector<std::pair<OrderID, decimal_t>> Balances::commit(
     OrderDirection direction,
     decimal_t amount,
     decimal_t counterAmount,
-    decimal_t fee,
+    decimal_t feeBase,
+    decimal_t feeQuote, // always negative in BUY
     decimal_t bestBid,
     decimal_t bestAsk,
     decimal_t marginCallPrice,
@@ -186,23 +187,26 @@ std::vector<std::pair<OrderID, decimal_t>> Balances::commit(
 {
     
     amount = roundAmount(amount, direction);
-    fee = roundAmount(fee, OrderDirection::BUY);
+    if (direction == OrderDirection::BUY && feeQuote < 0_dec){
+        quote.deposit(roundQuote(-feeQuote), bookId);
+        feeQuote = 0_dec;
+    }
+    decimal_t fee = (direction == OrderDirection::BUY) ? roundBase(feeBase) : roundQuote(feeQuote);
     const auto leverage = getLeverage(id, direction);
 
     if (leverage == 0_dec) {
         if (direction == OrderDirection::BUY) {
-            quote.voidReservation(id, bookId, amount + fee);
-            base.deposit(counterAmount, bookId);
+            quote.voidReservation(id, bookId, amount);
+            base.deposit(counterAmount - fee, bookId);
         } else {
             base.voidReservation(id, bookId, amount);
             quote.deposit(counterAmount - fee, bookId);
         }
     } else {
+        borrow(id, direction, amount, leverage, bestBid, bestAsk, marginCallPrice, bookId);
         if (direction == OrderDirection::BUY) {
-            borrow(id, direction, amount + fee, leverage, bestBid, bestAsk, marginCallPrice, bookId);
-            base.deposit(counterAmount, bookId);
+            base.deposit(counterAmount - fee, bookId);
         } else {
-            borrow(id, direction, amount, leverage, bestBid, bestAsk, marginCallPrice, bookId);
             quote.deposit(counterAmount - fee, bookId);
         }
     }
@@ -214,7 +218,7 @@ std::vector<std::pair<OrderID, decimal_t>> Balances::commit(
         } else if (type == SettleType::FIFO) {
             const auto& ids = settleLoan(
                 direction, 
-                direction == OrderDirection::BUY ? counterAmount : counterAmount - fee, 
+                (fee < 0_dec) ? counterAmount : counterAmount - fee,
                 direction == OrderDirection::BUY ? bestAsk : bestBid, bookId);
             return ids;
         }
@@ -222,7 +226,7 @@ std::vector<std::pair<OrderID, decimal_t>> Balances::commit(
         OrderID marginOrderId = std::get<OrderID>(settleFlag);
         const auto& ids = settleLoan(
             direction, 
-            direction == OrderDirection::BUY ? counterAmount : counterAmount - fee, 
+            (fee < 0_dec) ? counterAmount : counterAmount - fee,
             direction == OrderDirection::BUY ? bestAsk : bestBid, bookId,
             marginOrderId);
         return ids;

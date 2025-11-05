@@ -6,7 +6,7 @@
 #include "taosim/simulation/SimulationManager.hpp"
 #include "taosim/simulation/serialization/ValidatorRequest.hpp"
 #include "taosim/simulation/serialization/ValidatorResponse.hpp"
-#include "taosim/simulation/replay_helpers.hpp"
+#include "taosim/replay/helpers.hpp"
 #include "taosim/simulation/util.hpp"
 #include "taosim/message/MultiBookMessagePayloads.hpp"
 
@@ -63,113 +63,44 @@ void SimulationManager::runSimulations()
 
 //-------------------------------------------------------------------------
 
-void SimulationManager::runReplay(
-    const fs::path& replayDir, BookId bookId, std::span<const std::string> replacedAgents)
+void SimulationManager::runReplay()
 {
     static constexpr auto ctx = std::source_location::current().function_name();
 
-    for (const auto& simulation : m_simulations) {
-        simulation->replacedAgents() = {replacedAgents.begin(), replacedAgents.end()};
+    const auto& replayDesc = m_replayManager->desc();
+
+    const auto& simulation = m_simulations.at(*replayDesc.bookId / m_blockInfo.dimension);
+
+    for (const auto& [simulation, path] : views::zip(m_simulations, m_replayManager->initialBalancesPaths())) {
+        rapidjson::Document balancesJson = json::loadJson(path);
+        for (const auto& member : balancesJson.GetObject()) {
+            const auto name = member.name.GetString();
+            const AgentId agentId = std::stoi(name);
+            BookId bookId{};
+            for (const auto& balsJson : balancesJson[name].GetArray()) {
+                auto& bals = simulation->exchange()->accounts().at(agentId).at(bookId);
+                bals.base = taosim::accounting::Balance(
+                    taosim::json::getDecimal(balsJson["base"]),
+                    "",
+                    bals.m_roundParams.baseDecimals);
+                bals.quote = taosim::accounting::Balance(
+                    taosim::json::getDecimal(balsJson["quote"]),
+                    "",
+                    bals.m_roundParams.quoteDecimals);
+                ++bookId;
+            }
+        }
     }
 
-    auto it = ranges::find_if(
-        m_simulations,
-        [&](const auto& sim) { return sim->blockIdx() == bookId / m_blockInfo.dimension; });
-    if (it == m_simulations.end()) {
-        throw std::runtime_error{fmt::format(
-            "{}: Could not find simulation matching bookId {} within {}; "
-            "blockInfo was {{.count = {}, .dimension = {}}}",
-            ctx, bookId, replayDir.c_str(), m_blockInfo.count, m_blockInfo.dimension)};
-    }
-    const auto& simulation = *it;
-
-    auto bookIdToReplayLogPaths = [&] {
-        std::vector<fs::path> replayLogPaths;
-        const std::regex pat{R"(^Replay-\d+\.\d{8}-\d{8}\.log$)"};
-        for (const auto& entry : fs::directory_iterator(replayDir)) {
-            const auto path = entry.path();
-            if (entry.is_regular_file() && std::regex_match(path.filename().string(), pat)) {
-                replayLogPaths.push_back(path);
-            }
-        }
-        auto parseBookId = [](auto&& path) {
-            const auto filenameStr = path.filename().string();
-            const std::regex pat{R"(^Replay-(\d+).*)"};
-            if (std::smatch match; std::regex_match(filenameStr, match, pat)) {
-                return std::stoul(match[1]);
-            }
-            return std::numeric_limits<uint64_t>::max();
-        };
-        std::vector<std::vector<fs::path>> res;
-        res.resize(m_blockInfo.count * m_blockInfo.dimension);
-        for (auto&& path : replayLogPaths) {
-            res.at(parseBookId(path)).push_back(path);
-        }
-        for (auto&& paths : res) {
-            ranges::sort(
-                paths,
-                [&](auto&& lhs, auto&& rhs) {
-                    const auto lhsStr = lhs.filename().string();
-                    const auto rhsStr = rhs.filename().string();
-                    const std::regex pat{R"(^Replay-(\d+)\.(\d{8})-(\d{8})\.log$)"};
-                    std::smatch matchLhs;
-                    std::regex_search(lhsStr, matchLhs, pat);
-                    std::smatch matchRhs;
-                    std::regex_search(rhsStr, matchRhs, pat);
-                    return std::stoi(matchLhs[2]) < std::stoi(matchRhs[2]);
-                });
-        }
-        return res;
-    }();
-
-    [&] {
-        std::vector<fs::path> replayBalancesPaths;
-        const std::regex pat{R"(^Replay-Balances-(\d+)-(\d+)\.json$)"};
-        for (const auto& entry : fs::directory_iterator(replayDir)) {
-            const auto path = entry.path();
-            if (entry.is_regular_file() && std::regex_match(path.filename().string(), pat)) {
-                replayBalancesPaths.push_back(path);
-            }
-        }
-        ranges::sort(
-            replayBalancesPaths,
-            [&](auto&& lhs, auto&& rhs) {
-                const auto lhsStr = lhs.filename().string();
-                std::smatch matchLhs;
-                std::regex_search(lhsStr, matchLhs, pat);
-                const auto rhsStr = rhs.filename().string();
-                std::smatch matchRhs;
-                std::regex_search(rhsStr, matchRhs, pat);
-                return std::stoi(matchLhs[1]) < std::stoi(matchRhs[1]);
-            });
-        for (const auto& [simulation, path] : views::zip(m_simulations, replayBalancesPaths)) {
-            rapidjson::Document balancesJson = json::loadJson(path);
-            for (const auto& member : balancesJson.GetObject()) {
-                const auto name = member.name.GetString();
-                const AgentId agentId = std::stoi(name);
-                BookId bookId{};
-                for (const auto& balsJson : balancesJson[name].GetArray()) {
-                    auto& bals = simulation->exchange()->accounts().at(agentId).at(bookId);
-                    bals.base = taosim::accounting::Balance(
-                        taosim::json::getDecimal(balsJson["base"]),
-                        "",
-                        bals.m_roundParams.baseDecimals);
-                    bals.quote = taosim::accounting::Balance(
-                        taosim::json::getDecimal(balsJson["quote"]),
-                        "",
-                        bals.m_roundParams.quoteDecimals);
-                    ++bookId;
-                }
-            }
-        }
-    }();
-
-    for (const auto& replayLogFile : bookIdToReplayLogPaths.at(bookId)) {
+    for (auto&& pathGroup : m_replayManager->runtimePathGroups()[*replayDesc.bookId]) {
+        auto&& [replayLogFile, L2LogFile] = pathGroup;
         std::ifstream ifs{replayLogFile, std::ios::in};
         std::vector<std::string> lines;
         std::string buf;
         std::getline(ifs, buf);
         size_t lineCounter{1};
+        simulation->timestampToMidPrice() =
+            replay::helpers::makeTimestampToMidPriceMapping(L2LogFile);
         while (true) {
             lines.clear();
             while (std::getline(ifs, buf)) {
@@ -178,7 +109,7 @@ void SimulationManager::runReplay(
             }
             if (lines.empty()) break;
             for (const auto& line : lines) {
-                Message::Ptr msg = replay_helpers::createMessageFromLogFileEntry(line, lineCounter);
+                Message::Ptr msg = replay::helpers::createMessageFromLogFileEntry(line, lineCounter);
                 if (simulation->isReplacedAgent(msg->source)) continue;
                 simulation->queueMessage(msg);
                 simulation->time().duration = msg->arrival;
@@ -191,96 +122,32 @@ void SimulationManager::runReplay(
 
 //-------------------------------------------------------------------------
 
-void SimulationManager::runReplayAdvanced(
-    const fs::path& replayDir, std::span<const std::string> replacedAgents)
+void SimulationManager::runReplayAdvanced()
 {
     static constexpr auto ctx = std::source_location::current().function_name();
 
-    for (const auto& simulation : m_simulations) {
-        simulation->replacedAgents() = {replacedAgents.begin(), replacedAgents.end()};
+    const auto& replayDesc = m_replayManager->desc();
+
+    for (const auto& [simulation, path] : views::zip(m_simulations, m_replayManager->initialBalancesPaths())) {
+        rapidjson::Document balancesJson = json::loadJson(path);
+        for (const auto& member : balancesJson.GetObject()) {
+            const auto name = member.name.GetString();
+            const AgentId agentId = std::stoi(name);
+            BookId bookId{};
+            for (const auto& balsJson : balancesJson[name].GetArray()) {
+                auto& bals = simulation->exchange()->accounts().at(agentId).at(bookId);
+                bals.base = taosim::accounting::Balance(
+                    taosim::json::getDecimal(balsJson["base"]),
+                    "",
+                    bals.m_roundParams.baseDecimals);
+                bals.quote = taosim::accounting::Balance(
+                    taosim::json::getDecimal(balsJson["quote"]),
+                    "",
+                    bals.m_roundParams.quoteDecimals);
+                ++bookId;
+            }
+        }
     }
-
-    auto bookIdToReplayLogPaths = [&] {
-        std::vector<fs::path> replayLogPaths;
-        const std::regex pat{R"(^Replay-\d+\.\d{8}-\d{8}\.log$)"};
-        for (const auto& entry : fs::directory_iterator(replayDir)) {
-            const auto path = entry.path();
-            if (entry.is_regular_file() && std::regex_match(path.filename().string(), pat)) {
-                replayLogPaths.push_back(path);
-            }
-        }
-        auto parseBookId = [](auto&& path) {
-            const auto filenameStr = path.filename().string();
-            const std::regex pat{R"(^Replay-(\d+).*)"};
-            if (std::smatch match; std::regex_match(filenameStr, match, pat)) {
-                return std::stoul(match[1]);
-            }
-            return std::numeric_limits<uint64_t>::max();
-        };
-        std::vector<std::vector<fs::path>> res;
-        res.resize(m_blockInfo.count * m_blockInfo.dimension);
-        for (auto&& path : replayLogPaths) {
-            res.at(parseBookId(path)).push_back(path);
-        }
-        for (auto&& paths : res) {
-            ranges::sort(
-                paths,
-                [&](auto&& lhs, auto&& rhs) {
-                    const auto lhsStr = lhs.filename().string();
-                    const auto rhsStr = rhs.filename().string();
-                    const std::regex pat{R"(^Replay-(\d+)\.(\d{8})-(\d{8})\.log$)"};
-                    std::smatch matchLhs;
-                    std::regex_search(lhsStr, matchLhs, pat);
-                    std::smatch matchRhs;
-                    std::regex_search(rhsStr, matchRhs, pat);
-                    return std::stoi(matchLhs[2]) < std::stoi(matchRhs[2]);
-                });
-        }
-        return res;
-    }();
-
-    [&] {
-        std::vector<fs::path> replayBalancesPaths;
-        const std::regex pat{R"(^Replay-Balances-(\d+)-(\d+)\.json$)"};
-        for (const auto& entry : fs::directory_iterator(replayDir)) {
-            const auto path = entry.path();
-            if (entry.is_regular_file() && std::regex_match(path.filename().string(), pat)) {
-                replayBalancesPaths.push_back(path);
-            }
-        }
-        ranges::sort(
-            replayBalancesPaths,
-            [&](auto&& lhs, auto&& rhs) {
-                const auto lhsStr = lhs.filename().string();
-                std::smatch matchLhs;
-                std::regex_search(lhsStr, matchLhs, pat);
-                const auto rhsStr = rhs.filename().string();
-                std::smatch matchRhs;
-                std::regex_search(rhsStr, matchRhs, pat);
-                return std::stoi(matchLhs[1]) < std::stoi(matchRhs[1]);
-            });
-        ranges::sort(replayBalancesPaths);
-        for (const auto& [simulation, path] : views::zip(m_simulations, replayBalancesPaths)) {
-            rapidjson::Document balancesJson = json::loadJson(path);
-            for (const auto& member : balancesJson.GetObject()) {
-                const auto name = member.name.GetString();
-                const AgentId agentId = std::stoi(name);
-                BookId bookId{};
-                for (const auto& balsJson : balancesJson[name].GetArray()) {
-                    auto& bals = simulation->exchange()->accounts().at(agentId).at(bookId);
-                    bals.base = taosim::accounting::Balance(
-                        taosim::json::getDecimal(balsJson["base"]),
-                        "",
-                        bals.m_roundParams.baseDecimals);
-                    bals.quote = taosim::accounting::Balance(
-                        taosim::json::getDecimal(balsJson["quote"]),
-                        "",
-                        bals.m_roundParams.quoteDecimals);
-                    ++bookId;
-                }
-            }
-        }
-    }();
 
     struct BookReplayFilesState
     {
@@ -313,7 +180,7 @@ void SimulationManager::runReplayAdvanced(
         }
     };
 
-    auto bookIdToReplayFilesState = bookIdToReplayLogPaths
+    /*auto bookIdToReplayFilesState = bookIdToReplayLogPaths
         | views::transform([](auto&& replayLogPaths) {
             return BookReplayFilesState{
                 .fileStreams = replayLogPaths
@@ -340,7 +207,7 @@ void SimulationManager::runReplayAdvanced(
             std::string lineBuf;
             while (true) {
                 if (!state.getLine(lineBuf)) break;
-                const auto msg = replay_helpers::createMessageFromLogFileEntry(
+                const auto msg = replay::helpers::createMessageFromLogFileEntry(
                     lineBuf, state.currentLineCounter() - 1);
                 if (simulation->isReplacedAgent(msg->source)) continue;
                 simulation->queueMessage(msg);
@@ -348,7 +215,7 @@ void SimulationManager::runReplayAdvanced(
                 if (msg->arrival >= cutoff) break;
             }
         }
-    });
+    });*/
 
     runSimulations();
 }
@@ -894,7 +761,8 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(const fs::path&
     mngr->m_simulations =
         views::iota(0u, mngr->m_blockInfo.count)
         | views::transform([&](auto blockIdx) {
-            auto simulation = std::make_unique<Simulation>(blockIdx, mngr->m_logDir);
+            auto simulation = std::make_unique<Simulation>(
+                blockIdx, mngr->m_blockInfo.dimension, mngr->m_logDir);
             simulation->configure(node);
             return simulation;
         })
@@ -948,25 +816,17 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(const fs::path&
 
 //-------------------------------------------------------------------------
 
-std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const fs::path& replayDir)
+std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const replay::ReplayDesc& desc)
 {
     static constexpr auto ctx = std::source_location::current().function_name();
 
     pugi::xml_document doc;
-    const fs::path configPath = replayDir / "config.xml";;
+    const fs::path configPath = desc.dir / "config.xml";;
     pugi::xml_parse_result result = doc.load_file(configPath.c_str());
     fmt::println(" - '{}' loaded successfully", configPath.c_str());
     pugi::xml_node node = doc.child("Simulation");
     node.attribute("id").set_value(
-        fmt::format(
-            "{}-replay",
-            [&] -> fs::path {
-                const auto replayDirStr = replayDir.string();
-                if (replayDirStr.ends_with(fs::path::preferred_separator)) {
-                    return replayDirStr.substr(0, replayDirStr.size() - 1);
-                }
-                return replayDir;
-            }().filename().c_str()).c_str());
+        fmt::format("{}-replay", desc.dir.filename().c_str()).c_str());
     
     static constexpr const char* replayNodeName = "Replay";
     auto replayLogNode = node.child("Agents")
@@ -1011,16 +871,25 @@ std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const fs::path&
             mngr->m_io.stop();
         });
 
+    mngr->m_replayManager = std::make_unique<replay::ReplayManager>(
+        desc,
+        [&](const replay::ReplayDesc& desc) {
+            if (desc.bookId && !(*desc.bookId < mngr->m_blockInfo.count * mngr->m_blockInfo.dimension)) {
+                throw replay::helpers::ReplayError{"bookId out of range"};
+            }
+        });
+
     mngr->setupLogDir(node);
-    mngr->m_simulations =
-        views::iota(0u, mngr->m_blockInfo.count)
-        | views::transform([&](auto blockIdx) {
-            auto simulation = std::make_unique<Simulation>(blockIdx, mngr->m_logDir);
+    mngr->m_simulations = [&] {
+        std::vector<std::unique_ptr<Simulation>> res;
+        for (uint32_t blockIdx{}; blockIdx < mngr->m_blockInfo.count; ++blockIdx) {
+            auto simulation = std::make_unique<Simulation>(
+                blockIdx, mngr->m_blockInfo.dimension, mngr->m_logDir, true, desc);
             simulation->configure(node);
-            simulation->exchange()->replayMode() = true;
-            return simulation;
-        })
-        | ranges::to<std::vector>;
+            res.push_back(std::move(simulation));
+        }
+        return res;
+    }();
 
     mngr->m_gracePeriod = node.child("Agents")
         .child("MultiBookExchangeAgent")

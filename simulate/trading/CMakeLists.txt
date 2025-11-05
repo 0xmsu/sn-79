@@ -10,13 +10,24 @@ project(taosim CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+file(WRITE "${CMAKE_BINARY_DIR}/.gitignore" "*")
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(OVERRIDE_NEW_DELETE "Override the C++ canonical allocation interface with mimalloc alternatives" ON)
 option(BUILD_TESTS "Build test suite" OFF)
 option(BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(ENABLE_ASAN "Enable address sanitizer" OFF)
+
+if(ENABLE_ASAN)
+    if(NOT UNIX)
+        message(FATAL_ERROR "ASan requires Unix")
+    endif()
+    string(APPEND CMAKE_CXX_FLAGS " -fsanitize=address")
+endif()
 
 set(src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp" CACHE STRING "C++ source directory")
 

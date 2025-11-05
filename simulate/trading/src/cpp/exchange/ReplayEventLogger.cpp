@@ -119,9 +119,9 @@ rapidjson::Document ReplayEventLogger::makeLogEntryJson(Message::Ptr msg)
             payloadJson.AddMember(
                 "d", rapidjson::Value{std::to_underlying(pld->direction)}, allocator);
             payloadJson.AddMember(
-                "v", rapidjson::Value{util::packDecimal(pld->volume)}, allocator);
+                "v", json::packedDecimal2json(pld->volume, allocator), allocator);
             payloadJson.AddMember(
-                "l", rapidjson::Value{util::packDecimal(pld->leverage)}, allocator);
+                "l", json::packedDecimal2json(pld->leverage, allocator), allocator);
             payloadJson.AddMember(
                 "b", rapidjson::Value{pld->bookId}, allocator);
             payloadJson.AddMember(
@@ -151,11 +151,11 @@ rapidjson::Document ReplayEventLogger::makeLogEntryJson(Message::Ptr msg)
             payloadJson.AddMember(
                 "d", rapidjson::Value{std::to_underlying(pld->direction)}, allocator);
             payloadJson.AddMember(
-                "v", rapidjson::Value{util::packDecimal(pld->volume)}, allocator);
+                "v", json::packedDecimal2json(pld->volume, allocator), allocator);
             payloadJson.AddMember(
-                "p", rapidjson::Value{util::packDecimal(pld->price)}, allocator);
+                "p", json::packedDecimal2json(pld->price, allocator), allocator);
             payloadJson.AddMember(
-                "l", rapidjson::Value{util::packDecimal(pld->leverage)}, allocator);
+                "l", json::packedDecimal2json(pld->leverage, allocator), allocator);
             payloadJson.AddMember(
                 "b", rapidjson::Value{pld->bookId}, allocator);
             payloadJson.AddMember(
@@ -186,6 +186,11 @@ rapidjson::Document ReplayEventLogger::makeLogEntryJson(Message::Ptr msg)
                     }
                 },
                 pld->settleFlag);
+            payloadJson.AddMember(
+                "m",
+                json::packedDecimal2json(
+                    m_simulation->exchange()->books()[pld->bookId]->midPrice(), allocator),
+                allocator);
         }
         else if (const auto pld = std::dynamic_pointer_cast<CancelOrdersPayload>(payload)) {
             payloadJson.AddMember(
@@ -197,7 +202,9 @@ rapidjson::Document ReplayEventLogger::makeLogEntryJson(Message::Ptr msg)
                         cancellationJson.AddMember("i", rapidjson::Value{cancellation.id}, allocator);
                         if (cancellation.volume) {
                             cancellationJson.AddMember(
-                                "v", util::packDecimal(cancellation.volume.value()), allocator);
+                                "v",
+                                json::packedDecimal2json(cancellation.volume.value(), allocator),
+                                allocator);
                         } else {
                             cancellationJson.AddMember(
                                 "v", rapidjson::Value{}.SetNull(), allocator);
@@ -219,7 +226,9 @@ rapidjson::Document ReplayEventLogger::makeLogEntryJson(Message::Ptr msg)
                         closePositionJson.AddMember("i", rapidjson::Value{closePosition.id}, allocator);
                         if (closePosition.volume) {
                             closePositionJson.AddMember(
-                                "v", util::packDecimal(closePosition.volume.value()), allocator);
+                                "v",
+                                json::packedDecimal2json(closePosition.volume.value(), allocator),
+                                allocator);
                         } else {
                             closePositionJson.AddMember(
                                 "v", rapidjson::Value{}.SetNull(), allocator);

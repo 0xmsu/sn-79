@@ -29,59 +29,39 @@ struct TradeDesc
     Trade::Ptr trade;
 };
 
-struct Tier
-{
-    decimal_t volumeRequired;
-    decimal_t makerFeeRate;
-    decimal_t takerFeeRate;
-};
-
-struct FeePolicyDesc
-{
-    Simulation* simulation;
-    int historySlots;
-    Timestamp slotPeriod;
-    std::vector<Tier> tiers;
-};
-
 //-------------------------------------------------------------------------
 
 class FeePolicy
 {
 public:
-    explicit FeePolicy(const FeePolicyDesc& desc);
+    virtual ~FeePolicy() = default;
 
-    virtual Fees calculateFees(const TradeDesc& tradeDesc) const;
+    virtual Fees calculateFees(const TradeDesc& tradeDesc) const = 0;
+    // virtual void updateAgentsTiers() noexcept = 0;
+    virtual void updateHistory(Timestamp timestamp, BookId bookId, AgentId agentId, decimal_t volume, 
+        std::optional<bool> isAggressive = {}) = 0;
+    virtual void resetHistory() noexcept = 0;
+    virtual void resetHistory(const std::unordered_set<AgentId>& agentIds) noexcept = 0;
+    virtual Fees getRates(BookId bookId, AgentId agentId) const = 0;
+    // virtual decimal_t agentVolumes(this auto&& self) noexcept = 0;
     
-    void updateAgentsTiers() noexcept;
-    void updateHistory(BookId bookId, AgentId agentId, decimal_t volume) noexcept;
-    void resetHistory() noexcept;
-    void resetHistory(const std::unordered_set<AgentId>& agentIds) noexcept;
-    virtual Fees getRates(BookId bookId, AgentId agentId) const noexcept;
-    
-    [[nodiscard]] static std::unique_ptr<FeePolicy> fromXML(
-        pugi::xml_node node, Simulation* simulation);
-        
-    [[nodiscard]] auto&& historySlots(this auto&& self) noexcept { return self.m_historySlots; }
-    [[nodiscard]] auto&& slotPeriod(this auto&& self) noexcept { return self.m_slotPeriod; }
-    [[nodiscard]] auto&& tiers(this auto&& self) noexcept { return self.m_tiers; }
-    [[nodiscard]] auto&& agentTiers(this auto&& self) noexcept { return self.m_agentTiers; }
-    [[nodiscard]] auto&& agentVolumes(this auto&& self) noexcept { return self.m_agentVolumes; }
-        
-protected:
-    using TierIdx = int32_t;
+    // [[nodiscard]] static std::unique_ptr<FeePolicy> fromXML(
+    //     pugi::xml_node node, Simulation* simulation);
 
-    [[nodiscard]] const Tier& findTierForVolume(decimal_t volume) const noexcept;
-    [[nodiscard]] const Tier& findTierForAgent(BookId bookId, AgentId agentId) const noexcept;
+    static decimal_t checkFeeRate(double feeRate)
+    {
+        static constexpr double feeRateMin{-1.0}, feeRateMax{1.0};
 
-    Simulation* m_simulation;
-    int m_historySlots;
-    Timestamp m_slotPeriod;
-    std::vector<Tier> m_tiers;
-    std::map<AgentId, std::map<BookId, TierIdx>> m_agentTiers;
-    std::map<AgentId, std::map<BookId, std::vector<decimal_t>>> m_agentVolumes;
+        if (!(feeRateMin < feeRate && feeRate < feeRateMax)) {
+            throw std::invalid_argument{fmt::format(
+                "{}: Fee should be between {} and {}; was {}",
+                std::source_location::current().function_name(),
+                feeRateMin, feeRateMax, feeRate)};
+        }
 
-    static decimal_t checkFeeRate(double feeRate);
+        return decimal_t{feeRate};
+    }
+
 };
 
 //-------------------------------------------------------------------------

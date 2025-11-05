@@ -88,10 +88,13 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
 
                 o.pack(bookIdCanon);
 
-                o.pack_map(4);
+                o.pack_map(5);
 
                 o.pack("i"s);
                 o.pack(bookIdCanon);
+
+                o.pack("mtr"s);
+                o.pack(exchange->clearingManager().feePolicy()->mtr(book->id(), 0));
 
                 o.pack("e"s);
                 o.pack(exchange->L3Record().at(book->id()));
@@ -313,12 +316,21 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
                     }
 
                     o.pack("f"s);
+
                     o.pack_map(3);
+
                     o.pack("v"s);
-                    o.pack(feePolicy->agentVolume(book->id(), agentId));
+                    if (feePolicy->isTiered()) {
+                        o.pack(feePolicy->agentVolume(book->id(), agentId));
+                    } else {
+                        o.pack_nil();
+                    }
+
                     const auto rates = feePolicy->getRates(book->id(), agentId);
+
                     o.pack("m"s);
                     o.pack(rates.maker);
+
                     o.pack("t"s);
                     o.pack(rates.taker);
                 }

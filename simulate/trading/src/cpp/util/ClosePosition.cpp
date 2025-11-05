@@ -22,14 +22,7 @@ void ClosePosition::jsonSerialize(rapidjson::Document& json, const std::string& 
 
 void ClosePosition::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("event", rapidjson::Value{"close", allocator}, allocator);
-        json.AddMember("orderId", rapidjson::Value{id}, allocator);
-        taosim::json::setOptionalMember(json, "volume", volume.transform(&taosim::util::packDecimal));
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------

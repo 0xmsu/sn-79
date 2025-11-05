@@ -517,6 +517,14 @@ class TradeEvent(FinanceEvent):
     def quantity(self) ->float:
         return self.q
     
+    @property
+    def makerFeeRate(self) ->float:
+        return self.makerFee / (self.quantity * self.price)
+    
+    @property
+    def takerFeeRate(self) ->float:
+        return self.takerFee / (self.quantity * self.price)
+    
     @classmethod
     def from_json(self, json : dict):
         """

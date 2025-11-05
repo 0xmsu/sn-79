@@ -251,7 +251,7 @@ protected:
         static constexpr Timestamp kStepSize = 10;
         nodes = taosim::util::parseSimulationFile(kTestDataPath / "MultiAgentFees.xml");
         simulation = std::make_unique<Simulation>();
-        simulation->setDebug(true);
+        simulation->setDebug(false);///####
         simulation->configure(nodes.simulation);
         exchange = simulation->exchange();
         book = exchange->books()[bookId];
@@ -433,7 +433,7 @@ protected:
         static constexpr Timestamp kStepSize = 10;
         nodes = taosim::util::parseSimulationFile(kTestDataPath / "MultiAgentFees.xml");
         simulation = std::make_unique<Simulation>();
-        simulation->setDebug(true);
+        simulation->setDebug(false);///####
         simulation->configure(nodes.simulation);
         exchange = simulation->exchange();
         book = exchange->books()[bookId];

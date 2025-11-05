@@ -7,6 +7,8 @@
 #include "Simulation.hpp"
 #include "taosim/exchange/ExchangeConfig.hpp"
 
+#include <rapidcsv.h>
+
 //-------------------------------------------------------------------------
 
 BookProcessManager::BookProcessManager(
@@ -95,37 +97,49 @@ std::unique_ptr<BookProcessManager> BookProcessManager::fromXML(
     static constexpr auto ctx = std::source_location::current().function_name();
 
     if (std::string_view name = node.name(); name != "Books") {
-        throw std::invalid_argument(fmt::format(
-            "{}: Instantiation node should be 'Books', was '{}'", ctx, name));
+        throw std::invalid_argument{fmt::format(
+            "{}: Instantiation node should be 'Books', was '{}'", ctx, name)};
     }
 
     const uint32_t bookCount = node.attribute("instanceCount").as_uint(1);
+    const std::pair bookIdCanonRange{
+        simulation->blockIdx() * bookCount,
+        simulation->blockIdx() * bookCount + bookCount - 1
+    };
 
     auto processFactory = std::make_unique<ProcessFactory>(simulation, exchangeConfig);
 
     ProcessContainer container;
     LoggerContainer loggers;
+
     for (pugi::xml_node processNode : node.child("Processes")) {
-        ProcessContainer::mapped_type bookId2Process(bookCount);
-        for (BookId bookId = 0; bookId < bookCount; ++bookId) {
-            bookId2Process[bookId] = processFactory->createFromXML(processNode, simulation->blockIdx()* bookCount + bookId);
-        }
         pugi::xml_attribute attr;
         if (attr = processNode.attribute("name"); attr.empty()) {
-            throw std::invalid_argument(fmt::format(
-                "{}: Node '{}' missing required attribute '{}'",
-                ctx,
-                processNode.name(),
-                "name"));
+            throw std::invalid_argument{fmt::format(
+                "{}: Node '{}' missing required attribute 'name'", ctx, processNode.name())};
         }
         const std::string name = attr.as_string();
+        const auto processLogFileName =
+            fmt::format("{}.{}-{}.csv", name, bookIdCanonRange.first, bookIdCanonRange.second);
+        ProcessContainer::mapped_type bookId2Process(bookCount);
+        auto replayCsv = [&] -> std::optional<rapidcsv::Document> {
+            if (!simulation->replayMode()) return {};
+            const auto path = simulation->replayDesc().dir / processLogFileName;
+            return std::make_optional<rapidcsv::Document>(path);
+        }();
+        for (BookId bookId = 0; bookId < bookCount; ++bookId) {
+            auto process = processFactory->createFromXML(
+                processNode, simulation->blockIdx() * bookCount + bookId);
+            if (replayCsv) {
+                const auto values = (*replayCsv).GetColumn<double>(
+                    std::to_string(simulation->bookIdCanon(bookId)));
+                process->values() = values | views::drop(1) | ranges::to<std::vector>;
+            }
+            bookId2Process[bookId] = std::move(process);
+        }
         container[name] = std::move(bookId2Process);
         loggers[name] = std::make_unique<BookProcessLogger>(
-            simulation->logDir() /
-                fmt::format("{}.{}-{}.csv",
-                    name,
-                    simulation->blockIdx() * bookCount,
-                    simulation->blockIdx() * bookCount + bookCount - 1),
+            simulation->logDir() / processLogFileName,
             container.at(name)
                 | views::transform([](const auto& p) { return p->value(); })
                 | ranges::to<std::vector>,

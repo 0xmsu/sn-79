@@ -43,7 +43,8 @@ std::unique_ptr<Process> ProcessFactory::createFromXML(pugi::xml_node node, uint
             node, 
             seedShift, 
             taosim::util::decimal2double(m_exchangeConfig->initialPrice));
-    } 
+    }
+
     throw std::invalid_argument(fmt::format(
         "{}: Unknown Process type {}", std::source_location::current().function_name(), name));
 }

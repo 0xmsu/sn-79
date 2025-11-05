@@ -34,7 +34,7 @@ public:
 
     [[nodiscard]] const fs::path& filepath() const noexcept { return m_filepath; }
 
-    static constexpr std::string_view s_header = "Date,Time,AgentId,Role,Fee,FeeRate,Price,Volume";
+    static constexpr std::string_view s_header = "Date,Time,AgentId,Role,Fee,FeeRate,Price,Volume,FeeRatio";
 
 private:
     void log(const FeePolicyWrapper* feePolicyWrapper, const taosim::FeeLogEvent& event);

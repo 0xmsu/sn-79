@@ -30,7 +30,7 @@ struct DecimalSerializationTest : TestWithParam<decimal_t>
 
 TEST_P(DecimalSerializationTest, Double)
 {
-    static const decimal_t epsilon = DEC(1e-16);
+    static const decimal_t epsilon = DEC(1e-7);
     serialization::HumanReadableStream stream;
     msgpack::pack(stream, refValue);
     msgpack::object_handle oh = msgpack::unpack(stream.data(), stream.size());

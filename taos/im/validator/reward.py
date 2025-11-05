@@ -32,7 +32,7 @@ from taos.im.protocol.events import TradeEvent
 from taos.im.utils import normalize
 from taos.im.utils.sharpe import sharpe, batch_sharpe
 
-def get_inventory_value(account: Account, book: Book, method='midquote') -> float:
+def get_inventory_value(account: Dict, book: Dict, method='midquote') -> float:
     """
     Calculates the instantaneous total value of an account's inventory using the specified method
 
@@ -49,11 +49,11 @@ def get_inventory_value(account: Account, book: Book, method='midquote') -> floa
     """
     quote_balance = account['qb']['t'] - account['ql'] + account['qc']
     base_balance = account['bb']['t'] - account['bl'] + account['bc']
-    
+
     book_a = book['a']
     book_b = book['b']
     has_orders = len(book_a) > 0 and len(book_b) > 0
-    
+
     if method == "best_bid":
         price = book_b[0]['p'] if has_orders else 0.0
         return quote_balance + price * base_balance
@@ -71,34 +71,44 @@ def get_inventory_value(account: Account, book: Book, method='midquote') -> floa
             to_liquidate -= level_liq
         return quote_balance + liq_value
 
-def score_inventory_value(self: Validator, uid: int, inventory_values: Dict[int, Dict[int, float]]) -> float:
+def score_inventory_value(validator_data: Dict, uid: int, inventory_values: Dict[int, Dict[int, float]]) -> float:
     """
     Calculates the new score value for a specific UID
 
     Args:
-        self (taos.im.neurons.validator.Validator) : Validator instance
-        uid (int) : UID of miner being scored
-        inventory_values (Dict[Dict[int, float]]) : Array of last `config.scoring.sharpe.lookback` inventory values for the miner
+        validator_data (Dict): Dictionary containing validator state
+        uid (int): UID of miner being scored
+        inventory_values (Dict[int, Dict[int, float]]): Inventory values for the miner
 
-    Returns: 
+    Returns:
         float: The new score value for the given UID.
     """
-    if not self.sharpe_values[uid]: return 0.0
-    sharpes = self.sharpe_values[uid]['books']
-    norm_min = self.config.scoring.sharpe.normalization_min
-    norm_max = self.config.scoring.sharpe.normalization_max
-    normalized_sharpes = {book_id: normalize(norm_min, norm_max, sharpe) 
-                         for book_id, sharpe in sharpes.items()}
-    
-    volume_cap = round(self.config.scoring.activity.capital_turnover_cap * self.simulation.miner_wealth, 
-                      self.simulation.volumeDecimals)
-    lookback_threshold = self.simulation_timestamp - self.config.scoring.sharpe.lookback * self.simulation.publish_interval
-    inactivity_decay_factor = 2 ** (-1 / self.config.scoring.sharpe.lookback)
-    
+    sharpe_values = validator_data['sharpe_values']
+    activity_factors = validator_data['activity_factors']
+    trade_volumes = validator_data['trade_volumes']
+    config = validator_data['config']['scoring']
+    simulation_config = validator_data['simulation_config']
+    reward_weights = validator_data['reward_weights']
+    simulation_timestamp = validator_data['simulation_timestamp']
+
+    if not sharpe_values[uid]:
+        return 0.0
+
+    sharpes = sharpe_values[uid]['books']
+    norm_min = config['sharpe']['normalization_min']
+    norm_max = config['sharpe']['normalization_max']
+    normalized_sharpes = {book_id: normalize(norm_min, norm_max, sharpe_val)
+                         for book_id, sharpe_val in sharpes.items()}
+
+    volume_cap = round(config['activity']['capital_turnover_cap'] * simulation_config['miner_wealth'],
+                      simulation_config['volumeDecimals'])
+    lookback_threshold = simulation_timestamp - config['sharpe']['lookback'] * simulation_config['publish_interval']
+    inactivity_decay_factor = 2 ** (-1 / config['sharpe']['lookback'])
+
     miner_volumes = {}
     latest_volumes = {}
-    trade_volumes_uid = self.trade_volumes[uid]
-    
+    trade_volumes_uid = trade_volumes[uid]
+
     for book_id, book_volume in trade_volumes_uid.items():
         total_trades = book_volume['total']
         volume = 0.0
@@ -109,16 +119,16 @@ def score_inventory_value(self: Validator, uid: int, inventory_values: Dict[int,
                 break
         miner_volumes[book_id] = volume
         latest_volumes[book_id] = list(total_trades.values())[-1] if total_trades else 0.0
-    
+
     # Calculate the factor to be multiplied on the Sharpes when there has been no trading activity in the previous Sharpe assessment window
     # This factor is designed to reduce the activity multiplier by half after each `sharpe.lookback` steps of inactivity
-    activity_factors_uid = self.activity_factors[uid]
+    activity_factors_uid = activity_factors[uid]
     for book_id, miner_volume in miner_volumes.items():
         if latest_volumes[book_id] > 0:
             activity_factors_uid[book_id] = min(1 + (miner_volume / volume_cap), 2.0)
         else:
             activity_factors_uid[book_id] *= inactivity_decay_factor
-    
+
     # Calculate the activity factors to be multiplied onto the Sharpes to obtain the final values for assessment
     # If the miner has traded in the previous Sharpe assessment window, the factor is equal to the ratio of the miner trading volume to the cap
     # If the miner has not traded, their existing activity factor is decayed by the factor defined above so as to halve the miner score over each Sharpe assessment window where they remain inactive
@@ -130,78 +140,119 @@ def score_inventory_value(self: Validator, uid: int, inventory_values: Dict[int,
         else:
             weighted = (2 - activity_factor) * norm_sharpe
         activity_weighted_normalized_sharpes.append(weighted)
-    
-    self.sharpe_values[uid]['books_weighted'] = {book_id: weighted_sharpe 
-                                                  for book_id, weighted_sharpe in enumerate(activity_weighted_normalized_sharpes)}
-    
+
+    sharpe_values[uid]['books_weighted'] = {book_id: weighted_sharpe
+                                            for book_id, weighted_sharpe in enumerate(activity_weighted_normalized_sharpes)}
+
     # Use the 1.5 rule to detect left-hand outliers in the activity-weighted Sharpes
     data = np.array(activity_weighted_normalized_sharpes)
     q1, q3 = np.percentile(data, [25, 75])
     iqr = q3 - q1
     lower_threshold = q1 - 1.5 * iqr
     outliers = data[data < lower_threshold]
-    
+
     # Outliers detected here are activity-weighted Sharpes which are significantly lower than those achieved on other books
     # A penalty equal to 67% of the difference between the mean outlier value and the value at the centre of the possible activity weighted Sharpe values is calculated
     outlier_penalty = (0.5 - np.mean(outliers)) / 1.5 if len(outliers) > 0 and np.mean(outliers) < 0.5 else 0
-    
+
     # The median of the activity weighted Sharpes provides the base score for the miner
     activity_weighted_normalized_median = np.median(data)
     # The penalty factor is subtracted from the base score to punish particularly poor performance on any particular book
     sharpe_score = max(activity_weighted_normalized_median - abs(outlier_penalty), 0.0)
-    
-    self.sharpe_values[uid]['activity_weighted_normalized_median'] = activity_weighted_normalized_median
-    self.sharpe_values[uid]['penalty'] = abs(outlier_penalty)
-    self.sharpe_values[uid]['score'] = sharpe_score
-    return self.reward_weights['sharpe'] * sharpe_score
 
-def score_inventory_values(self, inventory_values):
-    if self.config.scoring.sharpe.parallel_workers == 0:
-        self.sharpe_values = {uid.item(): sharpe(uid, inventory_values[uid], self.config.scoring.sharpe.lookback, 
-                                                 self.config.scoring.sharpe.normalization_min, 
-                                                 self.config.scoring.sharpe.normalization_max, 
-                                                 self.config.scoring.sharpe.min_lookback, 
-                                                 self.simulation.grace_period, self.deregistered_uids) 
-                             for uid in self.metagraph.uids}
+    sharpe_values[uid]['activity_weighted_normalized_median'] = activity_weighted_normalized_median
+    sharpe_values[uid]['penalty'] = abs(outlier_penalty)
+    sharpe_values[uid]['score'] = sharpe_score
+    return reward_weights['sharpe'] * sharpe_score
+
+def score_inventory_values(validator_data: Dict, inventory_values: Dict) -> Dict:
+    """
+    Calculates the new score value for all UIDs
+
+    Args:
+        validator_data (Dict): Dictionary containing validator state
+        inventory_values (Dict): Inventory value history for all UIDs
+
+    Returns:
+        Dict: Inventory scores for all UIDs
+    """
+    config = validator_data['config']['scoring']
+    uids = validator_data['uids']
+    deregistered_uids = validator_data['deregistered_uids']
+    simulation_config = validator_data['simulation_config']
+    sharpe_values = validator_data['sharpe_values']
+
+    if config['sharpe']['parallel_workers'] == 0:
+        sharpe_values.update({
+            uid: sharpe(uid, inventory_values[uid],
+                       config['sharpe']['lookback'],
+                       config['sharpe']['normalization_min'],
+                       config['sharpe']['normalization_max'],
+                       config['sharpe']['min_lookback'],
+                       simulation_config['grace_period'],
+                       deregistered_uids)
+            for uid in uids
+        })
     else:
-        num_processes = self.config.scoring.sharpe.parallel_workers
+        num_processes = config['sharpe']['parallel_workers']
         batch_size = int(256 / num_processes)
-        batches = [self.metagraph.uids[i:i+batch_size] for i in range(0, 256, batch_size)]
-        self.sharpe_values = batch_sharpe(inventory_values, batches, self.config.scoring.sharpe.lookback, 
-                                          self.config.scoring.sharpe.normalization_min, 
-                                          self.config.scoring.sharpe.normalization_max, 
-                                          self.config.scoring.sharpe.min_lookback, 
-                                          self.simulation.grace_period, self.deregistered_uids)
+        batches = [uids[i:i+batch_size] for i in range(0, 256, batch_size)]
+        sharpe_values.update(batch_sharpe(
+            inventory_values, batches,
+            config['sharpe']['lookback'],
+            config['sharpe']['normalization_min'],
+            config['sharpe']['normalization_max'],
+            config['sharpe']['min_lookback'],
+            simulation_config['grace_period'],
+            deregistered_uids
+        ))
 
-    inventory_scores = {uid: score_inventory_value(self, uid, self.inventory_history[uid]) 
-                       for uid in self.metagraph.uids}
+    validator_data['sharpe_values'] = sharpe_values
+
+    inventory_scores = {uid: score_inventory_value(validator_data, uid, inventory_values[uid])
+                       for uid in uids}
     return inventory_scores
 
-def reward(self: Validator, synapse: MarketSimulationStateUpdate) -> Tuple[list[float], bool]:
+def reward(validator_data: Dict, synapse_data: Dict) -> Tuple[list, bool, Dict]:
     """
     Calculate and store the scores for a particular miner.
 
     Args:
-        self (taos.im.neurons.validator.Validator) : Validator instance
-        synapse (taos.im.protocol.MarketSimulationStateUpdate) : The latest state update synapse
+        validator_data (Dict): Dictionary containing validator state
+        synapse_data (Dict): Dictionary containing synapse state data
 
     Returns:
-        list[float]: The new score values for all uids in the subnet.
+        Tuple[list, bool, Dict]: (rewards, whether_updated, updated_data)
     """
-    for bookId, book in synapse.books.items():
-        trades = [TradeInfo.model_construct(**event) for event in book['e'] if event['y'] == 't']
+    books = synapse_data['books']
+    timestamp = synapse_data['timestamp']
+    accounts = synapse_data['accounts']
+    notices = synapse_data['notices']
+
+    recent_trades = validator_data['recent_trades']
+    inventory_history = validator_data['inventory_history']
+    trade_volumes = validator_data['trade_volumes']
+    recent_miner_trades = validator_data['recent_miner_trades']
+    initial_balances = validator_data['initial_balances']
+    uids = validator_data['uids']
+    step = validator_data['step']
+    config = validator_data['config']
+    simulation_config = validator_data['simulation_config']
+
+    for bookId, book in books.items():
+        trades = [event for event in book['e'] if event['y'] == 't']
         if trades:
-            recent_trades_book = self.recent_trades[bookId]
-            recent_trades_book.extend(trades)
-            del recent_trades_book[:-25]  # Keep only last 25
-    
-    sampled_timestamp = math.ceil(synapse.timestamp / self.config.scoring.activity.trade_volume_sampling_interval) * self.config.scoring.activity.trade_volume_sampling_interval
-    prune_threshold = synapse.timestamp - self.config.scoring.activity.trade_volume_assessment_period
-    volume_decimals = self.simulation.volumeDecimals
-    
-    for uid in self.metagraph.uids:
+            recent_trades_book = recent_trades[bookId]
+            recent_trades_book.extend([TradeInfo.model_construct(**t) for t in trades])
+            del recent_trades_book[:-25]
+
+    sampled_timestamp = math.ceil(timestamp / config['scoring']['activity']['trade_volume_sampling_interval']) * config['scoring']['activity']['trade_volume_sampling_interval']
+    prune_threshold = timestamp - config['scoring']['activity']['trade_volume_assessment_period']
+    volume_decimals = simulation_config['volumeDecimals']
+
+    for uid in uids:
         try:
-            trade_volumes_uid = self.trade_volumes[uid]
+            trade_volumes_uid = trade_volumes[uid]
             for book_id, role_trades in trade_volumes_uid.items():
                 for role, trades in role_trades.items():
                     keys_to_delete = [time for time in trades if time < prune_threshold]
@@ -213,39 +264,38 @@ def reward(self: Validator, synapse: MarketSimulationStateUpdate) -> Tuple[list[
                     book_trade_volumes['maker'][sampled_timestamp] = 0.0
                     book_trade_volumes['taker'][sampled_timestamp] = 0.0
                     book_trade_volumes['self'][sampled_timestamp] = 0.0
-            
-            # Update trade volume history with new trades since the previous step
-            trades = [TradeEvent.model_construct(**notice) for notice in synapse.notices[uid] 
-                     if notice['y'] in ['EVENT_TRADE', "ET"]]
-            
-            recent_miner_trades_uid = self.recent_miner_trades[uid]
+
+            trades = [notice for notice in notices[uid] if notice['y'] in ['EVENT_TRADE', "ET"]]
+
+            recent_miner_trades_uid = recent_miner_trades[uid]
             for trade in trades:
-                
-                is_maker = trade.makerAgentId == uid
-                is_taker = trade.takerAgentId == uid
-                
+                is_maker = trade['Ma'] == uid
+                is_taker = trade['Ta'] == uid
+
                 if is_maker:
-                    recent_miner_trades_uid[trade.bookId].append([trade, "maker"])
+                    recent_miner_trades_uid[trade['b']].append([TradeEvent.model_construct(**trade), "maker"])
                 if is_taker:
-                    recent_miner_trades_uid[trade.bookId].append([trade, "taker"])
-                
-                recent_miner_trades_uid[trade.bookId] = recent_miner_trades_uid[trade.bookId][-5:]
-                
-                book_volumes = trade_volumes_uid[trade.bookId]
-                trade_value = round(trade.quantity * trade.price, volume_decimals)
+                    recent_miner_trades_uid[trade['b']].append([TradeEvent.model_construct(**trade), "taker"])
+
+                recent_miner_trades_uid[trade['b']] = recent_miner_trades_uid[trade['b']][-5:]
+
+                book_volumes = trade_volumes_uid[trade['b']]
+                trade_value = round(trade['q'] * trade['p'], volume_decimals)
                 book_volumes['total'][sampled_timestamp] = round(book_volumes['total'][sampled_timestamp] + trade_value, volume_decimals)
-                
-                if trade.makerAgentId == trade.takerAgentId:
+
+                if trade['Ma'] == trade['Ta']:
                     book_volumes['self'][sampled_timestamp] = round(book_volumes['self'][sampled_timestamp] + trade_value, volume_decimals)
                 elif is_maker:
                     book_volumes['maker'][sampled_timestamp] = round(book_volumes['maker'][sampled_timestamp] + trade_value, volume_decimals)
                 elif is_taker:
                     book_volumes['taker'][sampled_timestamp] = round(book_volumes['taker'][sampled_timestamp] + trade_value, volume_decimals)
-            self.recent_miner_trades[uid] = recent_miner_trades_uid            
-            if uid in synapse.accounts:
-                initial_balances_uid = self.initial_balances[uid]
-                accounts_uid = synapse.accounts[uid]
-                
+
+            recent_miner_trades[uid] = recent_miner_trades_uid
+
+            if uid in accounts:
+                initial_balances_uid = initial_balances[uid]
+                accounts_uid = accounts[uid]
+
                 for bookId, account in accounts_uid.items():
                     initial_balance_book = initial_balances_uid[bookId]
                     if initial_balance_book['BASE'] is None:
@@ -253,54 +303,79 @@ def reward(self: Validator, synapse: MarketSimulationStateUpdate) -> Tuple[list[
                     if initial_balance_book['QUOTE'] is None:
                         initial_balance_book['QUOTE'] = account['qb']['t']
                     if initial_balance_book['WEALTH'] is None:
-                        initial_balance_book['WEALTH'] = get_inventory_value(account, synapse.books[bookId])
-                
-                self.inventory_history[uid][synapse.timestamp] = {
+                        initial_balance_book['WEALTH'] = get_inventory_value(account, books[bookId])
+
+                inventory_history[uid][timestamp] = {
                     book_id: get_inventory_value(accounts_uid[book_id], book) - initial_balances_uid[book_id]['WEALTH']
-                    for book_id, book in synapse.books.items()
+                    for book_id, book in books.items()
                 }
             else:
-                self.inventory_history[uid][synapse.timestamp] = {book_id: 0.0 for book_id in synapse.books}
-            inventory_hist = self.inventory_history[uid]
-            if len(inventory_hist) > self.config.scoring.sharpe.lookback:
+                inventory_history[uid][timestamp] = {book_id: 0.0 for book_id in books}
+
+            inventory_hist = inventory_history[uid]
+            if len(inventory_hist) > config['scoring']['sharpe']['lookback']:
                 keys = sorted(inventory_hist.keys())
-                for key in keys[:-self.config.scoring.sharpe.lookback]:
+                for key in keys[:-config['scoring']['sharpe']['lookback']]:
                     del inventory_hist[key]
-                    
+
         except Exception as ex:
-            bt.logging.error(f"Failed to update reward data for UID {uid} at step {self.step} : {traceback.format_exc()}")
+            bt.logging.error(f"Failed to update reward data for UID {uid} at step {step} : {traceback.format_exc()}")
 
-    if synapse.timestamp % self.config.scoring.interval != 0:
-        return None, False
+    if timestamp % config['scoring']['interval'] != 0:
+        updated_data = {
+            'recent_trades': recent_trades,
+            'inventory_history': inventory_history,
+            'trade_volumes': trade_volumes,
+            'recent_miner_trades': recent_miner_trades,
+            'initial_balances': initial_balances,
+        }
+        return None, False, updated_data
 
-    inventory_scores = score_inventory_values(self, self.inventory_history)
+    validator_data['simulation_timestamp'] = timestamp
+    inventory_scores = score_inventory_values(validator_data, inventory_history)
     rewards = list(inventory_scores.values())
-    return rewards, True
+    updated_data = {
+        'recent_trades': recent_trades,
+        'inventory_history': inventory_history,
+        'trade_volumes': trade_volumes,
+        'recent_miner_trades': recent_miner_trades,
+        'initial_balances': initial_balances,
+        'sharpe_values': validator_data['sharpe_values'],
+        'activity_factors': validator_data['activity_factors'],
+        'simulation_timestamp': validator_data['simulation_timestamp'],
+    }
+    return rewards, True, updated_data
 
-def distribute_rewards(self: Validator, rewards: torch.FloatTensor):
-    rng = np.random.default_rng(self.config.rewarding.seed)
-    num_uids = len(self.metagraph.uids)
-    distribution = torch.FloatTensor(sorted(self.config.rewarding.pareto.scale * rng.pareto(self.config.rewarding.pareto.shape, num_uids)))
-    sorted_rewards, sorted_indices = rewards.sort()
+def distribute_rewards(rewards: list, config: Dict) -> torch.FloatTensor:
+    """Distribute rewards using Pareto distribution"""
+    rng = np.random.default_rng(config['rewarding']['seed'])
+    num_uids = len(rewards)
+    distribution = torch.FloatTensor(sorted(
+        config['rewarding']['pareto']['scale'] *
+        rng.pareto(config['rewarding']['pareto']['shape'], num_uids)
+    ))
+    rewards_tensor = torch.FloatTensor(rewards)
+    sorted_rewards, sorted_indices = rewards_tensor.sort()
     distributed_rewards = distribution * sorted_rewards
     return torch.gather(distributed_rewards, 0, sorted_indices.argsort())
 
-def get_rewards(self: Validator, synapse: MarketSimulationStateUpdate) -> Tuple[torch.FloatTensor, bool]:
+def get_rewards(validator_data: Dict, synapse_data: Dict) -> Tuple[torch.FloatTensor, bool, Dict]:
     """
     Returns a tensor of rewards for the given query and responses.
 
     Args:
-        self (taos.im.neurons.validator.Validator) : Validator instance
-        synapse (taos.im.protocol.MarketSimulationStateUpdate) : The latest state update object.
+        validator_data (Dict): Dictionary containing validator state
+        synapse_data (Dict): Dictionary containing synapse data
 
     Returns:
-        torch.FloatTensor: A tensor of rewards for the given query and responses.
+        Tuple[torch.FloatTensor, bool, Dict]: (rewards, whether_updated, updated_data)
     """
-    rewards, updated = reward(self, synapse)
+    rewards, updated, updated_data = reward(validator_data, synapse_data)
     if updated:
-        return distribute_rewards(self, torch.FloatTensor(rewards).to(self.device)), True
+        device = validator_data.get('device', 'cpu')
+        return distribute_rewards(rewards, validator_data['config']).to(device), True, updated_data
     else:
-        return None, False
+        return None, False, updated_data
 
 def set_delays(self: Validator, synapse_responses: dict[int, MarketSimulationStateUpdate]) -> list[FinanceAgentResponse]:
     """

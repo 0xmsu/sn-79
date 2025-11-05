@@ -19,12 +19,16 @@ ExchangeConfig makeExchangeConfig(pugi::xml_node node)
     static constexpr auto sl = std::source_location::current();
 
     const auto priceDecimals = validateDecimalPlaces(node.attribute("priceDecimals").as_uint(), sl);
+    const auto volumeDecimals = validateDecimalPlaces(node.attribute("volumeDecimals").as_uint(), sl);
 
     // TODO: Validation for leverage.
-    const auto maxLeverage = decimal_t{node.attribute("maxLeverage").as_double()};
+    const auto maxLeverage = util::double2decimal(
+        node.attribute("maxLeverage").as_double(), volumeDecimals);
     const auto maintenanceMargin = [&] {
-        const decimal_t maintenanceMargin{node.attribute("maintenanceMargin").as_double()};
-        const decimal_t maxAllowedMaintenance = 1_dec / (2_dec * util::dec1p(maxLeverage));
+        const auto maintenanceMargin = util::double2decimal(
+            node.attribute("maintenanceMargin").as_double(), volumeDecimals);
+        const auto maxAllowedMaintenance = util::round(
+            1_dec / (2_dec * util::dec1p(maxLeverage), volumeDecimals));
         if (maintenanceMargin > maxAllowedMaintenance){
             throw std::invalid_argument{fmt::format(
                 "{}: 'maintenanceMargin' {} cannot be less than {} when maxLeverage is {}",
@@ -38,7 +42,7 @@ ExchangeConfig makeExchangeConfig(pugi::xml_node node)
 
     return {
         .priceDecimals = priceDecimals,
-        .volumeDecimals = validateDecimalPlaces(node.attribute("volumeDecimals").as_uint(), sl),
+        .volumeDecimals = volumeDecimals,
         .baseDecimals = validateDecimalPlaces(node.attribute("baseDecimals").as_uint(), sl),
         .quoteDecimals = validateDecimalPlaces(node.attribute("quoteDecimals").as_uint(), sl),
         .maxLeverage = maxLeverage,

@@ -67,22 +67,7 @@ void TickContainer::jsonSerialize(rapidjson::Document& json, const std::string& 
 
 void TickContainer::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("price", rapidjson::Value{taosim::util::packDecimal(m_price)}, allocator);
-        rapidjson::Value ordersJson{rapidjson::kArrayType};
-        for (const auto order : *this) {
-            rapidjson::Document orderJson{&allocator};
-            order->checkpointSerialize(orderJson);
-            orderJson.RemoveMember("price");
-            ordersJson.PushBack(orderJson, allocator);
-        }
-        json.AddMember("orders", ordersJson, allocator);
-        json.AddMember(
-            "volume", rapidjson::Value{taosim::util::packDecimal(m_volume)}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------

@@ -122,8 +122,6 @@ private:
     std::vector<bool> m_orderFlag;
     std::vector<boost::circular_buffer<double>> m_priceHist;
     std::vector<boost::circular_buffer<double>> m_logReturns;
-    // std::vector<boost::circular_buffer<double>> m_priceHistExternal;
-    // std::vector<boost::circular_buffer<double>> m_logReturnsExternal;
     
     bool m_debug;
 

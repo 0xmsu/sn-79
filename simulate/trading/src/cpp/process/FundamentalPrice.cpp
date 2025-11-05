@@ -71,58 +71,64 @@ FundamentalPrice::FundamentalPrice(
 
 void FundamentalPrice::update(Timestamp timestamp)
 {
-    if (timestamp - m_last_seed_time >= m_seedInterval) {
-        int count = m_last_count;
-        uint64_t seed = 0;
-        if ( fs::exists( m_seedfile ) ) {
-            try {
-                std::vector<std::string> lines = taosim::util::getLastLines(m_seedfile, 2);
-                if (lines.size() >= 2) {
-                    std::vector<std::string> line = taosim::util::split(lines[lines.size() - 2],',');
-                    if (line.size()== 2) {
-                        count = std::stoi(line[0]);
-                        seed = static_cast<uint64_t>(round(std::stof(line[1])*100)) + m_bookId*10;
+    if (m_values.empty()) {
+        if (timestamp - m_last_seed_time >= m_seedInterval) {
+            int count = m_last_count;
+            uint64_t seed = 0;
+            if ( fs::exists( m_seedfile ) ) {
+                try {
+                    std::vector<std::string> lines = taosim::util::getLastLines(m_seedfile, 2);
+                    if (lines.size() >= 2) {
+                        std::vector<std::string> line = taosim::util::split(lines[lines.size() - 2],',');
+                        if (line.size()== 2) {
+                            count = std::stoi(line[0]);
+                            seed = static_cast<uint64_t>(round(std::stof(line[1])*100)) + m_bookId*10;
+                        } else {
+                            fmt::println("FundamentalPrice::update : FAILED TO GET SEED FROM LINE - {}", lines[lines.size() - 2]);
+                        }
                     } else {
-                        fmt::println("FundamentalPrice::update : FAILED TO GET SEED FROM LINE - {}", lines[lines.size() - 2]);
+                        fmt::println("FundamentalPrice::update : FAILED TO GET SEED FROM FILE - NO DATA ({} LINES READ)", lines.size());
                     }
-                } else {
-                    fmt::println("FundamentalPrice::update : FAILED TO GET SEED FROM FILE - NO DATA ({} LINES READ)", lines.size());
+                } catch (const std::exception &exc) {
+                    fmt::println("FundamentalPrice::update : ERROR GETTING SEED FROM FILE - {}", exc.what());
                 }
-            } catch (const std::exception &exc) {
-                fmt::println("FundamentalPrice::update : ERROR GETTING SEED FROM FILE - {}", exc.what());
-            }
-            if (count == m_last_count) {
+                if (count == m_last_count) {
+                    std::random_device rd;
+                    std::mt19937 gen(rd());
+                    std::uniform_int_distribution<> distr(-50, 50);
+                    seed = m_last_seed + distr(gen);
+                    fmt::println("WARNING : Fundamental price seed not updated - using random seed.  Last Count {} | Count {} | Last Seed {} | Seed {}", m_last_count, count, seed, m_last_seed);
+                }
+            } else {
+                fmt::println("FundamentalPrice::update : NO SEED FILE PRESENT AT {}.  Using random seed.", m_seedfile);
                 std::random_device rd;
                 std::mt19937 gen(rd());
-                std::uniform_int_distribution<> distr(-50, 50);
-                seed = m_last_seed + distr(gen);
-                fmt::println("WARNING : Fundamental price seed not updated - using random seed.  Last Count {} | Count {} | Last Seed {} | Seed {}", m_last_count, count, seed, m_last_seed);
+                std::uniform_int_distribution<> distr(10800000,11200000);
+                seed = distr(gen);
             }
-        } else {
-            fmt::println("FundamentalPrice::update : NO SEED FILE PRESENT AT {}.  Using random seed.", m_seedfile);
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::uniform_int_distribution<> distr(10800000,11200000);
-            seed = distr(gen);
+            m_rng = RNG{seed}; 
+            m_last_count = count;
+            m_last_seed = seed;
+            m_last_seed_time = timestamp; 
+            m_t += m_dt;
+            // Jump part
+            m_dJ += m_poisson(m_rng)* m_jump(m_rng);
+            //fBM
+            int64_t step = timestamp/m_updatePeriod;
+            cholesky_step(step);
+            m_BH += m_X(step);
+            const double fBM_comp =  m_epsilon*m_BH - (0.5*m_epsilon*m_epsilon *std::pow(m_t,2*m_hurst));
+            // BM 
+            m_W += m_gaussian(m_rng);
+            // pricing
+            m_value = m_X0 * std::exp((m_mu - 0.5 * m_sigma * m_sigma) * m_t + m_sigma* m_W + fBM_comp + m_dJ);
         }
-        m_rng = RNG{seed}; 
-        m_last_count = count;
-        m_last_seed = seed;
-        m_last_seed_time = timestamp; 
-        m_t += m_dt;
-        // Jump part
-        m_dJ += m_poisson(m_rng)* m_jump(m_rng);
-        //fBM
-        int64_t step = timestamp/m_updatePeriod;
-        cholesky_step(step);
-        m_BH += m_X(step);
-        const double fBM_comp =  m_epsilon*m_BH - (0.5*m_epsilon*m_epsilon *std::pow(m_t,2*m_hurst));
-        // BM 
-        m_W += m_gaussian(m_rng);
-        // pricing
-        m_value = m_X0 * std::exp((m_mu - 0.5 * m_sigma * m_sigma) * m_t + m_sigma* m_W + fBM_comp + m_dJ);
-        m_valueSignal(m_value);
     }
+    else {
+        m_value = m_values.at(m_valueIdx);
+        m_valueIdx = std::min(m_valueIdx + 1, m_values.size() - 1);
+    }
+    m_valueSignal(m_value);
 }
 
 //-------------------------------------------------------------------------

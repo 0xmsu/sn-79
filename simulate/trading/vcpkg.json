@@ -23,6 +23,7 @@
         "pugixml",
         "pybind11",
         "range-v3",
+        "rapidcsv",
         "rapidjson",
         "spdlog"
     ],

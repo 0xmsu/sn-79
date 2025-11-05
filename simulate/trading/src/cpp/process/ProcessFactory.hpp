@@ -5,6 +5,7 @@
 #pragma once
 
 #include <pugixml.hpp>
+#include <rapidcsv.h>
 
 #include "taosim/simulation/ISimulation.hpp"
 #include "Process.hpp"

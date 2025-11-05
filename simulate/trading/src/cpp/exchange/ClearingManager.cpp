@@ -155,22 +155,11 @@ bool ClearingManager::handleClosePosition(const ClosePositionDesc &closeDesc)
         decimal_t loanAmount = loan->get().amount();
         decimal_t settleAmount = volumeToClose.value_or(loanAmount);
 
-        // if (settleAmount > loanAmount){
-        //     m_exchange->simulation()->logDebug("Settle Amount {} bigger than the remining loan {}",
-        //         settleAmount, loanAmount
-        //     );
-        //     return false;
-        // }
-
         if (loan->get().direction() == OrderDirection::BUY){
             const auto bestBid = m_exchange->books()[bookId]->bestBid();
             settleAmount = util::roundUp(
                 bestBid * util::roundUp(settleAmount / bestBid, 
                     m_exchange->config().parameters().baseIncrementDecimals),
-                m_exchange->config().parameters().quoteIncrementDecimals);
-
-            const auto takerFee = m_feePolicy->getRates(bookId, agentId).taker;
-            settleAmount = util::roundUp(settleAmount /util::dec1m(takerFee),
                 m_exchange->config().parameters().quoteIncrementDecimals);
         }
 
@@ -239,8 +228,7 @@ void ClearingManager::handleCancelOrder(const CancelOrderDesc& cancelDesc)
                     ? std::make_optional(
                         util::round(
                             util::round(order->price(), m_exchange->config().parameters().priceIncrementDecimals) *
-                            util::round(volumeToCancel, m_exchange->config().parameters().volumeIncrementDecimals) *
-                            util::dec1p(m_feePolicy->getRates(bookId, agentId).maker),
+                            util::round(volumeToCancel, m_exchange->config().parameters().volumeIncrementDecimals),
                             m_exchange->config().parameters().quoteIncrementDecimals))
                     : std::nullopt);
 
@@ -361,9 +349,9 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
     auto fees = m_feePolicy->calculateFees(tradeDesc);
 
     // TODO: Rounding should be done inside fees calculation
-    fees.taker = util::round(fees.taker, m_exchange->config().parameters().quoteIncrementDecimals);
     fees.maker = util::round(fees.maker, m_exchange->config().parameters().quoteIncrementDecimals);
-
+    fees.taker = util::round(fees.taker, m_exchange->config().parameters().quoteIncrementDecimals);
+    
     accounting::Balances& restingBalance = accounts()[restingAgentId][bookId];
     accounting::Balances& aggressingBalance = accounts()[aggressingAgentId][bookId];
 
@@ -378,6 +366,18 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
             m_exchange->config().parameters().quoteIncrementDecimals
         );
 
+        decimal_t fees_taker_base, fees_taker_quote;
+        if (fees.taker < 0_dec){
+            fees_taker_base = 0_dec;
+            fees_taker_quote = fees.taker;
+        } else {
+            fees_taker_base = util::roundUp(fees.taker / trade->price(), m_exchange->config().parameters().baseIncrementDecimals);
+            fees_taker_quote = util::round(
+                fees_taker_base * trade->price() - fees.taker,
+                m_exchange->config().parameters().quoteIncrementDecimals);
+        }
+        
+
         const auto totalPrice = [&] {
             if (auto limitOrder = std::dynamic_pointer_cast<LimitOrder>(aggressingOrder)) {
                 // if (!reservation.has_value()) {
@@ -385,13 +385,13 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
                     
                     m_exchange->simulation()->logError(
                         "{} | AGENT #{} BOOK {} | No reservation for aggressing {} order #{} against resting order #{} "
-                        "| restVol: {}  aggVol: {}  tradeVol:{}  takerFee:{}  makerFee:{}  reservations(b:{}|q:{})"
+                        "| restVol: {}  aggVol: {}  tradeVol:{}  takerFee:(b:{}|q:-{})  makerFee:{}  reservations(b:{}|q:{})"
                         ,
                         m_exchange->simulation()->currentTimestamp(), 
                         aggressingAgentId, m_exchange->simulation()->bookIdCanon(bookId),
                         aggressingOrder->direction(), aggressingOrderId, restingOrderId,
                         restingOrder->totalVolume(), aggressingOrder->totalVolume(), trade->volume(),
-                        fees.taker, fees.maker,
+                        fees_taker_base, fees_taker_quote, fees.maker,
                         aggressingBalance.base.getReservation(aggressingOrderId).value_or(0_dec),
                         aggressingBalance.quote.getReservation(aggressingOrderId).value_or(0_dec)
                     );
@@ -409,7 +409,7 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
                         aggressingAgentId, m_exchange->simulation()->bookIdCanon(bookId),
                         util::round(reservation / util::dec1p(aggressingBalance.getLeverage(aggressingOrderId, aggressingOrder->direction())), m_exchange->config().parameters().quoteIncrementDecimals),
                         trade->volume(), aggressingOrder->direction(), aggressingOrderId);
-                    return reservation - fees.taker;
+                    return reservation;
                 }
             }
             return util::round(trade->price(), m_exchange->config().parameters().priceIncrementDecimals) * 
@@ -438,24 +438,27 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
         const auto restingVolume = util::round(trade->volume(), m_exchange->config().parameters().baseIncrementDecimals);
         const auto tradeQuote = util::round(trade->volume() * trade->price(), m_exchange->config().parameters().quoteIncrementDecimals);
 
-        m_feePolicy->updateHistory(bookId, restingAgentId, tradeQuote);
-        m_feePolicy->updateHistory(bookId, aggressingAgentId, aggressingVolume);
-
         m_exchange->simulation()->logDebug(
-            "{} | AGENT #{} BOOK {} : COMMIT {} WITH FEE {} FOR AGG BUY ORDER #{} AGAINST {} FOR RESTING SELL ORDER #{} (BEST ASK {} | MARGIN={})",
+            "{} | AGENT #{} BOOK {} : COMMIT {} WITH FEE (b:{},q:{})  FOR AGG BUY ORDER #{} AGAINST {} FOR RESTING SELL ORDER #{} (BEST ASK {} | MARGIN={})",
             m_exchange->simulation()->currentTimestamp(), aggressingAgentId, m_exchange->simulation()->bookIdCanon(bookId),
-            aggressingVolume, fees.taker, aggressingOrderId, restingVolume, restingOrderId, bestAsk, aggressingMarginCall);
+            aggressingVolume, fees_taker_base, fees_taker_quote, aggressingOrderId, restingVolume, restingOrderId, bestAsk, aggressingMarginCall);
+        
         auto removedIdsShortSell = aggressingBalance.commit(
             aggressingOrderId,
             OrderDirection::BUY,
             aggressingVolume,
             restingVolume,
-            fees.taker,
+            fees_taker_base,
+            fees_taker_quote,
             bestBid,
             bestAsk,
             aggressingMarginCall,
             m_exchange->simulation()->bookIdCanon(bookId),
             aggressingOrder->settleFlag());
+        
+        if (fees_taker_quote > 0_dec){
+            aggressingBalance.quote.deposit(fees_taker_quote, m_exchange->simulation()->bookIdCanon(bookId));
+        }
 
         m_exchange->simulation()->logDebug(
             "{} | AGENT #{} BOOK {} : COMMIT {} WITH FEE {} FOR RESTING SELL ORDER #{} AGAINST {} FOR AGG BUY ORDER #{} (BEST BID {} | MARGIN={})",
@@ -466,6 +469,7 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
             OrderDirection::SELL,
             restingVolume,
             aggressingVolume,
+            0_dec,
             fees.maker,
             bestBid,
             bestAsk,
@@ -473,14 +477,19 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
             m_exchange->simulation()->bookIdCanon(bookId),
             restingOrder->settleFlag());
 
+        m_feePolicy->updateHistory(
+            m_exchange->simulation()->currentTimestamp(), bookId, restingAgentId, tradeQuote, false);
+        m_feePolicy->updateHistory(
+            m_exchange->simulation()->currentTimestamp(), bookId, aggressingAgentId, aggressingVolume, true);
+
         removeMarginOrders(bookId, OrderDirection::BUY, removedIdsMarginBuy);
         removeMarginOrders(bookId, OrderDirection::SELL, removedIdsShortSell);
 
-        exchange()->simulation()->logDebug("{} | AGENT #{} BOOK {} : AGG BUY ORDER #{} FROM AGENT #{} FOR {} TRADED AGAINST RESTING #{} {}@{} FROM AGENT #{} FOR {} (MAKER {} QUOTE | TAKER {} QUOTE)", 
+        exchange()->simulation()->logDebug("{} | AGENT #{} BOOK {} : AGG BUY ORDER #{} FROM AGENT #{} FOR {} TRADED AGAINST RESTING #{} {}@{} FROM AGENT #{} FOR {} (MAKER {} QUOTE | TAKER b:{}, q:-{} QUOTE)", 
             exchange()->simulation()->currentTimestamp(), aggressingAgentId, m_exchange->simulation()->bookIdCanon(bookId), 
             aggressingOrder->id(), aggressingAgentId, aggressingOrder->leverage() > 0_dec ? fmt::format("{}x{}",1_dec + aggressingOrder->leverage(),aggressingOrder->volume()) : fmt::format("{}",aggressingOrder->volume()), 
             restingOrder->id(), restingOrder->leverage() > 0_dec ? fmt::format("{}x{}",1_dec + restingOrder->leverage(),restingOrder->volume()) : fmt::format("{}",restingOrder->volume()), restingOrder->price(), restingAgentId, trade->volume(), 
-            fees.maker, fees.taker);
+            fees.maker, fees_taker_base, fees_taker_quote);
 
     }
     else {
@@ -490,17 +499,28 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
             m_exchange->config().parameters().quoteIncrementDecimals
         );
 
+        decimal_t fees_maker_base, fees_maker_quote;
+        if (fees.maker < 0_dec){
+            fees_maker_base = 0_dec;
+            fees_maker_quote = fees.maker;
+        } else {
+            fees_maker_base = util::roundUp(fees.maker / trade->price(), m_exchange->config().parameters().baseIncrementDecimals);
+            fees_maker_quote = util::round(
+                fees_maker_base * trade->price() - fees.maker,
+                m_exchange->config().parameters().quoteIncrementDecimals);
+        }
+
         if (reservation == 0_dec) {
             
             m_exchange->simulation()->logError(
                 "{} | AGENT #{} BOOK {} | No reservation for resting {} order #{} against aggressing order #{} "
-                "| restVol: {}  aggVol: {}  tradeVol:{}  takerFee:{}  makerFee:{}  reservations(b:{}|q:{})"
+                "| restVol: {}  aggVol: {}  tradeVol:{}  takerFee:{}  makerFee:(b:{}|q:-{})  reservations(b:{}|q:{})"
                 ,
                 m_exchange->simulation()->currentTimestamp(), 
                 aggressingAgentId, m_exchange->simulation()->bookIdCanon(bookId),
                 restingOrder->direction(), restingOrderId, aggressingOrderId,
                 restingOrder->totalVolume(), aggressingOrder->totalVolume(), trade->volume(),
-                fees.taker, fees.maker, 
+                fees.taker, fees_maker_base, fees_maker_quote,
                 restingBalance.base.getReservation(restingOrderId).value_or(0_dec),
                 restingBalance.quote.getReservation(restingOrderId).value_or(0_dec)
             );
@@ -537,11 +557,10 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
 
         const auto aggressingVolume = util::round(trade->volume(), m_exchange->config().parameters().baseIncrementDecimals);
         const auto restingVolume = restingOrder->totalVolume() == trade->volume() && reservation > 0_dec ?
-            reservation - fees.maker : util::round(trade->price() * trade->volume(), m_exchange->config().parameters().quoteIncrementDecimals);
+            reservation : util::round(trade->price() * trade->volume(), m_exchange->config().parameters().quoteIncrementDecimals);
         const auto tradeQuote = util::round(trade->volume() * trade->price(), m_exchange->config().parameters().quoteIncrementDecimals);
 
-        m_feePolicy->updateHistory(bookId, restingAgentId, tradeQuote);
-        m_feePolicy->updateHistory(bookId, aggressingAgentId, restingVolume);
+        
         
         m_exchange->simulation()->logDebug(
             "{} | AGENT #{} BOOK {} : COMMIT {} WITH FEE {} FOR AGG SELL ORDER #{} AGAINST {} FOR RESTING BUY ORDER #{} (BEST ASK {} | MARGIN={})",
@@ -553,6 +572,7 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
             OrderDirection::SELL,
             aggressingVolume,
             restingVolume,
+            0_dec,
             fees.taker,
             bestBid,
             bestAsk,
@@ -570,12 +590,22 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
             OrderDirection::BUY,
             restingVolume,
             aggressingVolume,
-            fees.maker,
+            fees_maker_base,
+            fees_maker_quote,
             bestBid,
             bestAsk,
             restingMarginCall,
             m_exchange->simulation()->bookIdCanon(bookId),
             restingOrder->settleFlag());
+        
+            if (fees_maker_quote > 0_dec){
+            restingBalance.quote.deposit(fees_maker_quote, m_exchange->simulation()->bookIdCanon(bookId));
+        }
+
+        m_feePolicy->updateHistory(
+            m_exchange->simulation()->currentTimestamp(), bookId, restingAgentId, tradeQuote, false);
+        m_feePolicy->updateHistory(
+            m_exchange->simulation()->currentTimestamp(), bookId, aggressingAgentId, restingVolume, true);
 
         removeMarginOrders(bookId, OrderDirection::SELL, removedIdsShortSell);
         removeMarginOrders(bookId, OrderDirection::BUY, removedIdsMarginBuy);
@@ -622,7 +652,7 @@ void ClearingManager::removeMarginOrders(
 
 void ClearingManager::updateFeeTiers(Timestamp time) noexcept
 {
-    m_feePolicy->updateAgentsTiers(time);
+    m_feePolicy->updateAgentsTiers(time); ////###
 }
 
 //-------------------------------------------------------------------------

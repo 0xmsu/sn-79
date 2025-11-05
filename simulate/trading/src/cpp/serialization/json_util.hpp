@@ -51,6 +51,42 @@ void dumpJson(
 
 [[nodiscard]] decimal_t getDecimal(const rapidjson::Value& json);
 
+[[nodiscard]] rapidjson::Value packedDecimal2json(const auto& val, auto& allocator)
+{
+    auto toJson = [&](const auto& packed) {
+        rapidjson::Value arrJson{rapidjson::kArrayType};
+        arrJson.PushBack(
+            [&] {
+                uint64_t left{};
+                std::memcpy(
+                    std::bit_cast<uint8_t*>(&left),
+                    packed.data,
+                    sizeof(uint64_t));
+                return left;
+            }(),
+            allocator);
+        arrJson.PushBack(
+            [&] {
+                uint64_t right{};
+                std::memcpy(
+                    std::bit_cast<uint8_t*>(&right),
+                    packed.data + sizeof(uint64_t),
+                    sizeof(uint64_t));
+                return right;
+            }(),
+        allocator);
+        return arrJson;
+    };
+    using T = std::remove_cvref_t<decltype(val)>;
+    if constexpr (std::same_as<T, decimal_t>) {
+        return toJson(util::packDecimal(val));
+    } else if constexpr (std::same_as<T, PackedDecimal>) {
+        return toJson(val);
+    } else {
+        static_assert(false, "T should be either decimal_t or PackedDecimal");
+    }
+}
+
 void serializeHelper(
     rapidjson::Document& json,
     const std::string& key,
@@ -68,10 +104,14 @@ void setOptionalMember(rapidjson::Document& json, const std::string& key, std::o
             }
             if constexpr (std::constructible_from<rapidjson::Value, T>) {
                 return std::move(rapidjson::Value{opt.value()});
-            } else if constexpr (
+            }
+            else if constexpr (
                 std::constructible_from<rapidjson::Value, const char*, decltype(allocator)>
                 && requires (T t) {{ t.c_str() } -> std::convertible_to<const char*>; }) {
                 return std::move(rapidjson::Value{opt.value().c_str(), allocator});
+            }
+            else if constexpr (std::same_as<T, PackedDecimal>) {
+                return std::move(packedDecimal2json(*opt, allocator));
             } else {
                 static_assert(false, "No conversion from T to rapidjson::Value exists");
             }

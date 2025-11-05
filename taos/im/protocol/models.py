@@ -36,7 +36,7 @@ class FeePolicy(BaseModel):
                 case 'tiered':
                     fee_policy.tiers = [FeeTier(volume_required=tier.attrib['volumeRequired'], maker_fee=tier.attrib['makerFee'], taker_fee=tier.attrib['takerFee']) for tier in xml.findall("Tier")]
         else:
-            fee_policy = FeePolicy(fee_type=xml.attrib['type'], params={k : v for k, v in xml.attrib if k != 'type'})
+            fee_policy = FeePolicy(fee_type=xml.attrib['type'], params={k : v for k, v in xml.attrib.items() if k != 'type'}, tiers=[FeeTier(volume_required=0, maker_fee=0.0, taker_fee=0.0)]  )
             fee_policy.tiers = [FeeTier(volume_required=0, maker_fee=0.0, taker_fee=0.0 )]
         return fee_policy
 
@@ -48,10 +48,11 @@ class FeePolicy(BaseModel):
         prometheus_info['simulation_fee_policy_type'] = self.fee_type
         for name, value in self.params.items():
             prometheus_info[f'simulation_fee_policy_{name}'] = str(value)
-        for i, tier in enumerate(self.tiers):
-            prometheus_info[f'simulation_fee_policy_tier_{i}_volume_required'] = f"{tier.volume_required:.2f}"
-            prometheus_info[f'simulation_fee_policy_tier_{i}_maker_rate'] = f"{tier.maker_fee * 100:.4f}"
-            prometheus_info[f'simulation_fee_policy_tier_{i}_taker_rate'] = f"{tier.taker_fee * 100:.4f}"
+        if self.fee_type == 'tiered':
+            for i, tier in enumerate(self.tiers):
+                prometheus_info[f'simulation_fee_policy_tier_{i}_volume_required'] = f"{tier.volume_required:.2f}"
+                prometheus_info[f'simulation_fee_policy_tier_{i}_maker_rate'] = f"{tier.maker_fee * 100:.4f}"
+                prometheus_info[f'simulation_fee_policy_tier_{i}_taker_rate'] = f"{tier.taker_fee * 100:.4f}"
         return prometheus_info
 
 class MarketSimulationConfig(BaseModel):
@@ -1425,6 +1426,7 @@ class Book(BaseModel):
     """
 
     i: int = Field(alias="id")
+    r: float | None = Field(alias="MTR", default=None)
     b: list[LevelInfo] = Field(alias="bids")
     a: list[LevelInfo] = Field(alias="asks")
     e: list[Order | TradeInfo | Cancellation] | None = Field(alias="events")
@@ -1438,6 +1440,16 @@ class Book(BaseModel):
             int: The book's unique identifier.
         """
         return self.i
+
+    @property
+    def MTR(self) -> float:
+        """
+        Get the current maker-taker ratio for the order book.
+
+        Returns:
+            int: The book's unique identifier.
+        """
+        return self.r
 
     @property
     def bids(self) -> list[LevelInfo]:
@@ -1930,12 +1942,12 @@ class Fees(BaseModel):
         maker_fee_rate (float): The current maker fee rate for the agent.
         taker_fee_rate (float): The current taker fee rate for the agent.
     """
-    v : float = Field(alias="volume_traded")
+    v : float | None = Field(alias="volume_traded", default=None)
     m : float = Field(alias="maker_fee_rate")
     t : float = Field(alias="taker_fee_rate")
 
     @property
-    def volume_traded(self) -> str:
+    def volume_traded(self) -> float | None:
         return self.v
 
     @property

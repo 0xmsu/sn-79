@@ -16,6 +16,7 @@
 #include "taosim/simulation/SimulationState.hpp"
 #include "common.hpp"
 #include "taosim/simulation/ISimulation.hpp"
+#include "taosim/replay/ReplayDesc.hpp"
 
 #include <fmt/core.h>
 
@@ -34,7 +35,12 @@ class Simulation
 {
 public:
     Simulation() noexcept;
-    Simulation(uint32_t blockIdx, const fs::path& logDir);
+    Simulation(
+        uint32_t blockIdx,
+        uint32_t blockDim,
+        const fs::path& logDir,
+        bool replayMode = false,
+        taosim::replay::ReplayDesc = {});
 
     void dispatchMessage(
         Timestamp occurrence,
@@ -108,13 +114,24 @@ public:
     [[nodiscard]] uint32_t blockIdx() const noexcept { return m_blockIdx; }
     [[nodiscard]] auto&& logWindow(this auto&& self) noexcept { return self.m_logWindow; }
     [[nodiscard]] auto&& messageQueue(this auto&& self) noexcept { return self.m_messageQueue; }
-    [[nodiscard]] auto&& replacedAgents(this auto&& self) noexcept { return self.m_replacedAgents; }
+    [[nodiscard]] bool replayMode() const noexcept { return m_replayMode; }
+    [[nodiscard]] const auto& replayDesc() const noexcept { return m_replayDesc; }
+    [[nodiscard]] auto&& timestampToMidPrice(this auto&& self) noexcept { return self.m_timestampToMidPrice; }
 
-    [[nodiscard]] bool isReplacedAgent(const std::string& name);
+    [[nodiscard]] bool shouldAdjustLimitPrice(Message::Ptr msg) const noexcept
+    {
+        return m_replayMode
+            && m_replayDesc.adjustLimitPrices
+            && !isReplacedAgent(msg->source)
+            && !isInitAgent(msg->source);
+    }
+
+    [[nodiscard]] bool isReplacedAgent(const std::string& name) const noexcept;
+    [[nodiscard]] bool isInitAgent(const std::string& name) const noexcept;
 
     [[nodiscard]] BookId bookIdCanon(BookId bookId) const noexcept
     {
-        return m_blockIdx * m_exchange->books().size() + bookId;
+        return m_blockIdx * m_blockDim + bookId;
     }
     
     virtual const fs::path& logDir() const noexcept override { return m_logDir; }
@@ -178,9 +195,12 @@ private:
     fs::path m_logDir;
     taosim::simulation::SimulationConfig m_config2;
     uint32_t m_blockIdx{};
+    uint32_t m_blockDim{};
     fs::path m_baseLogDir;
     Timestamp m_logWindow{};
-    std::set<std::string> m_replacedAgents;
+    bool m_replayMode{};
+    taosim::replay::ReplayDesc m_replayDesc;
+    std::unordered_map<Timestamp, taosim::decimal_t> m_timestampToMidPrice;
 
     friend class LocalAgentManager;
     friend class MultiBookExchangeAgent;

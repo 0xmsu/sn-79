@@ -204,14 +204,22 @@ decimal_t Balance::freeReservation(OrderID id, BookId bookId, std::optional<deci
         m_free = roundAmount(m_free);
     }
 
-    checkConsistency(std::source_location::current(), bookId);
-
     if (m_reserved > 0_dec && m_reservations.empty()) {
-        throw std::runtime_error{fmt::format(
-            "{}: In book #{}, Unable to free reservation of {} for order #{} : "
-            "No reservations left but amount reserved is {}",
-            ctx, bookId, amount.value_or(-1_dec), id, m_reserved)};
+        if (util::round(m_reserved, m_roundingDecimals - 1) == 0_dec){
+            m_reserved = 0_dec;
+            fmt::println(
+                "{}: In book #{}, some residual after freeing reservation of {} for order #{} : "
+                "No reservations left but amount reserved is {}. m_reserved corrected!",
+                ctx, bookId, amount.value_or(-1_dec), id, m_reserved);
+        } else {
+            throw std::runtime_error{fmt::format(
+                "{}: In book #{}, Unable to free reservation of {} for order #{} : "
+                "No reservations left but amount reserved is {}",
+                ctx, bookId, amount.value_or(-1_dec), id, m_reserved)};
+        }
     }
+
+    checkConsistency(std::source_location::current(), bookId);
 
     return amount.value();
 }
@@ -281,35 +289,7 @@ void Balance::jsonSerialize(rapidjson::Document& json, const std::string& key) c
 
 void Balance::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("initial", rapidjson::Value{util::packDecimal(m_initial)}, allocator);
-        json.AddMember("free", rapidjson::Value{util::packDecimal(m_free)}, allocator);
-        json.AddMember("reserved", rapidjson::Value{util::packDecimal(m_reserved)}, allocator);
-        json.AddMember("total", rapidjson::Value{util::packDecimal(m_total)}, allocator);
-        json.AddMember(
-            "symbol",
-            !m_symbol.empty()
-                ? rapidjson::Value{m_symbol.c_str(), allocator}.Move()
-                : rapidjson::Value{}.SetNull(),
-            allocator);
-        json.AddMember("roundingDecimals", rapidjson::Value{m_roundingDecimals}, allocator);
-        json::serializeHelper(
-            json,
-            "reservations",
-            [this](rapidjson::Document& json) {
-                json.SetObject();
-                auto& allocator = json.GetAllocator();
-                for (const auto& [orderId, amount] : m_reservations) {
-                    json.AddMember(
-                        rapidjson::Value{std::to_string(orderId).c_str(), allocator},
-                        rapidjson::Value{util::packDecimal(amount)},
-                        allocator);
-                }
-            });
-    };
-    json::serializeHelper(json, key, serialize);
+
 }
 
 //-------------------------------------------------------------------------
@@ -379,6 +359,11 @@ std::optional<decimal_t> Balance::roundAmount(std::optional<decimal_t> amount) c
 void Balance::checkConsistency(std::source_location sl, BookId bookId)
 {
     if (m_total != m_free + m_reserved) {
+        fmt::println(
+            "{} : In book {} there is inconsistency in the accounting where total {}"
+            " is not equal to free {} +  reserved {} = {}",
+            sl.function_name(), bookId, m_total, m_free, m_reserved, m_free + m_reserved);
+            
         if (m_total > m_free + m_reserved && util::round(m_total - m_free - m_reserved, m_roundingDecimals - 2) == 0_dec){
             m_free = m_total - m_reserved;
         } else if (m_total < m_free + m_reserved && util::round(m_free + m_reserved - m_total, m_roundingDecimals - 2)  == 0_dec){
@@ -389,11 +374,6 @@ void Balance::checkConsistency(std::source_location sl, BookId bookId)
                 " is not equal to free {} +  reserved {} = {}",
                 sl.function_name(), bookId, m_total, m_free, m_reserved, m_free + m_reserved)};
         }
-
-        fmt::println(
-            "{} : In book {} there is inconsistency in the accounting where total {}"
-            " is not equal to free {} +  reserved {} = {}",
-            sl.function_name(), bookId, m_total, m_free, m_reserved, m_free + m_reserved);
     }
     if (m_total < 0_dec || m_free < 0_dec || m_reserved < 0_dec) {
         throw std::runtime_error{fmt::format(

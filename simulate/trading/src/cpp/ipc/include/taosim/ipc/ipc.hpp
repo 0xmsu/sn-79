@@ -8,7 +8,6 @@
 #include <boost/interprocess/mapped_region.hpp>
 
 #include "PosixMessageQueue.hpp"
-#include "PosixSemaphore.hpp"
 #include "util.hpp"
 
 namespace bipc = boost::interprocess;

@@ -29,6 +29,7 @@ target_link_libraries(process
     PRIVATE
         taosim::exchange
         taosim::message
+        taosim::replay
         taosim::simulation
         pybind11::embed
 )

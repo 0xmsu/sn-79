@@ -143,7 +143,7 @@ def validate_responses(self: Validator, synapses: dict[int, MarketSimulationStat
                     f"excess instructions were dropped. Final instruction count {len(final_instructions)}."
                 )
                 for book_id, count in instructions_per_book.items():
-                    bt.logging.debug(f"Agent {uid} Book {book_id} : {count} Instructions")
+                    bt.logging.trace(f"Agent {uid} Book {book_id} : {count} Instructions")
             # Update the synapse response with only the validated instructions
             synapse.response.instructions = final_instructions
             total_responses += 1
@@ -247,7 +247,6 @@ async def forward(self: Validator, synapse: MarketSimulationStateUpdate) -> List
     query_start = time.time()
     synapse_responses = {}
     self._query_done_event.clear()
-    await asyncio.sleep(0)
 
     async def query_uid(uid):
         try:
@@ -334,7 +333,6 @@ async def forward(self: Validator, synapse: MarketSimulationStateUpdate) -> List
     response_start = time.time()
     missing_count = 0
     for uid in range(len(self.metagraph.axons)):
-        await asyncio.sleep(0)
         if uid not in self.deregistered_uids and uid not in synapse_responses:
             axon_synapses[uid] = self.dendrite.preprocess_synapse_for_request(
                 self.metagraph.axons[uid],
@@ -352,21 +350,17 @@ async def forward(self: Validator, synapse: MarketSimulationStateUpdate) -> List
     
     self.querying = False
     self._query_done_event.set()
-    await asyncio.sleep(0)
 
     start = time.time()
     total_responses, total_instructions, success, timeouts, failures = validate_responses(self, synapse_responses)
     bt.logging.info(f"Validated Responses ({time.time()-start:.4f}s).")
-    await asyncio.sleep(0)
     start = time.time()
     update_stats(self, synapse_responses)
     bt.logging.info(f"Updated Stats ({time.time()-start:.4f}s).")
-    await asyncio.sleep(0)
     start = time.time()
     responses.extend(set_delays(self, synapse_responses))
     bt.logging.info(f"Set Delays ({time.time()-start:.4f}s).")
     bt.logging.trace(f"Responses: {responses}")
-    await asyncio.sleep(0)
     bt.logging.info(f"Received {total_responses} valid responses containing {total_instructions} instructions "
                     f"({success} SUCCESS | {timeouts} TIMEOUTS | {failures} FAILURES).")
     return responses

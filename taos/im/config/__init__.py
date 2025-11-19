@@ -124,8 +124,8 @@ def add_im_validator_args(cls, parser):
     parser.add_argument(
         "--scoring.sharpe.parallel_workers",
         type=int,
-        help="Number of parallel workers to use in Sharpe calculation. (0 => no parallelization)",
-        default=0,
+        help="Number of parallel workers to use in Sharpe calculation. (0 => no parallelization, -1 => auto [half available cores])",
+        default=-1,
     )
 
     parser.add_argument(

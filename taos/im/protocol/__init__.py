@@ -315,21 +315,21 @@ class MarketSimulationStateUpdate(SimulationStateUpdate):
 
             start = time.time()
             decompressed = decompress(self.compressed, self.compression_engine, self.version)
-            bt.logging.debug(f"Decompressed state update ({time.time() - start:.4f}s)")
+            bt.logging.trace(f"Decompressed state update ({time.time() - start:.4f}s)")
             self.compressed = None
 
             if not lazy:
                 sstart = time.time()
                 self.books = decompressed['books']
-                bt.logging.debug(f"Populated books ({time.time() - sstart:.4f}s)")
+                bt.logging.trace(f"Populated books ({time.time() - sstart:.4f}s)")
 
                 sstart = time.time()
                 self.accounts = decompressed['accounts']
-                bt.logging.debug(f"Populated accounts ({time.time() - sstart:.4f}s)")
+                bt.logging.trace(f"Populated accounts ({time.time() - sstart:.4f}s)")
             else:
                 sstart = time.time()
                 object.__setattr__(self, "books", LazyBooks(decompressed.get("books", {})))
-                bt.logging.debug(f"Prepared books [Lazy] ({time.time() - sstart:.4f}s)")
+                bt.logging.trace(f"Prepared books [Lazy] ({time.time() - sstart:.4f}s)")
 
                 sstart = time.time()
                 object.__setattr__(
@@ -337,21 +337,21 @@ class MarketSimulationStateUpdate(SimulationStateUpdate):
                     "accounts",
                     LazyAccounts(decompressed.get("accounts", {}))
                 )
-                bt.logging.debug(f"Prepared accounts [Lazy] ({time.time() - sstart:.4f}s)")
+                bt.logging.trace(f"Prepared accounts [Lazy] ({time.time() - sstart:.4f}s)")
 
             sstart = time.time()
             self.notices = decompressed['notices']
-            bt.logging.debug(f"Populated notices ({time.time() - sstart:.4f}s)")
+            bt.logging.trace(f"Populated notices ({time.time() - sstart:.4f}s)")
 
             sstart = time.time()
             self.config = decompressed['config']
-            bt.logging.debug(f"Populated config ({time.time() - sstart:.4f}s)")
+            bt.logging.trace(f"Populated config ({time.time() - sstart:.4f}s)")
 
             sstart = time.time()
             self.response = decompressed['response']
-            bt.logging.debug(f"Populated response ({time.time() - sstart:.4f}s)")
+            bt.logging.trace(f"Populated response ({time.time() - sstart:.4f}s)")
 
-            bt.logging.debug(f"Parsed state update ({time.time() - start:.4f}s)")
+            bt.logging.trace(f"Parsed state update ({time.time() - start:.4f}s)")
             return self
         except Exception as ex:
             bt.logging.error(f"Failed to decompress {self.name} synapse data! {ex}\n{traceback.format_exc()}")

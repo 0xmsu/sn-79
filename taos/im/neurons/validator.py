@@ -36,6 +36,7 @@ if __name__ != "__mp_main__":
     import mmap
     import msgpack
     import atexit
+    import multiprocessing
     from datetime import datetime, timedelta
     from ypyjson import YpyObject
 
@@ -45,7 +46,8 @@ if __name__ != "__mp_main__":
     from typing import Tuple, Dict
     from fastapi import FastAPI, APIRouter
     from fastapi import Request
-    from threading import Thread, Lock
+    import threading
+    from threading import Thread, Lock, Event
     from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
     import psutil
@@ -80,27 +82,58 @@ if __name__ != "__mp_main__":
             """
             add_im_validator_args(cls, parser)
 
-        def _maintain(self) -> None:
+        async def wait_for_event(self, event: asyncio.Event, wait_process: str, run_process: str):
+            if not event.is_set():
+                bt.logging.info(f"Waiting for {wait_process} to complete before {run_process}...")
+                start_wait = time.time()
+                while not event.is_set():
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=1.0)
+                        break
+                    except asyncio.TimeoutError:
+                        elapsed = time.time() - start_wait
+                        bt.logging.info(f"Waiting for {wait_process} to complete before {run_process}... ({elapsed:.1f}s)")
+
+                total_wait = time.time() - start_wait
+                bt.logging.info(f"Completed {wait_process} after {total_wait:.1f}s, {run_process}...")
+
+        async def _maintain(self) -> None:
+            """
+            Async wrapper for maintenance that runs sync operations in executor.
+            """
             try:
                 self.maintaining = True
+                await self.wait_for_event(self._query_done_event, "query", "synchronizing")
                 bt.logging.info(f"Synchronizing at Step {self.step}...")
-                start=time.time()
-                self.sync(save_state=False)
-                if not check_simulator(self):
-                    restart_simulator(self)
+                start = time.time()
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    self.maintenance_executor,
+                    self._sync_and_check
+                )
                 bt.logging.info(f"Synchronized ({time.time()-start:.4f}s)")
+
             except Exception as ex:
-                self.pagerduty_alert(f"Failed to sync : {ex}", details={"trace" : traceback.format_exc()})
+                self.pagerduty_alert(f"Failed to sync: {ex}", details={"trace": traceback.format_exc()})
             finally:
                 self.maintaining = False
+
+        def _sync_and_check(self):
+            """
+            Helper function that runs sync operations.
+            """
+            self.sync(save_state=False)
+            if not check_simulator(self):
+                restart_simulator(self)
 
         def maintain(self) -> None:
             """
             Maintains the metagraph and sets weights.
-            This method is run in a separate thread to speed up processing.
             """
             if not self.maintaining and self.last_state and self.last_state.timestamp % self.config.scoring.interval == 2_000_000_000:
-                Thread(target=self._maintain, args=(), daemon=True, name=f'maintain_{self.step}').start()
+                bt.logging.debug(f"[MAINT] Scheduling from thread: {threading.current_thread().name}")
+                bt.logging.debug(f"[MAINT] Main loop ID: {id(self.main_loop)}, Current loop ID: {id(asyncio.get_event_loop())}")
+                self.main_loop.call_soon_threadsafe(lambda: self.main_loop.create_task(self._maintain()))
 
         def monitor(self) -> None:
             while True:
@@ -228,9 +261,11 @@ if __name__ != "__mp_main__":
                 return False
 
             self.shared_state_saving = True
-            await asyncio.sleep(0)
+            await self.wait_for_event(self._query_done_event, "query", "preparing state data")
 
             try:
+                start = time.time()
+                prep_start = time.time()
                 bt.logging.debug("Preparing state for saving...")
 
                 simulation_state_data = {
@@ -252,7 +287,6 @@ if __name__ != "__mp_main__":
                     "pending_notices": self.pending_notices,
                     "simulation.logDir": self.simulation.logDir,
                 }
-                await asyncio.sleep(0)
 
                 validator_state_data = {
                     "step": self.step,
@@ -270,10 +304,12 @@ if __name__ != "__mp_main__":
                     "taker_volume_sums": self.taker_volume_sums,
                     "self_volume_sums": self.self_volume_sums,
                 }
-                await asyncio.sleep(0)
+                bt.logging.info(f"Prepared save data ({time.time() - prep_start}s)")
+                await self.wait_for_event(self._query_done_event, "query", "saving state")
                 bt.logging.info("Saving state...")
+                future_start = time.time()
 
-                result = await asyncio.get_running_loop().run_in_executor(
+                future = asyncio.get_running_loop().run_in_executor(
                     self.save_state_executor,
                     save_state_worker,
                     simulation_state_data,
@@ -281,6 +317,10 @@ if __name__ != "__mp_main__":
                     self.simulation_state_file,
                     self.validator_state_file
                 )
+                while not future.done():
+                    await asyncio.sleep(0.1)
+                result = future.result()
+                bt.logging.info(f"Saved state ({time.time() - future_start}s)")
 
                 if result['success']:
                     bt.logging.success(
@@ -291,7 +331,7 @@ if __name__ != "__mp_main__":
                         f"Validator state saved to {self.validator_state_file} "
                         f"({result['validator_save_time']:.4f}s)"
                     )
-                    bt.logging.info(f"Total save time: {result['total_time']:.4f}s")
+                    bt.logging.info(f"Total save time: {result['total_time']:.4f}s | {time.time()-start}s")
                     return True
                 else:
                     bt.logging.error(f"Failed to save state: {result['error']}")
@@ -318,19 +358,14 @@ if __name__ != "__mp_main__":
             """
             Synchronous wrapper for save_state that schedules it on the event loop.
             """
+            if not self.last_state or self.last_state.timestamp % self.config.scoring.interval != 4_000_000_000:
+                return
             if self.shared_state_saving:
                 bt.logging.warning(f"Skipping save at step {self.step} — previous save still running.")
                 return
-            if not self.last_state or self.last_state.timestamp % self.config.scoring.interval != 4_000_000_000:
-                return
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(self._save_state())
-                else:
-                    loop.run_until_complete(self._save_state())
-            except RuntimeError:
-                asyncio.run(self._save_state())
+            bt.logging.debug(f"[SAVE] Scheduling from thread: {threading.current_thread().name}")
+            bt.logging.debug(f"[SAVE] Main loop ID: {id(self.main_loop)}, Current loop ID: {id(asyncio.get_event_loop())}")
+            self.main_loop.call_soon_threadsafe(lambda: self.main_loop.create_task(self._save_state()))
 
         def _save_state_sync(self):
             """
@@ -578,7 +613,7 @@ if __name__ != "__mp_main__":
                 'reward_executor': getattr(self, 'reward_executor', None),
                 'report_executor': getattr(self, 'report_executor', None),
                 'save_state_executor': getattr(self, 'save_state_executor', None),
-                'report_thread_executor': getattr(self, 'report_thread_executor', None),
+                'maintenance_executor': getattr(self, 'maintenance_executor', None),
             }
 
             for name, executor in executors.items():
@@ -638,6 +673,9 @@ if __name__ != "__mp_main__":
             self.last_state_time = None
             self.step_rates = []
 
+            self.main_loop = asyncio.new_event_loop()
+            self._main_loop_ready = Event()
+
             self.maintaining = False
             self.compressing = False
             self.querying = False
@@ -649,7 +687,8 @@ if __name__ != "__mp_main__":
             self._reporting_lock = Lock()
             self.reward_executor = ProcessPoolExecutor(max_workers=1)
             self.report_executor = ProcessPoolExecutor(max_workers=1)
-            self.save_state_executor = ProcessPoolExecutor(max_workers=1)
+            self.save_state_executor = ThreadPoolExecutor(max_workers=1)
+            self.maintenance_executor = ThreadPoolExecutor(max_workers=1)
             self._setup_signal_handlers()
             self._cleanup_done = False
             atexit.register(self.cleanup)
@@ -861,33 +900,25 @@ if __name__ != "__mp_main__":
             total_wait = time.time() - start_time
             bt.logging.debug(f"Wait completed after {total_wait:.1f}s")
 
+        async def _report(self):
+            try:
+                self.shared_state_reporting = True
+                await report(self)
+            finally:
+                self.shared_state_reporting = False
+
         def report(self) -> None:
             """
             Publish simulation metrics.
             """
             if self.config.reporting.disabled or not self.last_state or self.last_state.timestamp % self.config.scoring.interval != 0:
                 return
-            if getattr(self, "reporting", False) :
+            if self.shared_state_reporting:
                 bt.logging.warning(f"Skipping reporting at step {self.step} — previous report still running.")
                 return
-
-            async def run_report():
-                try:
-                    self.shared_state_reporting = True
-                    await report(self)
-                finally:
-                    self.shared_state_reporting = False
-
-            def thread_target():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(run_report())
-                finally:
-                    loop.close()
-            if not hasattr(self, 'report_thread_executor'):
-                self.report_thread_executor = ThreadPoolExecutor(max_workers=1)
-            self.report_thread_executor.submit(thread_target)
+            bt.logging.debug(f"[REPORT] Scheduling from thread: {threading.current_thread().name}")
+            bt.logging.debug(f"[REPORT] Main loop ID: {id(self.main_loop)}, Current loop ID: {id(asyncio.get_event_loop())}")
+            self.main_loop.call_soon_threadsafe(lambda: self.main_loop.create_task(self._report()))
 
         async def _compute_compact_volumes(self) -> Dict:
             """
@@ -1021,7 +1052,7 @@ if __name__ != "__mp_main__":
                                 'maker': {},
                                 'taker': {},
                                 'self': {}
-                            }                            
+                            }
                             for trade in trades:
                                 is_maker = trade['Ma'] == uid_item
                                 is_taker = trade['Ta'] == uid_item
@@ -1040,7 +1071,7 @@ if __name__ != "__mp_main__":
                                     book_volumes['total'][sampled_timestamp] + trade_value,
                                     volume_decimals
                                 )
-                                
+
                                 if book_id not in volume_deltas['total']:
                                     volume_deltas['total'][book_id] = 0.0
                                 volume_deltas['total'][book_id] += trade_value
@@ -1053,7 +1084,7 @@ if __name__ != "__mp_main__":
                                     if book_id not in volume_deltas['self']:
                                         volume_deltas['self'][book_id] = 0.0
                                     volume_deltas['self'][book_id] += trade_value
-                                    
+
                                 elif is_maker:
                                     book_volumes['maker'][sampled_timestamp] = round(
                                         book_volumes['maker'][sampled_timestamp] + trade_value,
@@ -1062,7 +1093,7 @@ if __name__ != "__mp_main__":
                                     if book_id not in volume_deltas['maker']:
                                         volume_deltas['maker'][book_id] = 0.0
                                     volume_deltas['maker'][book_id] += trade_value
-                                    
+
                                 elif is_taker:
                                     book_volumes['taker'][sampled_timestamp] = round(
                                         book_volumes['taker'][sampled_timestamp] + trade_value,
@@ -1079,7 +1110,7 @@ if __name__ != "__mp_main__":
                                     current_sum + delta,
                                     volume_decimals
                                 )
-                            
+
                             for book_id, delta in volume_deltas['maker'].items():
                                 key = (uid_item, book_id)
                                 current_sum = self.maker_volume_sums.get(key, 0.0)
@@ -1087,7 +1118,7 @@ if __name__ != "__mp_main__":
                                     current_sum + delta,
                                     volume_decimals
                                 )
-                            
+
                             for book_id, delta in volume_deltas['taker'].items():
                                 key = (uid_item, book_id)
                                 current_sum = self.taker_volume_sums.get(key, 0.0)
@@ -1095,7 +1126,7 @@ if __name__ != "__mp_main__":
                                     current_sum + delta,
                                     volume_decimals
                                 )
-                            
+
                             for book_id, delta in volume_deltas['self'].items():
                                 key = (uid_item, book_id)
                                 current_sum = self.self_volume_sums.get(key, 0.0)
@@ -1150,10 +1181,7 @@ if __name__ != "__mp_main__":
                 if waited > 0:
                     bt.logging.debug(f"Acquired reward lock after waiting {waited:.3f}s")
                 await asyncio.sleep(0)
-                bt.logging.debug("Waiting for query to complete before rewarding...")
-                start_query = time.time()
-                await self._query_done_event.wait()
-                bt.logging.debug(f"Querying complete after {time.time() - start_query}s, rewarding...")
+                await self.wait_for_event(self._query_done_event, "query", "rewarding")
 
                 self.shared_state_rewarding = True
                 await asyncio.sleep(0)
@@ -1173,9 +1201,10 @@ if __name__ != "__mp_main__":
                         bt.logging.info(f"Agent Scores Data Updated for {duration} ({time.time()-start:.4f}s)")
                         return
                     bt.logging.debug("[REWARD] Converting inventory history...")
+                    await self.wait_for_event(self._query_done_event, "query", "converting inventory history")
                     convert_start = time.time()
                     inventory_compact = {}
-                    
+
                     total_timestamps = 0
                     for uid in self.metagraph.uids:
                         uid_item = uid.item()
@@ -1187,8 +1216,9 @@ if __name__ != "__mp_main__":
                             total_timestamps += len(sorted_timestamps)
                         else:
                             inventory_compact[uid_item] = {}
-                    
+
                     bt.logging.debug(f"[REWARD] Converted inventory history in {time.time()-convert_start:.4f}s")
+                    await self.wait_for_event(self._query_done_event, "query", "computing compact volumes")
                     compact_start = time.time()
                     compact_volumes = await self._compute_compact_volumes()
                     bt.logging.debug(f"[REWARD] Computed compact volumes in {time.time()-compact_start:.4f}s")
@@ -1206,7 +1236,7 @@ if __name__ != "__mp_main__":
                                     'normalization_max': self.config.scoring.sharpe.normalization_max,
                                     'lookback': self.config.scoring.sharpe.lookback,
                                     'min_lookback': self.config.scoring.sharpe.min_lookback,
-                                    'parallel_workers': self.config.scoring.sharpe.parallel_workers,
+                                    'parallel_workers': self.config.scoring.sharpe.parallel_workers if self.config.scoring.sharpe.parallel_workers > 0 else multiprocessing.cpu_count() // 2,
                                 },
                                 'activity': {
                                     'capital_turnover_cap': self.config.scoring.activity.capital_turnover_cap,
@@ -1237,16 +1267,16 @@ if __name__ != "__mp_main__":
                     }
                     prep_time = time.time() - prep_start
                     bt.logging.debug(f"[REWARD] Prepared validator_data in {prep_time:.4f}s")
-                    
+
                     await asyncio.sleep(0)
-                    
-                    # Measure executor submission time (includes pickling)
+                    await self.wait_for_event(self._query_done_event, "query", "submitting reward task to executor")
+
                     bt.logging.debug("[REWARD] Submitting to executor...")
                     submit_start = time.time()
-                    
+
                     loop = asyncio.get_running_loop()
                     future = loop.run_in_executor(self.reward_executor, get_rewards, validator_data)
-                    
+
                     submit_time = time.time() - submit_start
                     bt.logging.debug(f"[REWARD] Submitted to executor in {submit_time:.4f}s")
 
@@ -1264,6 +1294,7 @@ if __name__ != "__mp_main__":
                     self.simulation_timestamp = updated_data.get('simulation_timestamp', self.simulation_timestamp)
 
                     bt.logging.debug(f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n{rewards}")
+                    await self.wait_for_event(self._query_done_event, "query", "updating scores")
                     self.update_scores(rewards, self.metagraph.uids)
                     bt.logging.info(f"Agent Scores Updated for {duration} ({time.time()-start:.4f}s)")
 
@@ -1272,14 +1303,16 @@ if __name__ != "__mp_main__":
                 finally:
                     self.shared_state_rewarding = False
                     await asyncio.sleep(0)
-                    bt.logging.debug(f"Completed rewarding (TOTAL {time.time()-start_wait:.4f}s).")            
+                    bt.logging.debug(f"Completed rewarding (TOTAL {time.time()-start_wait:.4f}s).")
             await asyncio.sleep(0)
 
         def reward(self, state : MarketSimulationStateUpdate) -> None:
             """
             Update agent rewards and recalculate scores.
             """
-            asyncio.get_event_loop().create_task(self._reward(state))
+            bt.logging.debug(f"[REWARD] Scheduling from thread: {threading.current_thread().name}")
+            bt.logging.debug(f"[REWARD] Main loop ID: {id(self.main_loop)}, Current loop ID: {id(asyncio.get_event_loop())}")
+            self.main_loop.call_soon_threadsafe(lambda: self.main_loop.create_task(self._reward(state)))
 
         async def handle_state(self, message : dict, state : MarketSimulationStateUpdate, receive_start : int) -> dict:
             # Every 1H of simulation time, check if there are any changes to the validator - if updates exist, pull them and restart.
@@ -1319,8 +1352,8 @@ if __name__ != "__mp_main__":
                 for bookId, book in state.books.items():
                     debug_text += '-' * 50 + "\n"
                     debug_text += f"BOOK {bookId}" + "\n"
-                    if book.bids and book.asks:
-                        debug_text += ' | '.join([f"{level.quantity:.4f}@{level.price}" for level in reversed(book.bids[:5])]) + '||' + ' | '.join([f"{level.quantity:.4f}@{level.price}" for level in book.asks[:5]]) + "\n"
+                    if book['b'] and book['a']:
+                        debug_text += ' | '.join([f"{level['q']:.4f}@{level['p']}" for level in reversed(book['b'][:5])]) + '||' + ' | '.join([f"{level['q']:.4f}@{level['p']}" for level in book['a'][:5]]) + "\n"
                     else:
                         debug_text += "EMPTY" + "\n"
                 bt.logging.debug("\n" + debug_text.strip("\n"))
@@ -1328,8 +1361,12 @@ if __name__ != "__mp_main__":
             # Process deregistration notices
             self.process_resets(state)
             # Forward state synapse to miners, populate response data to simulator object and serialize for returning to simulator.
-            response = SimulatorResponseBatch(await forward(self, state)).serialize()
-
+            start = time.time()
+            response = SimulatorResponseBatch(await forward(self, state))
+            bt.logging.debug(f"Gathered Response Batch ({time.time()-start}s)")
+            start = time.time()
+            response = response.serialize()
+            bt.logging.debug(f"Serialized Response Batch ({time.time()-start}s)")
             # Log response data, start state serialization and reporting threads, and return miner instructions to the simulator
             if len(response['responses']) > 0:
                 bt.logging.trace(f"RESPONSE : {response}")
@@ -1340,9 +1377,7 @@ if __name__ != "__mp_main__":
             # Calculate latest rewards, update miner scores, save state and publish metrics
             self.maintain()
             self.reward(state)
-            await asyncio.sleep(0)
             self.save_state()
-            await asyncio.sleep(0)
             self.report()
             await asyncio.sleep(0)
             bt.logging.info(f"State update handled ({time.time()-receive_start}s)")
@@ -1350,7 +1385,7 @@ if __name__ != "__mp_main__":
             return response
 
         async def _listen(self):
-            def receive(mq_req : posix_ipc.MessageQueue) -> dict:
+            def receive(mq_req: posix_ipc.MessageQueue) -> dict:
                 msg, priority = mq_req.receive()
                 receive_start = time.time()
                 bt.logging.info(f"Received state update from simulator (msgpack)")
@@ -1362,7 +1397,7 @@ if __name__ != "__mp_main__":
                     try:
                         with mmap.mmap(shm_req.fd, byte_size_req, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
                             packed_data = mm.read(byte_size_req)
-                        bt.logging.info(f"Unpacked state update ({time.time() - start:.4f}s)")
+                        bt.logging.info(f"Read state update ({time.time() - start:.4f}s)")
                         break
                     except Exception as ex:
                         if attempt < 5:
@@ -1370,7 +1405,7 @@ if __name__ != "__mp_main__":
                             time.sleep(0.005)
                         else:
                             bt.logging.error(f"mmap read failed on all 5 attempts: {ex}")
-                            self.pagerduty_alert(f"Failed to mmap read after 5 attempts : {ex}", details={"trace" : traceback.format_exc()})
+                            self.pagerduty_alert(f"Failed to mmap read after 5 attempts : {ex}", details={"trace": traceback.format_exc()})
                             raise ex
                     finally:
                         if packed_data is not None or attempt >= 5:
@@ -1389,12 +1424,11 @@ if __name__ != "__mp_main__":
                             time.sleep(0.005)
                         else:
                             bt.logging.error(f"Msgpack unpack failed on all 5 attempts: {ex}")
-                            self.pagerduty_alert(f"Failed to unpack simulator state after 5 attempts : {ex}", details={"trace" : traceback.format_exc()})
+                            self.pagerduty_alert(f"Failed to unpack simulator state after 5 attempts : {ex}", details={"trace": traceback.format_exc()})
                             raise ex
                 return result, receive_start
 
-            def respond(response : dict) -> dict:
-                import random
+            def respond(response: dict) -> dict:
                 self.last_response = response
                 packed_res = msgpack.packb(response, use_bin_type=True)
                 byte_size_res = len(packed_res)
@@ -1406,19 +1440,35 @@ if __name__ != "__mp_main__":
                 mq_res.send(byte_size_res.to_bytes(8, byteorder="little"))
                 mq_res.close()
 
-            while True:
-                response = {"responses" : []}
-                try:
-                    mq_req = posix_ipc.MessageQueue("/taosim-req", flags=posix_ipc.O_CREAT, max_messages=1, max_message_size=8)
-                    message, receive_start = receive(mq_req)
-                    state = MarketSimulationStateUpdate.parse_dict(message)
-                    response = await self.handle_state(message, state, receive_start)
-                except Exception as ex:
-                    traceback.print_exc()
-                    self.pagerduty_alert(f"Exception in posix listener loop : {ex}", details={"trace" : traceback.format_exc()})
-                finally:
-                    respond(response)
-                    mq_req.close()
+            mq_req = posix_ipc.MessageQueue("/taosim-req", flags=posix_ipc.O_CREAT, max_messages=1, max_message_size=8)
+            try:
+                while True:
+                    response = {"responses": []}
+                    try:
+                        loop = asyncio.get_event_loop()
+                        t1 = time.time()
+                        bt.logging.debug(f"[LISTEN] Starting receive at {t1:.3f}")
+                        message, receive_start = await loop.run_in_executor(None, receive, mq_req)
+                        t2 = time.time()
+                        bt.logging.debug(f"[LISTEN] Received message in {t2-t1:.4f}s")
+                        state = MarketSimulationStateUpdate.parse_dict(message)
+                        t3 = time.time()
+                        bt.logging.debug(f"[LISTEN] Parsed state in {t3-t2:.4f}s")
+                        response = await self.handle_state(message, state, receive_start)
+                        t4 = time.time()
+                        bt.logging.debug(f"[LISTEN] handle_state completed in {t4-t3:.4f}s")
+                    except Exception as ex:
+                        traceback.print_exc()
+                        self.pagerduty_alert(f"Exception in posix listener loop : {ex}", details={"trace": traceback.format_exc()})
+                    finally:
+                        t5 = time.time()
+                        bt.logging.debug(f"[LISTEN] Starting respond at {t5:.3f}")
+                        await loop.run_in_executor(None, respond, response)
+                        t6 = time.time()
+                        bt.logging.debug(f"[LISTEN] Respond completed in {t6-t5:.4f}s")
+                        bt.logging.debug(f"[LISTEN] Total loop iteration: {t6-t1:.4f}s")
+            finally:
+                mq_req.close()
 
         def listen(self):
             """Synchronous wrapper for the asynchronous _listen method."""
@@ -1524,10 +1574,36 @@ if __name__ == "__main__":
         time.sleep(1)
         for thread in threads:
             if not thread.is_alive():
-                validator.pagerduty_alert(f"Failed to start {name} thread!")
+                validator.pagerduty_alert(f"Failed to start {thread.name} thread!")
                 raise RuntimeError(f"Thread '{thread.name}' failed to start")
 
-        bt.logging.info(f"All threads running. Starting FastAPI server on port {validator.config.port}...")
+        bt.logging.info(f"All threads running. Starting FastAPI server and main event loop...")
+
+        def run_main_loop():
+            """Run the pre-created main event loop."""
+            async def keep_alive():
+                bt.logging.info(f"Main event loop started for background tasks")
+                bt.logging.debug(f"[MAINLOOP] Thread: {threading.current_thread().name}")
+                bt.logging.debug(f"[MAINLOOP] Loop: {validator.main_loop}")
+                try:
+                    while True:
+                        await asyncio.sleep(1)
+                except KeyboardInterrupt:
+                    bt.logging.info("Main event loop stopping...")
+            loop = validator.main_loop
+            asyncio.set_event_loop(loop)
+            validator._main_loop_ready.set()
+            bt.logging.debug(f"[MAINLOOP] Running loop: {loop}")
+            try:
+                loop.run_until_complete(keep_alive())
+            finally:
+                loop.close()
+
+        main_loop_thread = Thread(target=run_main_loop, daemon=True, name='main')
+        main_loop_thread.start()
+        threads.append(main_loop_thread)
+        time.sleep(0.5)
+        bt.logging.info(f"Starting FastAPI server on port {validator.config.port}...")
         uvicorn.run(app, host="0.0.0.0", port=validator.config.port)
     except KeyboardInterrupt:
         bt.logging.info("Keyboard interrupt received")

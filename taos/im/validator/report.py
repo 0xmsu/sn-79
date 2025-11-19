@@ -76,6 +76,7 @@ def publish_validator_gauges(self : Validator):
         None
     """
     bt.logging.debug(f"Publishing validator metrics...")
+    start = time.time()
     self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="uid").set( self.uid )
     self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="stake").set( self.metagraph.stake[self.uid] )
     self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="validator_trust").set( self.metagraph.validator_trust[self.uid] )
@@ -90,7 +91,8 @@ def publish_validator_gauges(self : Validator):
     disk_usage = disk_info.percent
     self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="cpu_usage_percent").set( cpu_usage )
     self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="ram_usage_percent").set( memory_usage )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="disk_usage_percent").set( disk_usage )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="disk_usage_percent").set( disk_usage )    
+    bt.logging.debug(f"Validator metrics published ({time.time()-start:.4f}s).")
 
 def publish_info(self : Validator) -> None:
     """
@@ -352,6 +354,7 @@ async def report(self: 'Validator') -> None:
             self.config.netuid,
             "step_rate"
         )
+        bt.logging.debug(f"Simulation metrics published ({time.time()-start:.4f}s).")
 
         has_new_trades = False
         has_new_miner_trades = False
@@ -359,9 +362,10 @@ async def report(self: 'Validator') -> None:
         publish_validator_gauges(self)
 
         self.prometheus_books.clear()
-        bt.logging.debug(f"Simulation metrics published ({time.time()-start:.4f}s).")
 
         if self.simulation.logDir:
+            await asyncio.sleep(0)
+            await self.wait_for_event(self._query_done_event, "query", "retrieving FP")
             bt.logging.debug(f"Retrieving fundamental prices...")
             start = time.time()
             self.load_fundamental()
@@ -370,12 +374,12 @@ async def report(self: 'Validator') -> None:
         bt.logging.debug(f"Publishing book metrics...")
         for bookId, book in self.last_state.books.items():
             await asyncio.sleep(0)
+            await self.wait_for_event(self._query_done_event, "query", "publishing book metrics")
             # --- Book bids ---
             if book['b']:
                 start = time.time()
                 bid_cumsum = 0
                 for i, level in enumerate(book['b']):
-                    await asyncio.sleep(0)
                     _set_if_changed(self.prometheus_book_gauges, level['p'],
                         self.wallet.hotkey.ss58_address, self.config.netuid, bookId, i, "bid")
                     _set_if_changed(self.prometheus_book_gauges, level['q'],
@@ -389,7 +393,6 @@ async def report(self: 'Validator') -> None:
                 start = time.time()
                 ask_cumsum = 0
                 for i, level in enumerate(book['a']):
-                    await asyncio.sleep(0)
                     _set_if_changed(self.prometheus_book_gauges, level['p'],
                         self.wallet.hotkey.ss58_address, self.config.netuid, bookId, i, "ask")
                     _set_if_changed(self.prometheus_book_gauges, level['q'],
@@ -400,7 +403,6 @@ async def report(self: 'Validator') -> None:
                     if i == 20: break
 
             bt.logging.debug(f"Book {bookId} levels metrics published ({time.time()-start:.4f}s).")
-            await asyncio.sleep(0)
 
             # --- Book aggregate metrics ---
             if book['b'] and book['a']:
@@ -430,7 +432,6 @@ async def report(self: 'Validator') -> None:
                     "books"
                 )
                 bt.logging.debug(f"Book {bookId} aggregate metrics published ({time.time()-start:.4f}s).")
-                await asyncio.sleep(0)
 
             # --- Book trade events ---
             if book['e']:
@@ -461,7 +462,6 @@ async def report(self: 'Validator') -> None:
                         self.wallet.hotkey.ss58_address, self.config.netuid, bookId, 0, "trade_buy_volume")
                     _set_if_changed(self.prometheus_book_gauges, sum([trade['q'] for trade in trades if trade['s'] == 1]),
                         self.wallet.hotkey.ss58_address, self.config.netuid, bookId, 0, "trade_sell_volume")
-                    await asyncio.sleep(0)
 
                     has_new_trades = True
 
@@ -478,7 +478,6 @@ async def report(self: 'Validator') -> None:
                         self.wallet.hotkey.ss58_address, self.config.netuid, bookId, 0, "dynamic_taker_rate")
                 _set_if_changed(self.prometheus_book_gauges, DISMTR,
                         self.wallet.hotkey.ss58_address, self.config.netuid, bookId, 0, "maker_taker_ratio")
-                await asyncio.sleep(0)
 
         await self.wait_for(lambda: self.shared_state_rewarding, "Waiting for reward calculation to complete before computing metrics...")
         # --- Trades metrics ---
@@ -488,8 +487,8 @@ async def report(self: 'Validator') -> None:
             self.prometheus_trades.clear()
             for bookId, trades in self.recent_trades.items():
                 await asyncio.sleep(0)
+                await self.wait_for_event(self._query_done_event, "query", "publishing trade metrics")
                 for trade in trades:
-                    await asyncio.sleep(0)
                     _set_if_changed(self.prometheus_trades, 1.0,
                         self.wallet.hotkey.ss58_address, self.config.netuid, trade.timestamp, duration_from_timestamp(trade.timestamp),
                         bookId, trade.taker_agent_id, trade.id, trade.taker_id, trade.taker_agent_id, trade.maker_id, trade.maker_agent_id,
@@ -506,7 +505,6 @@ async def report(self: 'Validator') -> None:
         maker_volume_sums_snapshot = dict(self.maker_volume_sums)
         taker_volume_sums_snapshot = dict(self.taker_volume_sums)
         self_volume_sums_snapshot = dict(self.self_volume_sums)
-        await asyncio.sleep(0)
     
         validator_data = {
             'simulation_timestamp': self.simulation_timestamp,
@@ -527,15 +525,14 @@ async def report(self: 'Validator') -> None:
                 'quoteDecimals': self.simulation.quoteDecimals,
             }
         }
-        await asyncio.sleep(0)
 
         state_data = {
             'accounts': self.last_state.accounts,
             'books': self.last_state.books,
             'notices': self.last_state.notices,
         }
-        await asyncio.sleep(0)
         
+        await self.wait_for_event(self._query_done_event, "query", "calculating miner metrics")
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(self.report_executor, report_worker, validator_data, state_data)
         while not future.done():
@@ -548,7 +545,6 @@ async def report(self: 'Validator') -> None:
             return
 
         bt.logging.debug(f"Miner metrics computed ({time.time()-computation_start:.4f}s).")
-        await asyncio.sleep(0)
 
         metrics = result['metrics']
         miner_metrics = metrics['miner_metrics']
@@ -559,6 +555,7 @@ async def report(self: 'Validator') -> None:
 
         for agentId, accounts in self.last_state.accounts.items():
             await asyncio.sleep(0)
+            await self.wait_for_event(self._query_done_event, "query", "publishing accounts metrics")
             initial_balance_publish_status = {bookId: False for bookId in range(self.simulation.book_count)}
             for bookId, account in accounts.items():
                 if self.initial_balances[agentId][bookId]['BASE'] is not None and not self.initial_balances_published[agentId]:
@@ -580,7 +577,6 @@ async def report(self: 'Validator') -> None:
             sharpes = self.sharpe_values[agentId]
 
             for bookId, account in accounts.items():
-                await asyncio.sleep(0)
                 _set_if_changed(self.prometheus_agent_gauges, account['bb']['t'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "base_balance_total")
                 _set_if_changed(self.prometheus_agent_gauges, account['bb']['f'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "base_balance_free")
                 _set_if_changed(self.prometheus_agent_gauges, account['bb']['r'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "base_balance_reserved")
@@ -591,7 +587,6 @@ async def report(self: 'Validator') -> None:
                 _set_if_changed(self.prometheus_agent_gauges, account['bc'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "base_collateral")
                 _set_if_changed(self.prometheus_agent_gauges, account['ql'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "quote_loan")
                 _set_if_changed(self.prometheus_agent_gauges, account['qc'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "quote_collateral")
-                await asyncio.sleep(0)
                 if account['f']['v']:
                     _set_if_changed(self.prometheus_agent_gauges, account['f']['v'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "fees_traded_volume")
                 _set_if_changed(self.prometheus_agent_gauges, account['f']['m'], self.wallet.hotkey.ss58_address, self.config.netuid, bookId, agentId, "fees_maker_rate")
@@ -619,6 +614,7 @@ async def report(self: 'Validator') -> None:
         start = time.time()
         for agentId, notices in self.last_state.notices.items():
             await asyncio.sleep(0)
+            await self.wait_for_event(self._query_done_event, "query", "publishing miner trade metrics")
             if agentId < 0:
                 continue
             for notice in notices:
@@ -631,9 +627,10 @@ async def report(self: 'Validator') -> None:
         if has_new_miner_trades:
             self.prometheus_miner_trades.clear()
             for uid, book_miner_trades in self.recent_miner_trades.items():
+                await asyncio.sleep(0)
+                await self.wait_for_event(self._query_done_event, "query", "publishing miner trades")
                 for bookId, miner_trades in book_miner_trades.items():
                     if len(miner_trades) > 0:
-                        await asyncio.sleep(0)
                         last_maker_trade = None
                         last_taker_trade = None
                         for miner_trade, role in self.recent_miner_trades[uid][bookId]:
@@ -658,6 +655,7 @@ async def report(self: 'Validator') -> None:
 
         for agentId in miner_metrics:
             await asyncio.sleep(0)
+            await self.wait_for_event(self._query_done_event, "query", "publishing miner metrics")
             m = miner_metrics[agentId]
 
             _set_if_changed(self.prometheus_miner_gauges, m['total_base_balance'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "total_base_balance")
@@ -685,7 +683,6 @@ async def report(self: 'Validator') -> None:
             _set_if_changed(self.prometheus_miner_gauges, m['min_daily_volume']['self'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "min_daily_self_volume")
 
             _set_if_changed(self.prometheus_miner_gauges, m['activity_factor'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "activity_factor")
-            await asyncio.sleep(0)
 
             if m['sharpe'] is not None:
                 _set_if_changed(self.prometheus_miner_gauges, m['sharpe'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "sharpe")
@@ -700,7 +697,6 @@ async def report(self: 'Validator') -> None:
                     self.prometheus_miner_gauges.remove(self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "sharpe")
                 except KeyError:
                     pass
-            await asyncio.sleep(0)
 
             _set_if_changed(self.prometheus_miner_gauges, m['unnormalized_score'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "unnormalized_score")
             _set_if_changed(self.prometheus_miner_gauges, m['score'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "score")
@@ -710,9 +706,8 @@ async def report(self: 'Validator') -> None:
             _set_if_changed(self.prometheus_miner_gauges, (self.metagraph.consensus[agentId] if len(self.metagraph.consensus) > agentId else 0.0), self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "consensus")
             _set_if_changed(self.prometheus_miner_gauges, (self.metagraph.incentive[agentId] if len(self.metagraph.incentive) > agentId else 0.0), self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "incentive")
             _set_if_changed(self.prometheus_miner_gauges, (self.metagraph.emission[agentId] if len(self.metagraph.emission) > agentId else 0.0), self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "emission")
-            await asyncio.sleep(0)
 
-            if self.simulation_timestamp % (self.simulation.publish_interval * 100) == 0:
+            if self.miner_stats[agentId]['requests'] >= 100:
                 _set_if_changed(self.prometheus_miner_gauges, self.miner_stats[agentId]['requests'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "requests")
                 _set_if_changed(self.prometheus_miner_gauges, self.miner_stats[agentId]['requests'] - self.miner_stats[agentId]['failures'] - self.miner_stats[agentId]['timeouts'] - self.miner_stats[agentId]['rejections'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "success")
                 _set_if_changed(self.prometheus_miner_gauges, self.miner_stats[agentId]['failures'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "failures")
@@ -720,7 +715,6 @@ async def report(self: 'Validator') -> None:
                 _set_if_changed(self.prometheus_miner_gauges, self.miner_stats[agentId]['rejections'], self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "rejections")
                 _set_if_changed(self.prometheus_miner_gauges, (sum(self.miner_stats[agentId]['call_time']) / len(self.miner_stats[agentId]['call_time']) if len(self.miner_stats[agentId]['call_time']) > 0 else 0), self.wallet.hotkey.ss58_address, self.config.netuid, agentId, "call_time")
                 self.miner_stats[agentId] = {'requests': 0, 'timeouts': 0, 'failures': 0, 'rejections': 0, 'call_time': []}
-                await asyncio.sleep(0)
 
             _set_if_changed_metric(
                 self.prometheus_miners,
@@ -750,7 +744,6 @@ async def report(self: 'Validator') -> None:
                 score=m['score'],
                 miner_gauge_name='miners'
             )
-            await asyncio.sleep(0)
 
         bt.logging.debug(f"Miner and metagraph metrics published ({time.time()-start:.4f}s).")
         bt.logging.info(f"Metrics Published for Step {report_step} ({time.time()-report_start}s).")

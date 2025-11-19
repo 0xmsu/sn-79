@@ -19,16 +19,12 @@
 # DEALINGS IN THE SOFTWARE.
 
 import torch
-import math
-import traceback
 import random
 import bittensor as bt
 import numpy as np
 from typing import Dict, Tuple
 from taos.im.neurons.validator import Validator
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
-from taos.im.protocol.models import Account, Book, TradeInfo
-from taos.im.protocol.events import TradeEvent
 from taos.im.utils import normalize
 from taos.im.utils.sharpe import sharpe, batch_sharpe
 

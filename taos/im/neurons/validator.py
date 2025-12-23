@@ -720,7 +720,7 @@ if __name__ != "__mp_main__":
                 - Saves initial state.
 
             Args:
-                timestamp (int): Simulation start timestamp.
+                timestamp (int): Simulation start timestamp (always 0).
                 event (SimulationStartEvent): Contains simulation log directory and metadata.
 
             Returns:
@@ -731,8 +731,8 @@ if __name__ != "__mp_main__":
 
             bt.logging.info("Shifting timestamps for simulation restart...")
             
-            old_simulation_timestamp = self.simulation_timestamp
-            new_simulation_timestamp = timestamp
+            old_simulation_timestamp = self.simulation_timestamp  # End time of old simulation
+            new_simulation_timestamp = timestamp  # Start time of new simulation (0)
             
             sharpe_lookback_period = (
                 self.config.scoring.sharpe.lookback * 
@@ -740,18 +740,16 @@ if __name__ != "__mp_main__":
             )
             volume_assessment_period = self.config.scoring.activity.trade_volume_assessment_period
             
-            sharpe_threshold = old_simulation_timestamp - sharpe_lookback_period
-            volume_threshold = old_simulation_timestamp - volume_assessment_period
-            
-            bt.logging.info(f"Preserving trade volumes for last {volume_assessment_period/1e12:.2f} hours")
-            bt.logging.info(f"Preserving inventory/P&L for last {sharpe_lookback_period/1e12:.2f} hours")
+            new_sharpe_threshold = new_simulation_timestamp - sharpe_lookback_period
+            new_volume_threshold = new_simulation_timestamp - volume_assessment_period
             
             pruned_total = defaultdict(lambda: defaultdict(float))
             pruned_maker = defaultdict(lambda: defaultdict(float))
             pruned_taker = defaultdict(lambda: defaultdict(float))
             pruned_self = defaultdict(lambda: defaultdict(float))
             pruned_roundtrip = defaultdict(lambda: defaultdict(float))
-            
+
+            # Shift trade volume timestamps
             bt.logging.info("Shifting trade volume timestamps...")
             shifted_trade_volumes = {}
             for uid in range(self.subnet_info.max_uids):
@@ -764,9 +762,9 @@ if __name__ != "__mp_main__":
                                 if role in self.trade_volumes[uid][bookId]:
                                     shifted_times = {}
                                     for prev_time, volume in self.trade_volumes[uid][bookId][role].items():
-                                        if prev_time >= volume_threshold:  # Use VOLUME threshold
-                                            time_from_old_end = old_simulation_timestamp - prev_time
-                                            new_time = new_simulation_timestamp + time_from_old_end
+                                        time_from_old_end = old_simulation_timestamp - prev_time
+                                        new_time = new_simulation_timestamp - time_from_old_end
+                                        if new_time >= new_volume_threshold:
                                             shifted_times[new_time] = volume
                                         else:
                                             if role == 'total':
@@ -777,6 +775,7 @@ if __name__ != "__mp_main__":
                                                 pruned_taker[uid][bookId] += volume
                                             elif role == 'self':
                                                 pruned_self[uid][bookId] += volume
+                                    
                                     if shifted_times:
                                         shifted_trade_volumes[uid][bookId][role] = shifted_times
             
@@ -830,17 +829,20 @@ if __name__ != "__mp_main__":
             shifted_inventory = {}
             for uid in range(self.subnet_info.max_uids):
                 if uid in self.inventory_history and self.inventory_history[uid]:
-                    # Keep only last N observations (same as runtime pruning)
                     hist = self.inventory_history[uid]
+                    # Keep only last N observations before shifting
                     if len(hist) > self.config.scoring.sharpe.lookback:
                         timestamps_to_keep = sorted(hist.keys())[-self.config.scoring.sharpe.lookback:]
                         hist = {ts: hist[ts] for ts in timestamps_to_keep}
                     
                     shifted_inventory[uid] = {}
                     for prev_time, values in hist.items():
-                        if prev_time >= sharpe_threshold:  # Use SHARPE threshold
-                            time_from_old_end = old_simulation_timestamp - prev_time
-                            new_time = new_simulation_timestamp + time_from_old_end
+                        # Shift ALL timestamps to be relative to new start (negative)
+                        time_from_old_end = old_simulation_timestamp - prev_time
+                        new_time = new_simulation_timestamp - time_from_old_end
+                        
+                        # Prune AFTER shifting, check against NEW threshold
+                        if new_time >= new_sharpe_threshold:
                             shifted_inventory[uid][new_time] = values
             
             self.inventory_history = {
@@ -859,9 +861,10 @@ if __name__ != "__mp_main__":
                     
                     shifted_pnl_history[uid] = {}
                     for prev_time, books in hist.items():
-                        if prev_time >= sharpe_threshold:
-                            time_from_old_end = old_simulation_timestamp - prev_time
-                            new_time = new_simulation_timestamp + time_from_old_end
+                        time_from_old_end = old_simulation_timestamp - prev_time
+                        new_time = new_simulation_timestamp - time_from_old_end
+
+                        if new_time >= new_sharpe_threshold:
                             shifted_pnl_history[uid][new_time] = books
 
             self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
@@ -881,15 +884,16 @@ if __name__ != "__mp_main__":
                         if bookId in self.roundtrip_volumes[uid]:
                             shifted_times = {}
                             for prev_time, volume in self.roundtrip_volumes[uid][bookId].items():
-                                if prev_time >= volume_threshold:
-                                    time_from_old_end = old_simulation_timestamp - prev_time
-                                    new_time = new_simulation_timestamp + time_from_old_end
+                                time_from_old_end = old_simulation_timestamp - prev_time
+                                new_time = new_simulation_timestamp - time_from_old_end
+                                
+                                if new_time >= new_volume_threshold:
                                     shifted_times[new_time] = volume
                                 else:
                                     pruned_roundtrip[uid][bookId] += volume
+                            
                             if shifted_times:
                                 shifted_rt_volumes[uid][bookId] = shifted_times
-
 
             self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             for uid, books in shifted_rt_volumes.items():
@@ -949,7 +953,7 @@ if __name__ != "__mp_main__":
                 for uid in range(self.subnet_info.max_uids)
             }
 
-            bt.logging.info("Simulation restart complete - historical data persisted with correct retention periods")
+            bt.logging.info("Simulation restart complete")
             self.save_state()
 
         def _construct_save_data(self):
@@ -1900,7 +1904,7 @@ if __name__ != "__mp_main__":
                             continue
 
                         timestamps_with_volume = sorted([
-                            ts for ts, vol in total_trades.items() if vol > 0
+                            ts for ts, vol in total_trades.items() if vol > 0 and ts <= sampled_timestamp
                         ])
                         
                         if timestamps_with_volume:
@@ -1973,7 +1977,7 @@ if __name__ != "__mp_main__":
                             continue
 
                         timestamps_with_volume = sorted([
-                            ts for ts, vol in rt_volumes.items() if vol > 0
+                            ts for ts, vol in rt_volumes.items() if vol > 0 and ts <= sampled_timestamp
                         ])
                         
                         if timestamps_with_volume:

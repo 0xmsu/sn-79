@@ -27,4 +27,9 @@ def timestamp_from_duration(duration: str) -> int:
     return total_seconds * 1_000_000_000 + nanoseconds
         
 def normalize(lower, upper, value):
-    return (max(min(value, upper), lower) + upper) / (upper - lower)
+    if value is None:
+        return None
+    norm_range = upper - lower
+    if norm_range == 0:
+        return 0.0
+    return max(0.0, min(1.0, (value - lower) / norm_range))

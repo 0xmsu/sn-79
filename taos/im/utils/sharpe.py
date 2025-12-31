@@ -41,12 +41,14 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
         
         timestamps = list(inventory_values.keys())
         book_ids = list(next(iter(inventory_values.values())).keys())
+        num_books = len(book_ids)
         
         # ===== UNREALIZED SHARPE =====
-        np_inventory_values = np.array([
-            [inventory_values[ts][book_id] for book_id in book_ids]
-            for ts in timestamps
-        ], dtype=np.float64).T
+        np_inventory_values = np.empty((num_books, num_values), dtype=np.float64)
+        for i, ts in enumerate(timestamps):
+            ts_values = inventory_values[ts]
+            for j, book_id in enumerate(book_ids):
+                np_inventory_values[j, i] = ts_values[book_id]
         
         # Detect changeover periods (simulation restarts)
         changeover_mask = None
@@ -68,18 +70,18 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
         
         # Vectorized unrealized Sharpe calculation: sqrt(n) * (mean / std)
         means = returns.mean(axis=1)
-        stds = returns.std(axis=1)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            sharpe_ratios = np.where(stds != 0.0, means / stds, 0.0)
+        stds = returns.std(axis=1, ddof=0)
+        sharpe_ratios = np.divide(means, stds, out=np.zeros_like(means), where=(stds != 0.0))
         
         # ===== REALIZED SHARPE =====
-        sharpe_ratios_realized = np.full(len(book_ids), np.nan)
+        sharpe_ratios_realized = np.full(num_books, np.nan)
 
         if realized_pnl_values and len(realized_pnl_values) > 0:
-            np_realized_pnl = np.array([
-                [realized_pnl_values.get(ts, {}).get(book_id, 0.0) for book_id in book_ids]
-                for ts in timestamps
-            ], dtype=np.float64).T
+            np_realized_pnl = np.zeros((num_books, num_values), dtype=np.float64)
+            for i, ts in enumerate(timestamps):
+                pnl_at_ts = realized_pnl_values.get(ts, {})
+                for j, book_id in enumerate(book_ids):
+                    np_realized_pnl[j, i] = pnl_at_ts.get(book_id, 0.0)
             
             # Drop first timestamp to align with returns (after diff)
             realized_returns = np_realized_pnl[:, 1:]
@@ -88,23 +90,24 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
                 realized_returns = realized_returns[:, changeover_mask]
             
             # Vectorized realized Sharpe calculation (per book)
-            for book_idx in range(len(book_ids)):
-                book_returns = realized_returns[book_idx, :]
-                non_zero_count = np.count_nonzero(book_returns)
-                if non_zero_count >= min_realized_observations:
-                    # Use ALL returns (including zeros) for Sharpe calculation
-                    # This treats each timestamp as an observation period
-                    realized_mean = book_returns.mean()
-                    realized_std = book_returns.std()                    
-                    if realized_std != 0.0:
-                        sharpe_ratios_realized[book_idx] = (realized_mean / realized_std)
-                    else:
-                        # Zero std means constant returns (all zeros or all same value)
-                        # If mean is positive, perfect consistency; if zero, no activity
-                        sharpe_ratios_realized[book_idx] = np.nan if realized_mean == 0.0 else 0.0
-                else:
-                    # Insufficient trading activity
-                    sharpe_ratios_realized[book_idx] = np.nan
+            non_zero_counts = np.count_nonzero(realized_returns, axis=1)
+            sufficient_mask = non_zero_counts >= min_realized_observations
+            
+            if np.any(sufficient_mask):
+                realized_means = realized_returns.mean(axis=1)
+                realized_stds = realized_returns.std(axis=1, ddof=0)
+                
+                # Use ALL returns (including zeros) for Sharpe calculation
+                # This treats each timestamp as an observation period
+                valid_mask = sufficient_mask & (realized_stds != 0.0)
+                sharpe_ratios_realized[valid_mask] = realized_means[valid_mask] / realized_stds[valid_mask]
+                
+                # Zero std means constant returns (all zeros or all same value)
+                # If mean is positive, perfect consistency; if zero, no activity
+                zero_std_mask = sufficient_mask & (realized_stds == 0.0)
+                sharpe_ratios_realized[zero_std_mask] = np.where(
+                    realized_means[zero_std_mask] == 0.0, np.nan, 0.0
+                )
         
         sharpe_values = {
             'books': {book_id: float(sharpe_ratios[i]) for i, book_id in enumerate(book_ids)},
@@ -134,7 +137,7 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
         if changeover_mask is not None:
             total_returns = total_returns[changeover_mask]
         
-        total_std = total_returns.std()
+        total_std = total_returns.std(ddof=0)
         total_mean = total_returns.mean()
         sharpe_values['total'] = float(total_mean / total_std if total_std != 0.0 else 0.0)
         
@@ -145,12 +148,13 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
                 total_realized_pnl = total_realized_pnl[changeover_mask]
             
             non_zero_total = total_realized_pnl[total_realized_pnl != 0.0]
-            if len(non_zero_total) >= min_realized_observations:
-                realized_total_std = non_zero_total.std()
+            count_multiplier = min(len(non_zero_total) / min_realized_observations, 1.0)
+            if len(non_zero_total) > 0:
+                realized_total_std = non_zero_total.std(ddof=0)
                 realized_total_mean = non_zero_total.mean()
-                sharpe_values['total_realized'] = float(realized_total_mean / realized_total_std if realized_total_std != 0.0 else 0.0)
+                sharpe_values['total_realized'] = count_multiplier * float(realized_total_mean / realized_total_std if realized_total_std != 0.0 else 0.0)
             else:
-                sharpe_values['total_realized'] = None  # Insufficient observations
+                sharpe_values['total_realized'] = None  # No round trips
         else:
             sharpe_values['total_realized'] = None  # No realized P&L data
         
@@ -162,15 +166,12 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
         # Normalize realized values (only if defined)
         sharpe_values['normalized_average_realized'] = (
             normalize(norm_min, norm_max, sharpe_values['average_realized'])
-            if sharpe_values['average_realized'] is not None else None
         )
         sharpe_values['normalized_median_realized'] = (
             normalize(norm_min, norm_max, sharpe_values['median_realized'])
-            if sharpe_values['median_realized'] is not None else None
         )
         sharpe_values['normalized_total_realized'] = (
             normalize(norm_min, norm_max, sharpe_values['total_realized'])
-            if sharpe_values['total_realized'] is not None else None
         )
         
         return sharpe_values

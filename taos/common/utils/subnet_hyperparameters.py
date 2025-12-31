@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
-from bittensor import subtensor
+from bittensor import Subtensor
 from dataclasses import dataclass
 from bittensor.utils.balance import fixed_to_float
 from bittensor.core.chain_data.info_base import InfoBase
@@ -110,7 +110,7 @@ class SubnetHyperparameters(InfoBase):
         )
 
 def get_subnet_hyperparameters(
-        subtensor : subtensor, netuid: int, block: Optional[int] = None
+        subtensor : Subtensor, netuid: int, block: Optional[int] = None
     ) -> Optional[Union[list, "SubnetHyperparameters"]]:
         """
         Retrieves the hyperparameters for a specific subnet within the Bittensor network. These hyperparameters define

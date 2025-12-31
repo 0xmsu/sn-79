@@ -126,7 +126,7 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
         bt.logging.error("Attempting to restart query service...")
         self._start_query_service()
         if self.query_process.poll() is not None:
-            bt.logging.error("Failed to restart query service")
+            self.pagerduty_alert("Failed to restart query service")
             return responses
 
     session_start = time.time()
@@ -162,17 +162,33 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
     }
     bt.logging.info(f"Request Data Prepared ({time.time()-data_start:.4f}s).")
 
+    while self.should_block_queries():
+        await asyncio.sleep(0.1)
+        bt.logging.warning(f"Waiting for rewarding to catch up before querying ({self._pending_reward_tasks} tasks pending)...")
+    bt.logging.info(f"Rewarding up to date, proceeding with query!")
+
     query_start = time.time()
     try:
         try:
-            await asyncio.to_thread(self.response_queue.receive, timeout=0.0)
+            await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    self.query_ipc_executor,
+                    lambda: self.response_queue.receive(timeout=0.001)
+                ),
+                timeout=0.1
+            )
             bt.logging.warning("Drained stale message from query response queue")
-        except posix_ipc.BusyError:
+        except (posix_ipc.BusyError, asyncio.TimeoutError):
             pass
         bt.logging.info(f"Drained Query Response Queue ({time.time()-query_start:.4f}s).")
 
         write_start = time.time()
-        data_bytes = await asyncio.to_thread(pickle.dumps, request_data, protocol=5)
+        data_bytes = await asyncio.get_event_loop().run_in_executor(
+            self.query_ipc_executor,
+            pickle.dumps,
+            request_data,
+            5
+        )
         bt.logging.info(f"Request data size: {len(data_bytes) / 1024 / 1024:.2f} MB")
         
         def write_request():
@@ -180,14 +196,45 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
             self.request_mem.write(struct.pack('Q', len(data_bytes)))
             self.request_mem.write(data_bytes)
         
-        await asyncio.to_thread(write_request)
+        await asyncio.get_event_loop().run_in_executor(
+            self.query_ipc_executor,
+            write_request
+        )
         bt.logging.info(f"Wrote request data ({time.time()-write_start:.4f}s).")
 
         receive_start = time.time()
-        await asyncio.to_thread(self.request_queue.send, b'query')
-        timeout = self.config.neuron.global_query_timeout + 10
-        message, _ = await asyncio.to_thread(self.response_queue.receive, timeout=timeout)
-        bt.logging.info(f"Received Response ({time.time()-receive_start:.4f}s).")
+        await asyncio.get_event_loop().run_in_executor(
+            self.query_ipc_executor,
+            self.request_queue.send,
+            b'query'
+        )
+
+        max_wait = self.config.neuron.global_query_timeout + 10
+        elapsed = 0
+        message = None
+        poll_count = 0
+
+        while elapsed < max_wait:
+            poll_count += 1            
+            try:
+                message, _ = self.response_queue.receive(timeout=0.0)
+                bt.logging.info(f"Received Query Response after {poll_count} polls ({time.time()-receive_start:.4f}s).")
+                break
+            except posix_ipc.BusyError:
+                elapsed = time.time() - receive_start
+                if poll_count % 100000 == 0:
+                    await asyncio.sleep(0)
+                    bt.logging.debug(f"Still polling for query response ({elapsed:.1f}s, {poll_count} polls)")                
+                continue
+        else:
+            bt.logging.error(f"Query service response timeout after {max_wait}s ({poll_count} total polls)")
+            self.pagerduty_alert(f"Query service response timeout after {max_wait}s")
+            return responses
+
+        if message is None:
+            bt.logging.error(f"Query service response timeout after {max_wait}s ({poll_count} total polls)")
+            self.pagerduty_alert(f"Query service response timeout after {max_wait}s")
+            return responses
 
         read_start = time.time()
         
@@ -198,19 +245,21 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
             result_bytes = self.response_mem.read(data_size)
             return pickle.loads(result_bytes)
         
-        result = await asyncio.to_thread(read_response)
+        result = await asyncio.get_event_loop().run_in_executor(
+            self.query_ipc_executor,
+            read_response
+        )
         bt.logging.info(f"Read response data ({time.time()-read_start:.4f}s).")
 
     except posix_ipc.BusyError:
-        bt.logging.error(f"Query service response timeout after {timeout}s")
+        self.pagerduty_alert(f"Query service response timeout")
         return responses
     except Exception as e:
-        bt.logging.error(f"Error communicating with query service: {e}")
-        bt.logging.error(traceback.format_exc())
+        self.pagerduty_alert(f"Error communicating with query service: {e}", details={"traceback" : traceback.format_exc()})
         return responses
 
     if not result['success']:
-        bt.logging.error(f"Query service error: {result.get('error')}")
+        self.pagerduty_alert(f"Query service error: {result.get('error')}")
         if 'traceback' in result:
             bt.logging.error(f"Traceback: {result['traceback']}")
         return responses

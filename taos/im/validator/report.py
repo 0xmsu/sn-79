@@ -52,7 +52,7 @@ class ReportingService:
         self.request_shm = posix_ipc.SharedMemory(
             "/validator-report-data",
             flags=posix_ipc.O_CREAT,
-            size=1000 * 1024 * 1024
+            size=200 * 1024 * 1024
         )
         self.response_shm = posix_ipc.SharedMemory(
             f"/validator-report-response-data",
@@ -153,7 +153,36 @@ class ReportingService:
                     self.response_mem.write(result_bytes)
                     bt.logging.info(f"Wrote reporting response data ({time.time()-write_start:.4f}s, serialize={serialize_time:.4f}s)")
 
-                    self.response_queue.send(b'ready')
+                    drain_start = time.time()
+                    drained = 0
+                    while True:
+                        try:
+                            self.response_queue.receive(timeout=0.0)
+                            drained += 1
+                        except posix_ipc.BusyError:
+                            break
+                    if drained > 0:
+                        bt.logging.warning(f"Drained {drained} stale response signals ({time.time()-drain_start:.4f}s)")
+                    send_start = time.time()
+                    max_retries = 3
+                    sent = False
+                    for attempt in range(max_retries):
+                        try:
+                            self.response_queue.send(b'ready', timeout=1.0)
+                            bt.logging.info(f"Response signal sent ({time.time()-send_start:.4f}s)")
+                            sent = True
+                            break
+                        except posix_ipc.BusyError:
+                            bt.logging.warning(f"Response queue full, retry {attempt+1}/{max_retries}")
+                            try:
+                                self.response_queue.receive(timeout=0.0)
+                                bt.logging.debug("Drained one more stale message")
+                            except posix_ipc.BusyError:
+                                pass
+                            time.sleep(0.1)
+                        except Exception as e:
+                            bt.logging.error(f"Error sending response signal: {e}")
+                            break
                     
                 elif command == 'shutdown':
                     bt.logging.info("Shutdown command received")
@@ -193,9 +222,9 @@ class ReportingService:
         self.taker_volume_sums = deserialize_to_nested_dict(data['taker_volume_sums'])
         self.self_volume_sums = deserialize_to_nested_dict(data['self_volume_sums'])
         self.roundtrip_volume_sums = deserialize_to_nested_dict(data['roundtrip_volume_sums'])
-    
         self.inventory_history = data['inventory_history']
-        self.realized_pnl_history = data['realized_pnl_history']
+        self.total_realized_pnl = data['total_realized_pnl']
+        self.realized_pnl_by_book = data['realized_pnl_by_book']
         for key in ['activity_factors', 'activity_factors_realized', 'sharpe_values', 
                     'unnormalized_scores', 'scores', 'miner_stats', 'initial_balances', 
                     'initial_balances_published', 'simulation_timestamp', 'step', 
@@ -337,30 +366,6 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
         'updated_stats': {},
         'error': None
     }
-
-    def compute_realized_pnl_aggregates(realized_pnl_history, book_count):
-        """
-        Compute total and per-book realized P&L aggregates.
-        Runs in report worker process to avoid blocking validator.
-        """
-        total_realized_pnl = {}
-        realized_pnl_by_book = {}
-        
-        for uid, hist in realized_pnl_history.items():
-            if not hist:
-                total_realized_pnl[uid] = 0.0
-                realized_pnl_by_book[uid] = {book_id: 0.0 for book_id in range(book_count)}
-                continue
-            
-            book_totals = [0.0] * book_count
-            for timestamp_data in hist.values():
-                for book_id, pnl in timestamp_data.items():
-                    book_totals[book_id] += pnl
-            
-            realized_pnl_by_book[uid] = {book_id: book_totals[book_id] for book_id in range(book_count)}
-            total_realized_pnl[uid] = sum(book_totals)
-        
-        return total_realized_pnl, realized_pnl_by_book
     try:
         simulation_timestamp = validator_data['simulation_timestamp']
         step = validator_data['step']
@@ -369,13 +374,8 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
         if not accounts:
             return result
         
-        bt.logging.debug("Computing realized P&L aggregates in report worker...")
-        pnl_start = time.time()
-        total_realized_pnl, realized_pnl_by_book = compute_realized_pnl_aggregates(
-            validator_data['realized_pnl_history'],
-            validator_data['book_count']
-        )
-        bt.logging.debug(f"Computed realized P&L aggregates ({time.time()-pnl_start:.4f}s)")
+        total_realized_pnl = validator_data['total_realized_pnl']
+        realized_pnl_by_book = validator_data['realized_pnl_by_book']
 
         volume_sums = validator_data['volume_sums']
         maker_volume_sums = validator_data['maker_volume_sums']
@@ -612,8 +612,6 @@ async def report(self: ReportingService) -> None:
 
         publish_info(self)
 
-        self.prometheus_books.clear()
-
         bt.logging.debug(f"Collecting book metrics...")
         book_start = time.time()
         for bookId, book in self.last_state.books.items():
@@ -708,7 +706,6 @@ async def report(self: ReportingService) -> None:
         if has_new_trades:
             bt.logging.debug(f"Collecting trade metrics...")
             start = time.time()
-            self.prometheus_trades.clear()
             for bookId, trades in self.recent_trades.items():
                 for trade in trades:
                     updates.append((self.prometheus_trades, 1.0,
@@ -743,7 +740,8 @@ async def report(self: ReportingService) -> None:
             'self_volume_sums': self_volume_sums_snapshot,
             'roundtrip_volume_sums': {uid: dict(books) for uid, books in self.roundtrip_volume_sums.items()},
             'inventory_history': self.inventory_history,
-            'realized_pnl_history': self.realized_pnl_history,
+            'total_realized_pnl': self.total_realized_pnl,
+            'realized_pnl_by_book': self.realized_pnl_by_book,
             'activity_factors': self.activity_factors,
             'activity_factors_realized': self.activity_factors_realized,
             'sharpe_values': self.sharpe_values,
@@ -888,9 +886,7 @@ async def report(self: ReportingService) -> None:
                     break
             if has_new_miner_trades:
                 break
-
         if has_new_miner_trades:
-            self.prometheus_miner_trades.clear()
             for uid, book_miner_trades in self.recent_miner_trades.items():
                 for bookId, miner_trades in book_miner_trades.items():
                     if len(miner_trades) > 0:
@@ -914,10 +910,10 @@ async def report(self: ReportingService) -> None:
                             updates.append((agent_gauges, last_maker_trade.makerFeeRate, wallet_addr, netuid, bookId, uid, "fees_last_maker_rate"))
                         if last_taker_trade:
                             updates.append((agent_gauges, last_taker_trade.takerFeeRate, wallet_addr, netuid, bookId, uid, "fees_last_taker_rate"))
-        self.prometheus_miners.clear()
         bt.logging.debug(f"Miner trade metrics collected ({time.time()-start:.4f}s).")
 
         bt.logging.debug(f"Collecting miner metrics...")
+        self.prometheus_miners.clear()
         start = time.time()
         for agentId in miner_metrics:
             m = miner_metrics[agentId]
@@ -1038,7 +1034,13 @@ async def report(self: ReportingService) -> None:
         
         bt.logging.info(f"Applying {len(updates)} metric updates...")
         apply_start = time.time()
+        GAUGES_TO_CLEAR = {self.prometheus_trades, self.prometheus_books, self.prometheus_miner_trades}
+        cleared_metrics = set()
         for update in updates:
+            gauge = update[0]            
+            if gauge in GAUGES_TO_CLEAR and gauge not in cleared_metrics:
+                gauge.clear()
+                cleared_metrics.add(gauge)            
             _set_if_changed(*update)
         bt.logging.info(f"Applied {len(updates)} updates in {time.time()-apply_start:.4f}s")
         
@@ -1050,8 +1052,8 @@ async def report(self: ReportingService) -> None:
         
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    bt.wallet.add_args(parser)
-    bt.subtensor.add_args(parser)
+    bt.Wallet.add_args(parser)
+    bt.Subtensor.add_args(parser)
     bt.logging.add_args(parser)
     bt.logging.set_info()
     

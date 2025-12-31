@@ -62,12 +62,15 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     
     norm_min = config['sharpe']['normalization_min']
     norm_max = config['sharpe']['normalization_max']
+    norm_range = norm_max - norm_min
+    norm_range_inv = 1.0 / norm_range if norm_range != 0 else 0.0
+    
     normalized_sharpes_unrealized = {
-        book_id: normalize(norm_min, norm_max, sharpe_val)
+        book_id: max(0.0, min(1.0, (sharpe_val - norm_min) * norm_range_inv))
         for book_id, sharpe_val in sharpes_unrealized.items()
     }
     normalized_sharpes_realized = {
-        book_id: (normalize(norm_min, norm_max, sharpe_val) if sharpe_val is not None else 0.0)
+        book_id: (max(0.0, min(1.0, (sharpe_val - norm_min) * norm_range_inv)) if sharpe_val is not None else 0.0)
         for book_id, sharpe_val in sharpes_realized.items()
     }
 
@@ -75,18 +78,22 @@ def score_uid(validator_data: Dict, uid: int) -> float:
         config['activity']['capital_turnover_cap'] * simulation_config['miner_wealth'],
         simulation_config['volumeDecimals']
     )
+    volume_cap_inv = 1.0 / volume_cap
 
     lookback = config['sharpe']['lookback']
     
-    decay_grace_period = config['activity'].get('decay_grace_period', 600_000_000_000)  # 10 minutes in nanoseconds
-    activity_impact = config['activity'].get('impact', 0.33)  # Reduced impact factor
-    time_acceleration_power = 2.0  # Quadratic time acceleration
+    decay_grace_period = config['activity'].get('decay_grace_period', 600_000_000_000)
+    activity_impact = config['activity'].get('impact', 0.33)
+    time_acceleration_power = 2.0
     
     scoring_interval_seconds = config['interval'] / 1e9
     total_intervals = lookback // scoring_interval_seconds
     grace_intervals = decay_grace_period / config['interval']
     decay_window_intervals = total_intervals - grace_intervals
     base_decay_factor = 2 ** (-1 / decay_window_intervals)
+    
+    decay_window_ns = (lookback * config['interval']) - decay_grace_period
+    decay_window_ns_inv = 1.0 / decay_window_ns if decay_window_ns > 0 else 0.0
 
     compact_volumes_uid = compact_volumes[uid]
     miner_volumes = {book_id: data['lookback_volume'] for book_id, data in compact_volumes_uid.items()}
@@ -99,12 +106,12 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     activity_factors_uid = activity_factors[uid]
     for book_id, miner_volume in miner_volumes.items():
         if latest_volumes[book_id] > 0:
-            activity_factors_uid[book_id] = min(1 + ((miner_volume / volume_cap) * activity_impact), 2.0)
+            activity_factors_uid[book_id] = min(1 + ((miner_volume * volume_cap_inv) * activity_impact), 2.0)
         else:
             latest_time = latest_timestamps[book_id]
             
             if latest_time > 0:
-                inactive_time = simulation_timestamp - latest_time
+                inactive_time = max(0, simulation_timestamp - latest_time)
             else:
                 inactive_time = simulation_timestamp
             
@@ -116,8 +123,7 @@ def score_uid(validator_data: Dict, uid: int) -> float:
                 time_acceleration = 1.0
             else:
                 time_beyond_grace = inactive_time - decay_grace_period
-                decay_window_ns = (lookback * config['interval']) - decay_grace_period
-                time_ratio = time_beyond_grace / decay_window_ns
+                time_ratio = time_beyond_grace * decay_window_ns_inv
                 time_acceleration = 1 + (time_ratio ** time_acceleration_power)
             
             total_acceleration = activity_multiplier * time_acceleration
@@ -144,13 +150,12 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     activity_factors_realized_uid = activity_factors_realized[uid]
     for book_id, roundtrip_volume in miner_roundtrip_volumes.items():
         if latest_roundtrip_volumes[book_id] > 0:
-            activity_factors_realized_uid[book_id] = min(1 + ((roundtrip_volume / volume_cap) * activity_impact), 2.0)
+            activity_factors_realized_uid[book_id] = min(1 + ((roundtrip_volume * volume_cap_inv) * activity_impact), 2.0)
         else:
-            # Inactive: calculate time since last round-trip
             latest_time = latest_roundtrip_timestamps[book_id]
             
             if latest_time > 0:
-                inactive_time = simulation_timestamp - latest_time
+                inactive_time = max(0, simulation_timestamp - latest_time)
             else:
                 inactive_time = simulation_timestamp
             
@@ -161,8 +166,7 @@ def score_uid(validator_data: Dict, uid: int) -> float:
                 time_acceleration = 1.0
             else:
                 time_beyond_grace = inactive_time - decay_grace_period
-                decay_window_ns = (lookback * config['interval']) - decay_grace_period
-                time_ratio = time_beyond_grace / decay_window_ns
+                time_ratio = time_beyond_grace * decay_window_ns_inv
                 time_acceleration = 1 + (time_ratio ** time_acceleration_power)
             
             total_acceleration = activity_multiplier * time_acceleration
@@ -196,20 +200,28 @@ def score_uid(validator_data: Dict, uid: int) -> float:
         book_id: weighted_sharpe
         for book_id, weighted_sharpe in enumerate(activity_weighted_normalized_sharpes_realized)
     }
-    ## Use the 1.5 rule to detect left-hand outliers in the activity-weighted Sharpes
+    
+    # Use the 1.5 rule to detect left-hand outliers in the activity-weighted Sharpes    
     data_unrealized = np.array(activity_weighted_normalized_sharpes_unrealized)
     q1_unrealized, q3_unrealized = np.percentile(data_unrealized, [25, 75])
     iqr_unrealized = q3_unrealized - q1_unrealized
-    lower_threshold_unrealized = q1_unrealized - 1.5 * iqr_unrealized
+    # Apply minimum IQR and scale penalty to reward consistency
+    min_iqr = 0.01
+
+    effective_iqr = max(iqr_unrealized, min_iqr)
+    lower_threshold_unrealized = q1_unrealized - 1.5 * effective_iqr
     outliers_unrealized = data_unrealized[data_unrealized < lower_threshold_unrealized]
     
     # Outliers detected here are activity-weighted Sharpes which are significantly lower than those achieved on other books
     # A penalty equal to 67% of the difference between the mean outlier value and the value at the centre of the possible activity weighted Sharpe values is calculated
-    outlier_penalty_unrealized = (
-        (0.5 - np.mean(outliers_unrealized)) / 1.5 
-        if len(outliers_unrealized) > 0 and np.mean(outliers_unrealized) < 0.5 
-        else 0
-    )
+    # Penalty is scaled by consistency: tight clusters (low IQR) get reduced penalty to reward consistent performance
+    if len(outliers_unrealized) > 0 and np.median(outliers_unrealized) < 0.5:
+        base_penalty = (0.5 - np.median(outliers_unrealized)) / 1.5
+        consistency_bonus = 1.0 - np.exp(-5 * iqr_unrealized)  # Sigmoid-like scaling
+        outlier_penalty_unrealized = base_penalty * consistency_bonus
+    else:
+        outlier_penalty_unrealized = 0
+    
     # The median of the activity weighted Sharpes provides the base score for the miner
     activity_weighted_normalized_median_unrealized = np.median(data_unrealized)
     # The penalty factor is subtracted from the base score to punish particularly poor performance on any particular book
@@ -221,15 +233,20 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     data_realized = np.array(activity_weighted_normalized_sharpes_realized)
     q1_realized, q3_realized = np.percentile(data_realized, [25, 75])
     iqr_realized = q3_realized - q1_realized
-    lower_threshold_realized = q1_realized - 1.5 * iqr_realized
+    # Apply minimum IQR and scale penalty to reward consistency
+    effective_iqr_realized = max(iqr_realized, min_iqr)
+    lower_threshold_realized = q1_realized - 1.5 * effective_iqr_realized
     outliers_realized = data_realized[data_realized < lower_threshold_realized]
     # Outliers detected here are activity-weighted Sharpes which are significantly lower than those achieved on other books
     # A penalty equal to 67% of the difference between the mean outlier value and the value at the centre of the possible activity weighted Sharpe values is calculated
-    outlier_penalty_realized = (
-        (0.5 - np.mean(outliers_realized)) / 1.5 
-        if len(outliers_realized) > 0 and np.mean(outliers_realized) < 0.5 
-        else 0
-    )
+    # Penalty is scaled by consistency: tight clusters (low IQR) get reduced penalty to reward consistent performance
+    if len(outliers_realized) > 0 and np.median(outliers_realized) < 0.5:
+        base_penalty_realized = (0.5 - np.median(outliers_realized)) / 1.5
+        consistency_bonus_realized = 1.0 - np.exp(-5 * iqr_realized)
+        outlier_penalty_realized = base_penalty_realized * consistency_bonus_realized
+    else:
+        outlier_penalty_realized = 0
+    
     # The median of the activity weighted Sharpes provides the base score for the miner
     activity_weighted_normalized_median_realized = np.median(data_realized)
     # The penalty factor is subtracted from the base score to punish particularly poor performance on any particular book
@@ -428,7 +445,6 @@ def set_delays(self: Validator, synapse_responses: dict[int, MarketSimulationSta
             for instruction in response.instructions:
                 book_id = instruction.bookId
 
-                # Zero instruction_delay for first instruction per book
                 if book_id not in seen_books:
                     instruction_delay = 0
                     seen_books.add(book_id)

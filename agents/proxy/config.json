@@ -9,13 +9,13 @@
         "start_port" : 8888,
         "RandomMakerAgent" : [
             {
-                "params" : {"min_quantity" : 0.1, "max_quantity" : 1.0, "expiry_period" : 200, "lazy_load" : 1},
+                "params" : {"min_quantity" : 1.0, "max_quantity" : 2.0, "expiry_period" : 200000000000, "lazy_load" : 1},
                 "count" : 8
             }
         ],
         "RandomTakerAgent" :[
             {
-                "params" : {"min_quantity" : 0.1, "max_quantity" : 1.1, "lazy_load" : 1},
+                "params" : {"min_quantity" : 1.0, "max_quantity" : 2.0, "lazy_load" : 1},
                 "count" : 8
             }
         ]

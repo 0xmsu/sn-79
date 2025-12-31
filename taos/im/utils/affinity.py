@@ -8,9 +8,9 @@ def get_core_allocation():
     Allocate CPU cores across validator components using percentage-based allocation.
     """
     total_cores = multiprocessing.cpu_count()
-    validator_pct = 0.25    # Main validator loop
+    validator_pct = 0.20    # Main validator loop
     query_pct = 0.20        # Miner queries (subprocess)
-    reward_pct = 0.25       # Reward computation (ProcessPool)
+    reward_pct = 0.30       # Reward computation (ProcessPool)
     reporting_pct = 0.12    # Metrics reporting (subprocess)
     ipc_pct = 0.10          # IPC operations (ThreadPool)
     

@@ -39,6 +39,7 @@ if __name__ != "__mp_main__":
     import multiprocessing
     import subprocess
     import struct
+    import heapq
     from datetime import datetime, timedelta
     from ypyjson import YpyObject
 
@@ -465,12 +466,21 @@ if __name__ != "__mp_main__":
             self._main_loop_ready = Event()
             core_allocation = get_core_allocation()
             ipc_cores = core_allocation['ipc']
-            self.ipc_executor = ThreadPoolExecutor(
-                max_workers=4,
-                thread_name_prefix='ipc',
-                initializer=lambda: os.sched_setaffinity(0, set(ipc_cores))
+            mid = len(ipc_cores) // 2
+            query_cores = ipc_cores[:mid]
+            reporting_cores = ipc_cores[mid:]
+            self.query_ipc_executor = ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix='query_ipc',
+                initializer=lambda: os.sched_setaffinity(0, set(query_cores))
             )
-            bt.logging.info(f"IPC executor assigned to cores: {ipc_cores}")
+            self.reporting_ipc_executor = ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix='reporting_ipc',
+                initializer=lambda: os.sched_setaffinity(0, set(reporting_cores))
+            )
+            bt.logging.info(f"Query IPC executor assigned to cores: {query_cores}")
+            bt.logging.info(f"Reporting IPC executor assigned to cores: {reporting_cores}")
             validator_cores = core_allocation['validator']
             os.sched_setaffinity(0, set(validator_cores))
             bt.logging.info(f"Validator assigned to cores: {validator_cores}")
@@ -484,6 +494,7 @@ if __name__ != "__mp_main__":
             self.compressing = False
             self.querying = False
             self._rewarding = False
+            self._pending_reward_tasks = 0
             self._saving = False
             self._reporting = False
             self._rewarding_lock = Lock()
@@ -593,8 +604,6 @@ if __name__ != "__mp_main__":
             Returns:
                 None
             """
-            import time
-
             if not check_fn():
                 return
 
@@ -646,10 +655,12 @@ if __name__ != "__mp_main__":
                 total_wait = time.time() - start_wait
                 bt.logging.debug(f"Waited {total_wait:.1f}s for {wait_process}")
                 
-        async def _write_ipc_nonblocking(self, mem, queue, data_bytes, operation="IPC"):
+        async def _write_ipc_nonblocking(self, mem, queue, data_bytes, operation="IPC", executor=None):
             """
             Write to shared memory in executor thread.
             """
+            if executor is None:
+                executor = self.query_ipc_executor
             write_timeout = 5.0
             
             def write_worker():
@@ -659,20 +670,20 @@ if __name__ != "__mp_main__":
                     mem.write(data_bytes)
                     return True
                 except Exception as e:
-                    bt.logging.error(f"{operation} write failed: {e}")
+                    self.pagerduty_alert(f"{operation} write failed: {e}")
                     return False
             
             try:
                 result = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
-                        self.ipc_executor,
+                        executor,
                         write_worker
                     ),
                     timeout=write_timeout
                 )
                 return result
             except asyncio.TimeoutError:
-                bt.logging.error(f"{operation} write timeout after {write_timeout}s")
+                self.pagerduty_alert(f"{operation} write timeout after {write_timeout}s")
                 return False
 
         def load_fundamental(self):
@@ -869,9 +880,9 @@ if __name__ != "__mp_main__":
 
             self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             for uid, timestamps in shifted_pnl_history.items():
-                for timestamp, books in timestamps.items():
+                for ts, books in timestamps.items():
                     for book_id, pnl in books.items():
-                        self.realized_pnl_history[uid][timestamp][book_id] = pnl
+                        self.realized_pnl_history[uid][ts][book_id] = pnl
 
             bt.logging.info(f"Shifted realized P&L history: {len(shifted_pnl_history)} UIDs with data")
             
@@ -898,8 +909,8 @@ if __name__ != "__mp_main__":
             self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             for uid, books in shifted_rt_volumes.items():
                 for book_id, volumes in books.items():
-                    for timestamp, volume in volumes.items():
-                        self.roundtrip_volumes[uid][book_id][timestamp] = volume
+                    for ts, volume in volumes.items():
+                        self.roundtrip_volumes[uid][book_id][ts] = volume
 
             bt.logging.info(f"Shifted round-trip volumes: {len(shifted_rt_volumes)} UIDs with data")
 
@@ -953,8 +964,20 @@ if __name__ != "__mp_main__":
                 for uid in range(self.subnet_info.max_uids)
             }
 
+            self._save_state_sync()
             bt.logging.info("Simulation restart complete")
-            self.save_state()
+
+        def onEnd(self) -> None:
+            """
+            Triggered when end of simulation event is published by simulator.
+            Resets quantities as necessary, updates, rebuilds and launches simulator with the latest configuration.
+            """
+            bt.logging.info("SIMULATION ENDED")
+            self.simulation.logDir = None
+            self.fundamental_price = {bookId : None for bookId in range(self.simulation.book_count)}
+            self.pending_notices = {uid : [] for uid in range(self.subnet_info.max_uids)}
+            self._save_state_sync()
+            self.update_repo(end=True)
 
         def _construct_save_data(self):
             """
@@ -973,7 +996,7 @@ if __name__ != "__mp_main__":
             simulation_state_data = {
                 "start_time": self.start_time,
                 "start_timestamp": self.start_timestamp,
-                "step_rates": self.step_rates,
+                "step_rates": list(self.step_rates),
                 "initial_balances": self.initial_balances,
                 "recent_trades": {
                     book_id: [t.model_dump(mode="json") for t in trades]
@@ -990,11 +1013,147 @@ if __name__ != "__mp_main__":
                 "simulation.logDir": self.simulation.logDir,
             }
 
-            def nested_dict_to_regular(d):
-                """Convert nested defaultdict to regular dict for serialization."""
-                return {
-                    uid: dict(books) for uid, books in d.items()
-                }
+            bt.logging.debug("Creating snapshots of mutable data structures...")
+            snapshot_start = time.time()
+            
+            def snapshot_nested_dict_3_levels(source_dict, dict_name="dict"):
+                """Snapshot a 3-level nested dict: {uid: {ts/book: {book/val: value}}}"""
+                result = {}
+                try:
+                    uids = list(source_dict.keys())
+                    for uid in uids:
+                        try:
+                            level1 = source_dict.get(uid)
+                            if level1 is None:
+                                continue
+                            
+                            result[uid] = {}
+
+                            level1_keys = list(level1.keys()) if hasattr(level1, 'keys') else []
+                            for key1 in level1_keys:
+                                try:
+                                    level2 = level1.get(key1) if hasattr(level1, 'get') else level1[key1]
+                                    if level2 is None:
+                                        continue
+
+                                    if isinstance(level2, dict):
+                                        result[uid][key1] = dict(level2)
+                                    else:
+                                        result[uid][key1] = level2
+                                        
+                                except (KeyError, RuntimeError, AttributeError) as ex:
+                                    bt.logging.debug(f"Snapshot {dict_name}: skipped {uid}/{key1}: {ex}")
+                                    continue
+                                    
+                        except (KeyError, RuntimeError, AttributeError) as ex:
+                            bt.logging.debug(f"Snapshot {dict_name}: skipped UID {uid}: {ex}")
+                            continue
+                            
+                except Exception as ex:
+                    bt.logging.warning(f"Error snapshotting {dict_name}: {ex}")
+                
+                return result
+
+            inventory_snapshot = snapshot_nested_dict_3_levels(
+                self.inventory_history, 
+                "inventory_history"
+            )
+            realized_pnl_snapshot = snapshot_nested_dict_3_levels(
+                self.realized_pnl_history,
+                "realized_pnl_history"
+            )
+            roundtrip_volumes_snapshot = snapshot_nested_dict_3_levels(
+                self.roundtrip_volumes,
+                "roundtrip_volumes"
+            )
+            def snapshot_nested_dict_2_levels(source_dict, dict_name="dict"):
+                """Snapshot a 2-level nested dict: {uid: {book: value}}"""
+                result = {}
+                try:
+                    uids = list(source_dict.keys())
+                    for uid in uids:
+                        try:
+                            books = source_dict.get(uid)
+                            if books is None:
+                                continue
+                            result[uid] = dict(books) if isinstance(books, dict) else {}
+                        except (KeyError, RuntimeError, AttributeError):
+                            continue
+                except Exception as ex:
+                    bt.logging.warning(f"Error snapshotting {dict_name}: {ex}")
+                return result
+            volume_sums_snapshot = snapshot_nested_dict_2_levels(self.volume_sums, "volume_sums")
+            maker_volume_sums_snapshot = snapshot_nested_dict_2_levels(self.maker_volume_sums, "maker_volume_sums")
+            taker_volume_sums_snapshot = snapshot_nested_dict_2_levels(self.taker_volume_sums, "taker_volume_sums")
+            self_volume_sums_snapshot = snapshot_nested_dict_2_levels(self.self_volume_sums, "self_volume_sums")
+            roundtrip_volume_sums_snapshot = snapshot_nested_dict_2_levels(self.roundtrip_volume_sums, "roundtrip_volume_sums")
+
+            trade_volumes_snapshot = {}
+            try:
+                uids = list(self.trade_volumes.keys())
+                for uid in uids:
+                    try:
+                        books = self.trade_volumes.get(uid)
+                        if books is None:
+                            continue
+                            
+                        trade_volumes_snapshot[uid] = {}
+                        book_ids = list(books.keys())
+                        
+                        for book_id in book_ids:
+                            try:
+                                roles = books.get(book_id)
+                                if roles is None:
+                                    continue
+                                
+                                trade_volumes_snapshot[uid][book_id] = {}
+                                role_names = list(roles.keys())
+                                
+                                for role in role_names:
+                                    try:
+                                        volumes = roles.get(role)
+                                        if volumes is None:
+                                            continue
+                                        trade_volumes_snapshot[uid][book_id][role] = dict(volumes)
+                                    except (KeyError, RuntimeError):
+                                        continue
+                            except (KeyError, RuntimeError):
+                                continue
+                    except (KeyError, RuntimeError):
+                        continue
+            except Exception as ex:
+                bt.logging.warning(f"Error snapshotting trade_volumes: {ex}")
+
+            open_positions_snapshot = {}
+            try:
+                uids = list(self.open_positions.keys())
+                for uid in uids:
+                    try:
+                        books = self.open_positions.get(uid)
+                        if books is None:
+                            continue
+                            
+                        open_positions_snapshot[uid] = {}
+                        book_ids = list(books.keys())
+                        
+                        for book_id in book_ids:
+                            try:
+                                pos = books.get(book_id)
+                                if pos is None:
+                                    continue
+                                
+                                open_positions_snapshot[uid][book_id] = {
+                                    'longs': list(pos.get('longs', [])),
+                                    'shorts': list(pos.get('shorts', []))
+                                }
+                            except (KeyError, RuntimeError):
+                                continue
+                    except (KeyError, RuntimeError):
+                        continue
+            except Exception as ex:
+                bt.logging.warning(f"Error snapshotting open_positions: {ex}")
+            
+            bt.logging.debug(f"Created snapshots ({time.time()-snapshot_start:.4f}s)")
 
             validator_state_data = {
                 "step": self.step,
@@ -1003,36 +1162,22 @@ if __name__ != "__mp_main__":
                 "scores": [score.item() for score in self.scores],
                 "activity_factors": self.activity_factors,
                 "activity_factors_realized": self.activity_factors_realized,
-                "inventory_history": self.inventory_history,
+                "inventory_history": inventory_snapshot,
                 "sharpe_values": self.sharpe_values,
-                "realized_pnl_history": self.realized_pnl_history,
-                "open_positions": {
-                    uid: {
-                        book_id: {
-                            'longs': list(pos['longs']),
-                            'shorts': list(pos['shorts'])
-                        }
-                        for book_id, pos in books.items()
-                    }
-                    for uid, books in self.open_positions.items()
-                },
+                "realized_pnl_history": realized_pnl_snapshot,
+                "open_positions": open_positions_snapshot,
                 "unnormalized_scores": self.unnormalized_scores,
                 "deregistered_uids": self.deregistered_uids,
-                "trade_volumes": self.trade_volumes,
-                "roundtrip_volumes": {
-                    uid: {
-                        book_id: dict(volumes)
-                        for book_id, volumes in books.items()
-                    }
-                    for uid, books in self.roundtrip_volumes.items()
-                },
-                "volume_sums": nested_dict_to_regular(self.volume_sums),
-                "maker_volume_sums": nested_dict_to_regular(self.maker_volume_sums),
-                "taker_volume_sums": nested_dict_to_regular(self.taker_volume_sums),
-                "self_volume_sums": nested_dict_to_regular(self.self_volume_sums),
-                "roundtrip_volume_sums": nested_dict_to_regular(self.roundtrip_volume_sums)
+                "trade_volumes": trade_volumes_snapshot,
+                "roundtrip_volumes": roundtrip_volumes_snapshot,
+                "volume_sums": volume_sums_snapshot,
+                "maker_volume_sums": maker_volume_sums_snapshot,
+                "taker_volume_sums": taker_volume_sums_snapshot,
+                "self_volume_sums": self_volume_sums_snapshot,
+                "roundtrip_volume_sums": roundtrip_volume_sums_snapshot
             }
-            bt.logging.debug(f"Prepared save data ({time.time() - start}s)")
+            
+            bt.logging.debug(f"Prepared save data ({time.time() - start:.4f}s)")
             return simulation_state_data, validator_state_data
 
         async def _save_state(self) -> bool:
@@ -1058,52 +1203,102 @@ if __name__ != "__mp_main__":
                 bt.logging.info(f"Starting state saving for step {self.step}...")
                 start = time.time()
 
-                construct_start = time.time()
-                simulation_state_data, validator_state_data = self._construct_save_data()
-                bt.logging.debug(f"Constructed save data ({time.time()-construct_start:.4f}s)")
+                save_step = self.step
+                save_timestamp = self.simulation_timestamp
+                def save_worker():
+                    """Worker function that runs entirely in executor thread."""
+                    worker_start = time.time()
+                    
+                    # Construct data (this is the 7s blocking part!)
+                    construct_start = time.time()
+                    simulation_state_data, validator_state_data = self._construct_save_data()
+                    construct_time = time.time() - construct_start
+                    bt.logging.debug(f"[SAVE WORKER] Constructed save data ({construct_time:.4f}s)")
+                    result = save_state_worker(
+                        simulation_state_data,
+                        validator_state_data,
+                        self.simulation_state_file,
+                        self.validator_state_file
+                    )
+                    
+                    result['construct_time'] = construct_time
+                    result['worker_total_time'] = time.time() - worker_start
+                    return result
 
-                save_start = time.time()
-                
-                future = self.save_state_executor.submit(
-                    save_state_worker,
-                    simulation_state_data,
-                    validator_state_data,
-                    self.simulation_state_file,
-                    self.validator_state_file
-                )
-                
-                while not future.done():
-                    await asyncio.sleep(0.1)
-                
-                result = future.result()
-                bt.logging.debug(f"Saved state ({time.time() - save_start:.4f}s)")
+                future = self.save_state_executor.submit(save_worker)
+                self._pending_save_future = future
+                def save_complete_callback(fut):
+                    try:
+                        result = fut.result()
+                        if result['success']:
+                            bt.logging.success(
+                                f"Simulation state saved to {self.simulation_state_file} "
+                                f"({result['simulation_save_time']:.4f}s)"
+                            )
+                            bt.logging.success(
+                                f"Validator state saved to {self.validator_state_file} "
+                                f"({result['validator_save_time']:.4f}s)"
+                            )
+                            bt.logging.info(
+                                f"Total save time: {result['total_time']:.4f}s "
+                                f"(construct: {result['construct_time']:.4f}s, "
+                                f"write: {result['total_time']-result['construct_time']:.4f}s)"
+                            )
 
-                if result['success']:
-                    bt.logging.success(
-                        f"Simulation state saved to {self.simulation_state_file} "
-                        f"({result['simulation_save_time']:.4f}s)"
-                    )
-                    bt.logging.success(
-                        f"Validator state saved to {self.validator_state_file} "
-                        f"({result['validator_save_time']:.4f}s)"
-                    )
-                    bt.logging.info(f"Total save time: {result['total_time']:.4f}s")
-                    return True
-                else:
-                    self.pagerduty_alert(
-                        f"Failed to save state: {result['error']}",
-                        details={"trace": result.get('traceback')}
-                    )
-                    return False
+                            max_backups = 5
+                            for state_file in [self.simulation_state_file, self.validator_state_file]:
+                                if os.path.exists(state_file):
+                                    backup = f"{state_file}.{save_timestamp}"
+                                    try:
+                                        shutil.copy2(state_file, backup)
+                                        bt.logging.debug(f"Created backup: {backup}")
+                                    except Exception as ex:
+                                        bt.logging.warning(f"Failed to create backup {backup}: {ex}")
+                                    state_path = Path(state_file)
+                                    try:
+                                        backups = sorted(
+                                            [f for f in state_path.parent.glob(f"{state_path.name}.*") 
+                                            if f.suffix.lstrip('.').isdigit()],
+                                            key=lambda x: int(x.suffix.lstrip('.')),
+                                            reverse=True
+                                        )
+                                        for old_backup in backups[max_backups:]:
+                                            try:
+                                                os.remove(old_backup)
+                                                bt.logging.debug(f"Removed old backup: {old_backup}")
+                                            except Exception as ex:
+                                                bt.logging.warning(f"Failed to remove old backup {old_backup}: {ex}")
+                                    except Exception as ex:
+                                        bt.logging.warning(f"Failed to clean old backups: {ex}")
+                        else:
+                            self.pagerduty_alert(
+                                f"Failed to save state for step {save_step}: {result['error']}",
+                                details={"trace": result.get('traceback')}
+                            )
+                    except Exception as ex:
+                        self.pagerduty_alert(
+                            f"Error in save completion callback for step {save_step}: {ex}",
+                            details={"trace": traceback.format_exc()}
+                        )
+                    finally:
+                        if self._pending_save_future == fut:
+                            self._pending_save_future = None
+                        self.shared_state_saving = False
+                        bt.logging.debug(f"Released save lock for step {save_step}")
+                
+                future.add_done_callback(save_complete_callback)
+                
+                bt.logging.info(f"State save submitted for step {self.step} (setup took {time.time()-start:.4f}s)")
+                return True
 
             except Exception as ex:
                 self.pagerduty_alert(
                     f"Failed to prepare state for save: {ex}",
                     details={"trace": traceback.format_exc()}
                 )
-                return False
-            finally:
+                self._pending_save_future = None
                 self.shared_state_saving = False
+                return False
 
         def save_state(self) -> None:
             """
@@ -1156,9 +1351,9 @@ if __name__ != "__mp_main__":
                         f"validator ({result['validator_save_time']:.4f}s)"
                     )
                 else:
-                    bt.logging.error(f"Direct save failed: {result['error']}")
+                    self.pagerduty_alert(f"Direct save failed: {result['error']}")
             except Exception as ex:
-                bt.logging.error(f"Error in direct save: {ex}]\n{traceback.format_exc()}")
+                self.pagerduty_alert(f"Error in direct save: {ex}]\n{traceback.format_exc()}")
 
         def load_state(self) -> None:
             """
@@ -1415,6 +1610,7 @@ if __name__ != "__mp_main__":
                 else:
                     bt.logging.info(f"No previous state information at {self.validator_state_file}, initializing new simulation state.")
                 self.activity_factors = {uid : {bookId : 0.0 for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
+                self.activity_factors_realized = {uid : {bookId : 0.0 for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
                 self.inventory_history = {uid : {} for uid in range(self.subnet_info.max_uids)}
                 self.sharpe_values = {uid:
                     {
@@ -1447,6 +1643,17 @@ if __name__ != "__mp_main__":
                 }
                 self.unnormalized_scores = {uid : 0.0 for uid in range(self.subnet_info.max_uids)}
                 self.trade_volumes = {uid : {bookId : {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}} for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
+                self.volume_sums = defaultdict(lambda: defaultdict(float))
+                self.maker_volume_sums = defaultdict(lambda: defaultdict(float))
+                self.taker_volume_sums = defaultdict(lambda: defaultdict(float))
+                self.self_volume_sums = defaultdict(lambda: defaultdict(float))
+                self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+                self.roundtrip_volume_sums = defaultdict(lambda: defaultdict(float))
+                self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+                self.open_positions = defaultdict(lambda: defaultdict(lambda: {
+                    'longs': deque(),
+                    'shorts': deque()
+                }))
 
         def handle_deregistration(self, uid) -> None:
             """
@@ -1626,6 +1833,26 @@ if __name__ != "__mp_main__":
             bt.logging.debug(f"Retrieved fundamental prices ({time.time()-start:.4f}s).")
 
             book_count = self.simulation.book_count
+            bt.logging.debug("Computing realized P&L totals...")
+            pnl_start = time.time()
+            total_realized_pnl = {}
+            realized_pnl_by_book = {}
+            
+            for uid, hist in self.realized_pnl_history.items():
+                if not hist:
+                    total_realized_pnl[uid] = 0.0
+                    realized_pnl_by_book[uid] = {book_id: 0.0 for book_id in range(book_count)}
+                    continue
+                
+                book_totals = [0.0] * book_count
+                for timestamp_data in hist.values():
+                    for book_id, pnl in timestamp_data.items():
+                        book_totals[book_id] += pnl
+                
+                realized_pnl_by_book[uid] = {book_id: book_totals[book_id] for book_id in range(book_count)}
+                total_realized_pnl[uid] = sum(book_totals)
+            
+            bt.logging.debug(f"Computed realized P&L totals ({time.time()-pnl_start:.4f}s)")
 
             bt.logging.debug("Building minimal inventory...")
             inv_start = time.time()
@@ -1696,7 +1923,27 @@ if __name__ != "__mp_main__":
                 }
                 for uid, book_trades in self.recent_miner_trades.items()
             }
-            bt.logging.debug(f"Built recent trades ({time.time()-trades_start:.4f}s)")
+            bt.logging.debug(f"Built minimal recent trades ({time.time()-trades_start:.4f}s)")
+
+            bt.logging.debug("Building minimal state...")
+            state_start = time.time()
+            minimal_state = {
+                'accounts': self.last_state.accounts,
+                'books': {
+                    bookId: {
+                        'b': book['b'][:5] if book['b'] else [],
+                        'a': book['a'][:5] if book['a'] else [],
+                        'e': [e for e in book['e'] if e['y'] == 't'][-10:] if book['e'] else [],
+                        'mtr': book.get('mtr', 0.0)
+                    }
+                    for bookId, book in self.last_state.books.items()
+                },
+                'notices': {
+                    uid: [n for n in notices if n['y'] in ['EVENT_TRADE', 'ET']][-10:]
+                    for uid, notices in self.last_state.notices.items()
+                }
+            }
+            bt.logging.debug(f"Built minimal state ({time.time()-state_start:.4f}s)")
 
             bt.logging.debug("Building position summary...")
             pos_start = time.time()
@@ -1718,11 +1965,7 @@ if __name__ != "__mp_main__":
             data = {
                 'metagraph_data': metagraph_data,
                 'simulation': self.simulation.model_dump(),
-                'last_state': {
-                    'accounts': self.last_state.accounts,
-                    'books': self.last_state.books,
-                    'notices': self.last_state.notices,
-                },
+                'last_state': minimal_state,  # Minimized state
                 'simulation_timestamp': self.simulation_timestamp,
                 'step': self.step,
                 'step_rates': list(self.step_rates[-100:]),
@@ -1732,7 +1975,8 @@ if __name__ != "__mp_main__":
                 'self_volume_sums': self_volume_sums_flat,
                 'roundtrip_volume_sums': roundtrip_volume_sums_flat,
                 'inventory_history': minimal_inventory,
-                'realized_pnl_history': dict(self.realized_pnl_history),
+                'total_realized_pnl': total_realized_pnl,
+                'realized_pnl_by_book': realized_pnl_by_book,
                 'book_count': book_count,
                 'activity_factors': self.activity_factors,
                 'activity_factors_realized': self.activity_factors_realized,
@@ -1765,7 +2009,7 @@ if __name__ != "__mp_main__":
                 bt.logging.error("Attempting to restart reporting service...")
                 self._start_reporting_service()
                 if self.reporting_process.poll() is not None:
-                    bt.logging.error("Failed to restart reporting service")
+                    self.pagerduty_alert("Failed to restart reporting service")
                     return
 
             self._reporting = True
@@ -1773,12 +2017,23 @@ if __name__ != "__mp_main__":
             bt.logging.info(f"Starting Reporting at step {reporting_step}...")
             start = time.time()
             try:
+                drain_start = time.time()
+                drained = 0
                 while True:
                     try:
-                        await asyncio.to_thread(self.reporting_response_queue.receive, timeout=0.0)
-                        bt.logging.warning("Drained stale message from reporting response queue")
-                    except posix_ipc.BusyError:
+                        await asyncio.wait_for(
+                            asyncio.get_event_loop().run_in_executor(
+                                self.reporting_ipc_executor,
+                                lambda: self.reporting_response_queue.receive(timeout=0.001)
+                            ),
+                            timeout=0.05
+                        )
+                        drained += 1
+                    except (posix_ipc.BusyError, asyncio.TimeoutError):
                         break
+
+                if drained > 0:
+                    bt.logging.warning(f"Drained {drained} stale messages from reporting response queue ({time.time()-drain_start:.4f}s)")
 
                 prep_start = time.time()
                 data = self._prepare_reporting_data()
@@ -1787,7 +2042,7 @@ if __name__ != "__mp_main__":
 
                 serialize_start = time.time()
                 data_bytes = await asyncio.get_event_loop().run_in_executor(
-                    self.ipc_executor,
+                    self.reporting_ipc_executor,
                     lambda: msgpack.packb(data, use_bin_type=True)
                 )
                 serialize_time = time.time() - serialize_start
@@ -1799,57 +2054,61 @@ if __name__ != "__mp_main__":
                     self.reporting_request_mem,
                     self.reporting_request_queue,
                     data_bytes,
-                    "Reporting"
+                    "Reporting",
+                    self.reporting_ipc_executor
                 )
                 
                 if not write_success:
-                    bt.logging.error("Failed to write reporting data")
+                    self.pagerduty_alert("Failed to write reporting data")
                     return
                 
                 bt.logging.info(f"Wrote reporting data ({time.time()-write_start:.4f}s)")
 
                 await asyncio.get_event_loop().run_in_executor(
-                    self.ipc_executor,
+                    self.reporting_ipc_executor,
                     self.reporting_request_queue.send,
                     b'publish'
                 )
 
                 receive_start = time.time()
-                try:
-                    message, _ = await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(
-                            self.ipc_executor,
-                            self.reporting_response_queue.receive
-                        ),
-                        timeout=60.0
-                    )
-                    bt.logging.debug(f"Received reporting response ({time.time()-receive_start:.4f}s)")
-                except asyncio.TimeoutError:
-                    bt.logging.error("Reporting response timeout after 5s")
+                max_wait = 120.0
+                elapsed = 0
+                message = None
+                poll_count = 0
+                while elapsed < max_wait:
+                    poll_count += 1
+                    try:
+                        message, _ = self.reporting_response_queue.receive(timeout=0.0)
+                        bt.logging.info(f"Received reporting response after {poll_count} polls ({time.time()-receive_start:.4f}s)")
+                        break
+                    except posix_ipc.BusyError:
+                        elapsed = time.time() - receive_start
+                        if poll_count % 100000 == 0:
+                            await asyncio.sleep(0)
+                            bt.logging.debug(f"Still polling for reporting response ({elapsed:.1f}s, {poll_count} polls)")
+                        
+                        continue
+                else:
+                    self.pagerduty_alert(f"Reporting response timeout after {max_wait}s")
+                    return
+                if message is None:
+                    self.pagerduty_alert(f"Reporting response timeout after {max_wait}s")
                     return
 
                 read_start = time.time()
-                
-                async def read_response():
-                    self.reporting_response_mem.seek(0)
-                    size_bytes = self.reporting_response_mem.read(8)
-                    data_size = struct.unpack('Q', size_bytes)[0]
-                    result_bytes = self.reporting_response_mem.read(data_size)
-                    return msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
-
-                result = await asyncio.get_event_loop().run_in_executor(
-                    self.ipc_executor,
-                    lambda: asyncio.run(read_response())
-                )
-
-                bt.logging.info(f"Read reporting response data ({time.time()-read_start:.4f}s)")
+                self.reporting_response_mem.seek(0)
+                size_bytes = self.reporting_response_mem.read(8)
+                data_size = struct.unpack('Q', size_bytes)[0]
+                result_bytes = self.reporting_response_mem.read(data_size)
+                result_mb = len(result_bytes) / 1024 / 1024
+                deserialize_start = time.time()
+                result = msgpack.unpackb(result_bytes, raw=False, strict_map_key=False)
+                bt.logging.info(f"Read reporting response data ({time.time()-read_start:.4f}s | {result_mb:.2f}MB)")
                 self.initial_balances_published = result['initial_balances_published']
                 self.miner_stats = result['miner_stats']
 
             except Exception as e:
-                bt.logging.error(f"Error sending to reporting service: {e}")
-                import traceback
-                bt.logging.error(traceback.format_exc())
+                self.pagerduty_alert(f"Error sending to reporting service: {e}", details={"trace": traceback.format_exc()})
             finally:
                 self._reporting = False
                 bt.logging.info(f"Completed reporting for step {reporting_step} ({time.time() - start:.4f}s)")
@@ -1883,9 +2142,10 @@ if __name__ != "__mp_main__":
                 self.simulation.publish_interval
             )
             
+            sampling_interval = self.config.scoring.activity.trade_volume_sampling_interval
             sampled_timestamp = math.ceil(
-                self.simulation_timestamp / self.config.scoring.activity.trade_volume_sampling_interval
-            ) * self.config.scoring.activity.trade_volume_sampling_interval
+                self.simulation_timestamp / sampling_interval
+            ) * sampling_interval
 
             compact_volumes = {}
             for uid in self.metagraph.uids:
@@ -1903,17 +2163,17 @@ if __name__ != "__mp_main__":
                             }
                             continue
 
-                        timestamps_with_volume = sorted([
+                        timestamps_with_volume = [
                             ts for ts, vol in total_trades.items() if vol > 0 and ts <= sampled_timestamp
-                        ])
+                        ]
                         
                         if timestamps_with_volume:
-                            latest_time = timestamps_with_volume[-1]
+                            latest_time = max(timestamps_with_volume)
                         else:
                             latest_time = 0
 
-                        if latest_time == sampled_timestamp:
-                            latest_volume = total_trades[sampled_timestamp]
+                        if latest_time >= sampled_timestamp - sampling_interval:
+                            latest_volume = total_trades[latest_time]
                         else:
                             latest_volume = 0.0
                         
@@ -1957,9 +2217,10 @@ if __name__ != "__mp_main__":
                 self.simulation.publish_interval
             )
             
+            sampling_interval = self.config.scoring.activity.trade_volume_sampling_interval
             sampled_timestamp = math.ceil(
-                self.simulation_timestamp / self.config.scoring.activity.trade_volume_sampling_interval
-            ) * self.config.scoring.activity.trade_volume_sampling_interval
+                self.simulation_timestamp / sampling_interval
+            ) * sampling_interval
 
             compact_roundtrip = {}
             for uid in self.metagraph.uids:
@@ -1976,17 +2237,17 @@ if __name__ != "__mp_main__":
                             }
                             continue
 
-                        timestamps_with_volume = sorted([
+                        timestamps_with_volume = [
                             ts for ts, vol in rt_volumes.items() if vol > 0 and ts <= sampled_timestamp
-                        ])
+                        ]
                         
                         if timestamps_with_volume:
-                            latest_time = timestamps_with_volume[-1]
+                            latest_time = max(timestamps_with_volume)
                         else:
                             latest_time = 0
 
-                        if latest_time == sampled_timestamp:
-                            latest_volume = rt_volumes[sampled_timestamp]
+                        if latest_time >= sampled_timestamp - sampling_interval:
+                            latest_volume = rt_volumes[latest_time]
                         else:
                             latest_volume = 0.0
                         
@@ -2172,6 +2433,7 @@ if __name__ != "__mp_main__":
                 timestamp / self.config.scoring.activity.trade_volume_sampling_interval
             ) * self.config.scoring.activity.trade_volume_sampling_interval
 
+            should_prune = (self.step % 60 == 0)
             volume_prune_threshold = timestamp - self.config.scoring.activity.trade_volume_assessment_period
 
             for bookId, book in books.items():
@@ -2198,35 +2460,34 @@ if __name__ != "__mp_main__":
                     trade_volumes_uid = self.trade_volumes[uid_item]
 
                     # Prune old volumes and update sums
-                    for book_id, role_trades in trade_volumes_uid.items():
-                        for role, trades in role_trades.items():
-                            if trades:
-                                pruned_volume = sum(
-                                    v for t, v in trades.items() if t < volume_prune_threshold
-                                )
-                                if pruned_volume > 0:
-                                    # Update sums without immediate rounding
-                                    if role == 'total':
-                                        self.volume_sums[uid_item][book_id] = max(
-                                            0.0, self.volume_sums[uid_item][book_id] - pruned_volume
-                                        )
-                                    elif role == 'maker':
-                                        self.maker_volume_sums[uid_item][book_id] = max(
-                                            0.0, self.maker_volume_sums[uid_item][book_id] - pruned_volume
-                                        )
-                                    elif role == 'taker':
-                                        self.taker_volume_sums[uid_item][book_id] = max(
-                                            0.0, self.taker_volume_sums[uid_item][book_id] - pruned_volume
-                                        )
-                                    elif role == 'self':
-                                        self.self_volume_sums[uid_item][book_id] = max(
-                                            0.0, self.self_volume_sums[uid_item][book_id] - pruned_volume
-                                        )
-                                    uids_to_round.add(uid_item)
-
-                                trade_volumes_uid[book_id][role] = {
-                                    t: v for t, v in trades.items() if t >= volume_prune_threshold
-                                }
+                    if should_prune:
+                        for book_id, role_trades in trade_volumes_uid.items():
+                            for role, trades in role_trades.items():
+                                if not trades:
+                                    continue
+                                old_count = len(trades)
+                                pruned = {t: v for t, v in trades.items() if t >= volume_prune_threshold}
+                                if len(pruned) < old_count:
+                                    pruned_volume = sum(v for t, v in trades.items() if t < volume_prune_threshold)
+                                    if pruned_volume > 0:
+                                        if role == 'total':
+                                            self.volume_sums[uid_item][book_id] = max(
+                                                0.0, self.volume_sums[uid_item][book_id] - pruned_volume
+                                            )
+                                        elif role == 'maker':
+                                            self.maker_volume_sums[uid_item][book_id] = max(
+                                                0.0, self.maker_volume_sums[uid_item][book_id] - pruned_volume
+                                            )
+                                        elif role == 'taker':
+                                            self.taker_volume_sums[uid_item][book_id] = max(
+                                                0.0, self.taker_volume_sums[uid_item][book_id] - pruned_volume
+                                            )
+                                        elif role == 'self':
+                                            self.self_volume_sums[uid_item][book_id] = max(
+                                                0.0, self.self_volume_sums[uid_item][book_id] - pruned_volume
+                                            )
+                                        uids_to_round.add(uid_item)
+                                    trade_volumes_uid[book_id][role] = pruned
 
                     # Initialize sampled timestamp entries
                     for book_id in range(book_count):
@@ -2257,7 +2518,8 @@ if __name__ != "__mp_main__":
                                     recent_miner_trades_uid[book_id].append([TradeEvent.model_construct(**trade), "maker"])
                                 if is_taker:
                                     recent_miner_trades_uid[book_id].append([TradeEvent.model_construct(**trade), "taker"])
-                                recent_miner_trades_uid[book_id] = recent_miner_trades_uid[book_id][-5:]
+                                if len(recent_miner_trades_uid[book_id]) > 5:
+                                    del recent_miner_trades_uid[book_id][:-5]
 
                                 book_volumes = trade_volumes_uid[book_id]
                                 trade_value = trade['q'] * trade['p']
@@ -2333,43 +2595,50 @@ if __name__ != "__mp_main__":
                     else:
                         self.inventory_history[uid_item][timestamp] = {book_id: 0.0 for book_id in books}
 
-                    inventory_hist = self.inventory_history[uid_item]
-                    if len(inventory_hist) > self.config.scoring.sharpe.lookback:
-                        timestamps_to_keep = sorted(inventory_hist.keys())[-self.config.scoring.sharpe.lookback:]
-                        self.inventory_history[uid_item] = {
-                            ts: inventory_hist[ts] for ts in timestamps_to_keep
-                        }
+                    if should_prune:
+                        inventory_hist = self.inventory_history[uid_item]
+                        lookback_limit = self.config.scoring.sharpe.lookback
 
-                    pnl_hist = self.realized_pnl_history[uid_item]
-                    if len(pnl_hist) > self.config.scoring.sharpe.lookback:
-                        timestamps_to_keep = sorted(pnl_hist.keys())[-self.config.scoring.sharpe.lookback:]
-                        self.realized_pnl_history[uid_item] = {
-                            ts: pnl_hist[ts] for ts in timestamps_to_keep
-                        }
+                        if len(inventory_hist) > lookback_limit:
+                            timestamps_to_keep = heapq.nlargest(lookback_limit, inventory_hist.keys())
+                            self.inventory_history[uid_item] = {
+                                ts: inventory_hist[ts] for ts in timestamps_to_keep
+                            }
 
-                    if uid_item in self.roundtrip_volumes:
+                        pnl_hist = self.realized_pnl_history[uid_item]
+                        if len(pnl_hist) > lookback_limit:
+                            timestamps_to_keep = heapq.nlargest(lookback_limit, pnl_hist.keys())
+                            self.realized_pnl_history[uid_item] = {
+                                ts: pnl_hist[ts] for ts in timestamps_to_keep
+                            }
+
+                    if should_prune and uid_item in self.roundtrip_volumes:
                         roundtrip_volumes_uid = self.roundtrip_volumes[uid_item]
                         for book_id, rt_volumes in roundtrip_volumes_uid.items():
-                            if rt_volumes:
-                                pruned_rt_volume = sum(
-                                    v for t, v in rt_volumes.items() if t < volume_prune_threshold
-                                )
+                            if not rt_volumes:
+                                continue
+                            old_count = len(rt_volumes)
+                            pruned = {t: v for t, v in rt_volumes.items() if t >= volume_prune_threshold}
+                            if len(pruned) < old_count:
+                                pruned_rt_volume = sum(v for t, v in rt_volumes.items() if t < volume_prune_threshold)
                                 if pruned_rt_volume > 0:
                                     current = self.roundtrip_volume_sums[uid_item][book_id]
                                     self.roundtrip_volume_sums[uid_item][book_id] = max(0.0, current - pruned_rt_volume)
                                     uids_to_round.add(uid_item)
-
-                                roundtrip_volumes_uid[book_id] = {
-                                    t: v for t, v in rt_volumes.items() if t >= volume_prune_threshold
-                                }
+                                roundtrip_volumes_uid[book_id] = pruned
 
                 except Exception as ex:
-                    bt.logging.error(f"Failed to update trade data for UID {uid_item}: {ex}")
-                    bt.logging.error(traceback.format_exc())
-
+                    self.pagerduty_alert(f"Failed to update trade data for UID {uid_item}: {ex}", details={"trace": traceback.format_exc()})
+                    
             for uid_item, timestamps in realized_pnl_updates.items():
                 for ts, books in timestamps.items():
+                    if uid_item not in self.realized_pnl_history:
+                        self.realized_pnl_history[uid_item] = defaultdict(lambda: defaultdict(float))
+                    if ts not in self.realized_pnl_history[uid_item]:
+                        self.realized_pnl_history[uid_item][ts] = defaultdict(float)                    
                     for book_id, pnl in books.items():
+                        if book_id not in self.realized_pnl_history[uid_item][ts]:
+                            self.realized_pnl_history[uid_item][ts][book_id] = 0.0
                         self.realized_pnl_history[uid_item][ts][book_id] += pnl
 
             for uid_item, timestamps in roundtrip_volume_updates.items():
@@ -2387,7 +2656,15 @@ if __name__ != "__mp_main__":
                         uids_to_round.add(uid_item)
 
             for uid_item in uids_to_round:
-                for book_id in range(book_count):
+                changed_books = set(volume_deltas.get(uid_item, {}).keys())
+                
+                if uid_item in roundtrip_volume_updates:
+                    for ts_books in roundtrip_volume_updates[uid_item].values():
+                        changed_books.update(ts_books.keys())
+                if not changed_books:
+                    changed_books = range(book_count)
+                
+                for book_id in changed_books:
                     if uid_item in self.trade_volumes and book_id in self.trade_volumes[uid_item]:
                         book_vols = self.trade_volumes[uid_item][book_id]
                         for role in ['total', 'maker', 'taker', 'self']:
@@ -2396,31 +2673,23 @@ if __name__ != "__mp_main__":
                                     book_vols[role][sampled_timestamp],
                                     volume_decimals
                                 )
-                    if uid_item in self.volume_sums and book_id in self.volume_sums[uid_item]:
-                        self.volume_sums[uid_item][book_id] = round(
-                            self.volume_sums[uid_item][book_id],
-                            volume_decimals
-                        )
-                    if uid_item in self.maker_volume_sums and book_id in self.maker_volume_sums[uid_item]:
-                        self.maker_volume_sums[uid_item][book_id] = round(
-                            self.maker_volume_sums[uid_item][book_id],
-                            volume_decimals
-                        )
-                    if uid_item in self.taker_volume_sums and book_id in self.taker_volume_sums[uid_item]:
-                        self.taker_volume_sums[uid_item][book_id] = round(
-                            self.taker_volume_sums[uid_item][book_id],
-                            volume_decimals
-                        )
-                    if uid_item in self.self_volume_sums and book_id in self.self_volume_sums[uid_item]:
-                        self.self_volume_sums[uid_item][book_id] = round(
-                            self.self_volume_sums[uid_item][book_id],
-                            volume_decimals
-                        )
-                    if uid_item in self.roundtrip_volume_sums and book_id in self.roundtrip_volume_sums[uid_item]:
-                        self.roundtrip_volume_sums[uid_item][book_id] = round(
-                            self.roundtrip_volume_sums[uid_item][book_id],
-                            volume_decimals
-                        )
+
+                    self.volume_sums[uid_item][book_id] = round(
+                        self.volume_sums[uid_item][book_id], volume_decimals
+                    )
+                    self.maker_volume_sums[uid_item][book_id] = round(
+                        self.maker_volume_sums[uid_item][book_id], volume_decimals
+                    )
+                    self.taker_volume_sums[uid_item][book_id] = round(
+                        self.taker_volume_sums[uid_item][book_id], volume_decimals
+                    )
+                    self.self_volume_sums[uid_item][book_id] = round(
+                        self.self_volume_sums[uid_item][book_id], volume_decimals
+                    )
+                    self.roundtrip_volume_sums[uid_item][book_id] = round(
+                        self.roundtrip_volume_sums[uid_item][book_id], volume_decimals
+                    )
+
                 if uid_item in realized_pnl_updates:
                     for ts in realized_pnl_updates[uid_item]:
                         for book_id in range(book_count):
@@ -2431,8 +2700,10 @@ if __name__ != "__mp_main__":
                                 )
 
             total_time = time.time() - total_start
-            bt.logging.debug(f"[UPDATE_VOLUMES] Total: {total_time:.4f}s")
-            await asyncio.sleep(0)
+            if should_prune:
+                bt.logging.debug(f"[UPDATE_VOLUMES] Total: {total_time:.4f}s (pruned)")
+            else:
+                bt.logging.debug(f"[UPDATE_VOLUMES] Total: {total_time:.4f}s")
 
         async def _prepare_inventory_compact(self):
             """
@@ -2455,8 +2726,6 @@ if __name__ != "__mp_main__":
                     inventory_compact[uid_item] = {ts: hist[ts] for ts in sorted_timestamps}
                 else:
                     inventory_compact[uid_item] = {}
-                if i % 32 == 0:
-                    await asyncio.sleep(0)
             
             bt.logging.debug(f"[REWARD] Converted inventory history in {time.time()-convert_start:.4f}s")
             return inventory_compact
@@ -2482,8 +2751,6 @@ if __name__ != "__mp_main__":
                     realized_pnl_compact[uid_item] = {ts: hist[ts] for ts in sorted_timestamps}
                 else:
                     realized_pnl_compact[uid_item] = {}
-                if i % 32 == 0:
-                    await asyncio.sleep(0)
             
             bt.logging.debug(f"[REWARD] Converted realized P&L history in {time.time()-convert_start:.4f}s")
             return realized_pnl_compact
@@ -2516,11 +2783,14 @@ if __name__ != "__mp_main__":
                                 self.simulation.priceDecimals
                             )
                         }
-                if i % 32 == 0:
-                    await asyncio.sleep(0)
-            
             bt.logging.debug(f"[REWARD] Extracted positions for {len(miner_positions)} miners in {time.time()-positions_start:.4f}s")
             return miner_positions
+
+        def should_block_queries(self) -> bool:
+            """Block queries if reward is lagging."""
+            if self._pending_reward_tasks >= 5:
+                return True      
+            return False
 
         async def _reward(self, state: MarketSimulationStateUpdate):
             """
@@ -2553,119 +2823,120 @@ if __name__ != "__mp_main__":
             """
             if not hasattr(self, "_reward_lock"):
                 self._reward_lock = asyncio.Lock()
+                
+            with self._rewarding_lock:
+                self._pending_reward_tasks += 1
 
             start_wait = time.time()
             rewarding_step = self.step
-            async with self._reward_lock:
-                waited = time.time() - start_wait
-                if waited > 0:
-                    bt.logging.debug(f"Acquired reward lock after waiting {waited:.3f}s")
-                await asyncio.sleep(0)
+            try:
+                async with self._reward_lock:
+                    waited = time.time() - start_wait
+                    if waited > 0:
+                        bt.logging.debug(f"Acquired reward lock after waiting {waited:.3f}s")
 
-                self.shared_state_rewarding = True
-                await asyncio.sleep(0)
+                    self.shared_state_rewarding = True
 
-                timestamp = state.timestamp
-                duration = duration_from_timestamp(timestamp)
-                bt.logging.info(f"Starting reward calculation for step {rewarding_step}...")
-                start = time.time()
-                await asyncio.sleep(0)
+                    timestamp = state.timestamp
+                    duration = duration_from_timestamp(timestamp)
+                    bt.logging.info(f"Starting reward calculation for step {rewarding_step}...")
+                    start = time.time()
 
-                try:
-                    bt.logging.debug("[REWARD] Updating trade volumes...")
-                    update_start = time.time()
-                    await self._update_trade_volumes(state)
-                    bt.logging.debug(f"[REWARD] Trade volumes updated in {time.time()-update_start:.4f}s")
-                    if timestamp % self.config.scoring.interval != 0:
-                        bt.logging.info(f"Agent Scores Data Updated for {duration} ({time.time()-start:.4f}s)")
-                        return
-                    inventory_compact = await self._prepare_inventory_compact()
-                    compact_volumes = await self._compute_compact_volumes()
-                    compact_roundtrip_volumes = await self._compute_compact_roundtrip_volumes()
-                    realized_pnl_compact = await self._prepare_realized_pnl_compact()
-                    miner_positions = await self._extract_miner_positions(state)
+                    try:
+                        bt.logging.debug("[REWARD] Updating trade volumes...")
+                        update_start = time.time()
+                        await self._update_trade_volumes(state)
+                        bt.logging.debug(f"[REWARD] Trade volumes updated in {time.time()-update_start:.4f}s")
+                        if timestamp % self.config.scoring.interval != 0:
+                            bt.logging.info(f"Agent Scores Data Updated for {duration} ({time.time()-start:.4f}s)")
+                            return
+                        inventory_compact = await self._prepare_inventory_compact()
+                        compact_volumes = await self._compute_compact_volumes()
+                        compact_roundtrip_volumes = await self._compute_compact_roundtrip_volumes()
+                        realized_pnl_compact = await self._prepare_realized_pnl_compact()
+                        miner_positions = await self._extract_miner_positions(state)
 
-                    prep_start = time.time()
-                    validator_data = {
-                        'sharpe_values': self.sharpe_values,
-                        'activity_factors': self.activity_factors,
-                        'activity_factors_realized': self.activity_factors_realized,
-                        'compact_volumes': compact_volumes,
-                        'compact_roundtrip_volumes': compact_roundtrip_volumes,
-                        'inventory_history': inventory_compact,
-                        'realized_pnl_history': realized_pnl_compact,
-                        'miner_positions': miner_positions,
-                        'config': {
-                            'scoring': {
-                                'sharpe': {
-                                    'normalization_min': self.config.scoring.sharpe.normalization_min,
-                                    'normalization_max': self.config.scoring.sharpe.normalization_max,
-                                    'lookback': self.config.scoring.sharpe.lookback,
-                                    'min_lookback': self.config.scoring.sharpe.min_lookback,
-                                    'min_realized_observations': self.config.scoring.sharpe.min_realized_observations,
-                                    'parallel_workers': self.config.scoring.sharpe.parallel_workers if self.config.scoring.sharpe.parallel_workers > 0 else multiprocessing.cpu_count() // 2,
+                        prep_start = time.time()
+                        validator_data = {
+                            'sharpe_values': self.sharpe_values,
+                            'activity_factors': self.activity_factors,
+                            'activity_factors_realized': self.activity_factors_realized,
+                            'compact_volumes': compact_volumes,
+                            'compact_roundtrip_volumes': compact_roundtrip_volumes,
+                            'inventory_history': inventory_compact,
+                            'realized_pnl_history': realized_pnl_compact,
+                            'miner_positions': miner_positions,
+                            'config': {
+                                'scoring': {
+                                    'sharpe': {
+                                        'normalization_min': self.config.scoring.sharpe.normalization_min,
+                                        'normalization_max': self.config.scoring.sharpe.normalization_max,
+                                        'lookback': self.config.scoring.sharpe.lookback,
+                                        'min_lookback': self.config.scoring.sharpe.min_lookback,
+                                        'min_realized_observations': self.config.scoring.sharpe.min_realized_observations,
+                                        'parallel_workers': self.config.scoring.sharpe.parallel_workers if self.config.scoring.sharpe.parallel_workers > 0 else multiprocessing.cpu_count() // 2,
+                                    },
+                                    'activity': {
+                                        'capital_turnover_cap': self.config.scoring.activity.capital_turnover_cap,
+                                        'trade_volume_sampling_interval': self.config.scoring.activity.trade_volume_sampling_interval,
+                                        'trade_volume_assessment_period': self.config.scoring.activity.trade_volume_assessment_period,
+                                        'decay_grace_period': self.config.scoring.activity.decay_grace_period,
+                                        'impact' : self.config.scoring.activity.impact
+                                    },
+                                    "inventory": {
+                                        'min_balance_ratio_multiplier': self.config.scoring.inventory.min_balance_ratio_multiplier,
+                                        'max_balance_ratio_multiplier': self.config.scoring.inventory.max_balance_ratio_multiplier
+                                    },
+                                    'interval': self.config.scoring.interval,
                                 },
-                                'activity': {
-                                    'capital_turnover_cap': self.config.scoring.activity.capital_turnover_cap,
-                                    'trade_volume_sampling_interval': self.config.scoring.activity.trade_volume_sampling_interval,
-                                    'trade_volume_assessment_period': self.config.scoring.activity.trade_volume_assessment_period,
-                                    'decay_grace_period': self.config.scoring.activity.decay_grace_period,
-                                    'impact' : self.config.scoring.activity.impact
+                                'rewarding': {
+                                    'seed': self.config.rewarding.seed,
+                                    'pareto': {
+                                        'shape': self.config.rewarding.pareto.shape,
+                                        'scale': self.config.rewarding.pareto.scale,
+                                    }
                                 },
-                                "inventory": {
-                                    'min_balance_ratio_multiplier': self.config.scoring.inventory.min_balance_ratio_multiplier,
-                                    'max_balance_ratio_multiplier': self.config.scoring.inventory.max_balance_ratio_multiplier
-                                },
-                                'interval': self.config.scoring.interval,
                             },
-                            'rewarding': {
-                                'seed': self.config.rewarding.seed,
-                                'pareto': {
-                                    'shape': self.config.rewarding.pareto.shape,
-                                    'scale': self.config.rewarding.pareto.scale,
-                                }
+                            'simulation_config': {
+                                'miner_wealth': self.simulation.miner_wealth,
+                                'publish_interval': self.simulation.publish_interval,
+                                'volumeDecimals': self.simulation.volumeDecimals,
+                                'grace_period': self.simulation.grace_period,
                             },
-                        },
-                        'simulation_config': {
-                            'miner_wealth': self.simulation.miner_wealth,
-                            'publish_interval': self.simulation.publish_interval,
-                            'volumeDecimals': self.simulation.volumeDecimals,
-                            'grace_period': self.simulation.grace_period,
-                        },
-                        'reward_weights': self.reward_weights,
-                        'simulation_timestamp': self.simulation_timestamp,
-                        'uids': [uid.item() for uid in self.metagraph.uids],
-                        'deregistered_uids': self.deregistered_uids,
-                        'device': self.device,
-                    }
-                    prep_time = time.time() - prep_start
-                    bt.logging.debug(f"[REWARD] Prepared validator_data in {prep_time:.4f}s")
+                            'reward_weights': self.reward_weights,
+                            'simulation_timestamp': self.simulation_timestamp,
+                            'uids': [uid.item() for uid in self.metagraph.uids],
+                            'deregistered_uids': self.deregistered_uids,
+                            'device': self.device,
+                        }
+                        prep_time = time.time() - prep_start
+                        bt.logging.debug(f"[REWARD] Prepared validator_data in {prep_time:.4f}s")
 
-                    await asyncio.sleep(0)
+                        bt.logging.info("Starting threaded reward calculation...")
+                        calc_start = time.time()
+                        
+                        rewards, updated_data = get_rewards(validator_data)
+                        
+                        bt.logging.info(f"Threaded reward calculation completed ({time.time()-calc_start:.4f}s)")
 
-                    bt.logging.info("Starting threaded reward calculation...")
-                    calc_start = time.time()
-                    
-                    rewards, updated_data = await asyncio.to_thread(get_rewards, validator_data)
-                    
-                    bt.logging.info(f"Threaded reward calculation completed ({time.time()-calc_start:.4f}s)")
+                        self.sharpe_values = updated_data.get('sharpe_values', self.sharpe_values)
+                        self.activity_factors = updated_data.get('activity_factors', self.activity_factors)
+                        self.activity_factors_realized = updated_data.get('activity_factors_realized', self.activity_factors_realized)
+                        self.simulation_timestamp = updated_data.get('simulation_timestamp', self.simulation_timestamp)
 
-                    self.sharpe_values = updated_data.get('sharpe_values', self.sharpe_values)
-                    self.activity_factors = updated_data.get('activity_factors', self.activity_factors)
-                    self.activity_factors_realized = updated_data.get('activity_factors_realized', self.activity_factors_realized)
-                    self.simulation_timestamp = updated_data.get('simulation_timestamp', self.simulation_timestamp)
+                        bt.logging.debug(f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n{rewards}")
+                        self.update_scores(rewards, self.metagraph.uids)
+                        bt.logging.info(f"Agent Scores Updated for {duration} ({time.time()-start:.4f}s)")
+                        self._last_rewarded_sim_timestamp = timestamp
 
-                    bt.logging.debug(f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n{rewards}")
-                    self.update_scores(rewards, self.metagraph.uids)
-                    bt.logging.info(f"Agent Scores Updated for {duration} ({time.time()-start:.4f}s)")
-
-                except Exception as ex:
-                    self.pagerduty_alert(f"Rewarding failed: {ex}", details={"trace": traceback.format_exc()})
-                finally:
-                    self.shared_state_rewarding = False
-                    await asyncio.sleep(0)
-                    bt.logging.debug(f"Completed rewarding (TOTAL {time.time()-start_wait:.4f}s).")
-            await asyncio.sleep(0)
+                    except Exception as ex:
+                        self.pagerduty_alert(f"Rewarding failed: {ex}", details={"trace": traceback.format_exc()})
+                    finally:
+                        self.shared_state_rewarding = False
+                        bt.logging.debug(f"Completed rewarding (TOTAL {time.time()-start_wait:.4f}s).")
+            finally:
+                with self._rewarding_lock:
+                    self._pending_reward_tasks -= 1
 
         def reward(self, state : MarketSimulationStateUpdate) -> None:
             """
@@ -3132,7 +3403,6 @@ if __name__ != "__mp_main__":
 
             except Exception as e:
                 bt.logging.error(f"Error during query service cleanup: {e}")
-                import traceback
                 bt.logging.error(traceback.format_exc())
 
         def cleanup_executors(self):
@@ -3173,13 +3443,21 @@ if __name__ != "__mp_main__":
                     except Exception as term_ex:
                         bt.logging.error(f"Error terminating reward_executor: {term_ex}")
             
-            if hasattr(self, 'ipc_executor') and self.ipc_executor is not None:
+            if hasattr(self, 'query_ipc_executor') and self.query_ipc_executor is not None:
                 try:
-                    bt.logging.info("Shutting down ipc_executor...")
-                    self.ipc_executor.shutdown(wait=True, cancel_futures=False)
-                    bt.logging.info("ipc_executor shut down successfully")
+                    bt.logging.info("Shutting down query_ipc_executor...")
+                    self.query_ipc_executor.shutdown(wait=True, cancel_futures=False)
+                    bt.logging.info("query_ipc_executor shut down successfully")
                 except Exception as ex:
-                    bt.logging.error(f"Error shutting down ipc_executor: {ex}")
+                    bt.logging.error(f"Error shutting down query_ipc_executor: {ex}")
+            
+            if hasattr(self, 'reporting_ipc_executor') and self.reporting_ipc_executor is not None:
+                try:
+                    bt.logging.info("Shutting down reporting_ipc_executor...")
+                    self.reporting_ipc_executor.shutdown(wait=True, cancel_futures=False)
+                    bt.logging.info("reporting_ipc_executor shut down successfully")
+                except Exception as ex:
+                    bt.logging.error(f"Error shutting down reporting_ipc_executor: {ex}")
 
             thread_executors = {
                 'save_state_executor': getattr(self, 'save_state_executor', None),

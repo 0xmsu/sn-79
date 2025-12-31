@@ -537,8 +537,39 @@ class QueryService:
                     self.response_mem.write(struct.pack('Q', len(result_bytes)))
                     self.response_mem.write(result_bytes)
                     bt.logging.info(f"Wrote response data ({time.time()-write_start:.4f}s).")
+                    
+                    drain_start = time.time()
+                    drained = 0
+                    while True:
+                        try:
+                            self.response_queue.receive(timeout=0.0)
+                            drained += 1
+                        except posix_ipc.BusyError:
+                            break
 
-                    self.response_queue.send(b'ready')
+                    if drained > 0:
+                        bt.logging.warning(f"Drained {drained} stale response signals ({time.time()-drain_start:.4f}s)")
+
+                    send_start = time.time()
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            self.response_queue.send(b'ready', timeout=1.0)
+                            bt.logging.info(f"Response signal sent ({time.time()-send_start:.4f}s)")
+                            break
+                        except posix_ipc.BusyError:
+                            if attempt < max_retries - 1:
+                                bt.logging.warning(f"Response queue full, retry {attempt+1}/{max_retries}")
+                                try:
+                                    self.response_queue.receive(timeout=0.0)
+                                    bt.logging.debug("Drained one more stale message")
+                                except posix_ipc.BusyError:
+                                    pass
+                            else:
+                                bt.logging.error(f"Failed to send response signal after {max_retries} attempts")
+                        except Exception as e:
+                            bt.logging.error(f"Error sending response signal: {e}")
+                            break
 
                 elif command == 'shutdown':
                     bt.logging.info("Shutdown command received")

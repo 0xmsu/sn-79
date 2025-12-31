@@ -26,7 +26,7 @@
                 scale="1.0"
                 shape="2.0"
                 seed="1337"
-                wealth="100000.0"
+                wealth="75000.0"
                 price="300.0">
             </Balances>
             <Logging startDate="2025-05-07 00:00:00">

@@ -1023,7 +1023,7 @@ if __name__ != "__mp_main__":
             uid_count = 0
             for uid in range(self.subnet_info.max_uids):
                 uid_count += 1
-                if not sync and uid_count % 64 == 0:  # Only yield if NOT sync
+                if not sync and uid_count % 64 == 0:
                     await asyncio.sleep(0)
                 if uid in self.inventory_history:
                     inventory_snapshot[uid] = {}
@@ -1034,7 +1034,7 @@ if __name__ != "__mp_main__":
             uid_count = 0
             for uid in range(self.subnet_info.max_uids):
                 uid_count += 1
-                if not sync and uid_count % 64 == 0:  # Only yield if NOT sync
+                if not sync and uid_count % 64 == 0:
                     await asyncio.sleep(0)
                 
                 if uid in self.realized_pnl_history:
@@ -1048,7 +1048,7 @@ if __name__ != "__mp_main__":
                 uid_count = 0                
                 for uid in range(self.subnet_info.max_uids):
                     uid_count += 1
-                    if not sync and uid_count % 64 == 0:  # Only yield if NOT sync
+                    if not sync and uid_count % 64 == 0:
                         await asyncio.sleep(0)
                     
                     if uid in source_dict:
@@ -1065,7 +1065,7 @@ if __name__ != "__mp_main__":
             uid_count = 0
             for uid in range(self.subnet_info.max_uids):
                 uid_count += 1
-                if not sync and uid_count % 64 == 0:  # Only yield if NOT sync
+                if not sync and uid_count % 64 == 0:
                     await asyncio.sleep(0)
                 if uid not in self.trade_volumes:                    
                     continue                
@@ -1080,7 +1080,7 @@ if __name__ != "__mp_main__":
             
             for uid in range(self.subnet_info.max_uids):
                 uid_count += 1
-                if not sync and uid_count % 64 == 0:  # Only yield if NOT sync
+                if not sync and uid_count % 64 == 0:
                     await asyncio.sleep(0)
                 if uid not in self.roundtrip_volumes:
                     continue
@@ -1092,7 +1092,7 @@ if __name__ != "__mp_main__":
             uid_count = 0
             for uid in range(self.subnet_info.max_uids):
                 uid_count += 1
-                if not sync and uid_count % 64 == 0:  # Only yield if NOT sync
+                if not sync and uid_count % 64 == 0:
                     await asyncio.sleep(0)
                 if uid not in self.open_positions:
                     continue
@@ -1277,7 +1277,7 @@ if __name__ != "__mp_main__":
                 )
                 
                 if result['success']:
-                    bt.logging.success(f"State saved directly: ...")
+                    bt.logging.success(f"State saved directly!")
                 else:
                     self.pagerduty_alert(f"Direct save failed: {result['error']}")
                     
@@ -2055,153 +2055,145 @@ if __name__ != "__mp_main__":
 
         async def _compute_compact_volumes(self) -> Dict:
             """
-            Compute compact volume metrics used for activity-weighted scoring.
-            Returns:
-                Dict[int, Dict[int, Dict[str, float]]]:
-                    {
-                        uid: {
-                            book_id: {
-                                "lookback_volume": float,
-                                "latest_volume": float,
-                                "latest_timestamp": int
-                            }
-                        }
-                    }
+            Compute compact volume metrics with pre-computed thresholds.
             """
             compact_start = time.time()
+            
+            # Pre-compute thresholds ONCE
             lookback_threshold = self.simulation_timestamp - (
                 self.config.scoring.sharpe.lookback *
                 self.simulation.publish_interval
             )
-            
             sampling_interval = self.config.scoring.activity.trade_volume_sampling_interval
             sampled_timestamp = math.ceil(
                 self.simulation_timestamp / sampling_interval
             ) * sampling_interval
-
+            book_count = self.simulation.book_count
+            
+            # Cache UIDs list
+            uids_list = [uid.item() for uid in self.metagraph.uids]
+            
             compact_volumes = {}
-            for uid in self.metagraph.uids:
-                uid_item = uid.item()
+            uid_count = 0
+            
+            for uid_item in uids_list:
+                uid_count += 1
+                if uid_count % 64 == 0:
+                    await asyncio.sleep(0)
+                
                 compact_volumes[uid_item] = {}
 
-                if uid_item in self.trade_volumes:
-                    for book_id, book_volume in self.trade_volumes[uid_item].items():
-                        total_trades = book_volume['total']
-                        if not total_trades:
-                            compact_volumes[uid_item][book_id] = {
-                                'lookback_volume': 0.0,
-                                'latest_volume': 0.0,
-                                'latest_timestamp': 0
-                            }
-                            continue
-
-                        timestamps_with_volume = [
-                            ts for ts, vol in total_trades.items() if vol > 0 and ts <= sampled_timestamp
-                        ]
-                        
-                        if timestamps_with_volume:
-                            latest_time = max(timestamps_with_volume)
-                        else:
-                            latest_time = 0
-
-                        if latest_time > 0 and latest_time >= sampled_timestamp - sampling_interval:
-                            latest_volume = total_trades.get(latest_time, 0.0)
-                        else:
-                            latest_volume = 0.0
-                        
-                        lookback_volume = sum(
-                            vol for t, vol in total_trades.items()
-                            if t >= lookback_threshold
-                        )
-                        
-                        compact_volumes[uid_item][book_id] = {
-                            'lookback_volume': lookback_volume,
-                            'latest_volume': latest_volume,
-                            'latest_timestamp': latest_time
-                        }
-                else:
-                    for book_id in range(self.simulation.book_count):
+                if uid_item not in self.trade_volumes:
+                    for book_id in range(book_count):
                         compact_volumes[uid_item][book_id] = {
                             'lookback_volume': 0.0,
                             'latest_volume': 0.0,
                             'latest_timestamp': 0
                         }
+                    continue
+                
+                for book_id, book_volume in self.trade_volumes[uid_item].items():
+                    total_trades = book_volume['total']
+                    if not total_trades:
+                        compact_volumes[uid_item][book_id] = {
+                            'lookback_volume': 0.0,
+                            'latest_volume': 0.0,
+                            'latest_timestamp': 0
+                        }
+                        continue
+
+                    # Single-pass filtering with pre-computed thresholds
+                    lookback_volume = 0.0
+                    latest_time = 0
+                    latest_volume = 0.0
+                    
+                    for ts, vol in total_trades.items():
+                        if ts >= lookback_threshold:
+                            lookback_volume += vol
+                        if vol > 0 and ts <= sampled_timestamp and ts > latest_time:
+                            latest_time = ts
+                    
+                    if latest_time > 0 and latest_time >= sampled_timestamp - sampling_interval:
+                        latest_volume = total_trades[latest_time]
+                    
+                    compact_volumes[uid_item][book_id] = {
+                        'lookback_volume': lookback_volume,
+                        'latest_volume': latest_volume,
+                        'latest_timestamp': latest_time
+                    }
+            
             bt.logging.debug(f"[REWARD] Compacted volumes in {time.time()-compact_start:.4f}s")
             return compact_volumes
 
+
         async def _compute_compact_roundtrip_volumes(self) -> Dict:
             """
-            Compute compact round-trip volume metrics including latest round-trip timestamp.
-            
-            Returns:
-                Dict[int, Dict[int, Dict[str, float]]]:
-                    {
-                        uid: {
-                            book_id: {
-                                "lookback_roundtrip_volume": float,
-                                "latest_roundtrip_volume": float,
-                                "latest_roundtrip_timestamp": int
-                            }
-                        }
-                    }
+            Compute compact round-trip volume metrics with pre-computed thresholds.
             """
             compact_start = time.time()
+            
+            # Pre-compute thresholds ONCE
             lookback_threshold = self.simulation_timestamp - (
                 self.config.scoring.sharpe.lookback *
                 self.simulation.publish_interval
             )
-            
             sampling_interval = self.config.scoring.activity.trade_volume_sampling_interval
             sampled_timestamp = math.ceil(
                 self.simulation_timestamp / sampling_interval
             ) * sampling_interval
-
+            book_count = self.simulation.book_count
+            
+            # Cache UIDs list
+            uids_list = [uid.item() for uid in self.metagraph.uids]
+            
             compact_roundtrip = {}
-            for uid in self.metagraph.uids:
-                uid_item = uid.item()
+            uid_count = 0
+
+            for uid_item in uids_list:
+                uid_count += 1
+                if uid_count % 64 == 0:
+                    await asyncio.sleep(0)
+                
                 compact_roundtrip[uid_item] = {}
 
-                if uid_item in self.roundtrip_volumes:
-                    for book_id, rt_volumes in self.roundtrip_volumes[uid_item].items():
-                        if not rt_volumes:
-                            compact_roundtrip[uid_item][book_id] = {
-                                'lookback_roundtrip_volume': 0.0,
-                                'latest_roundtrip_volume': 0.0,
-                                'latest_roundtrip_timestamp': 0
-                            }
-                            continue
-
-                        timestamps_with_volume = [
-                            ts for ts, vol in rt_volumes.items() if vol > 0 and ts <= sampled_timestamp
-                        ]
-                        
-                        if timestamps_with_volume:
-                            latest_time = max(timestamps_with_volume)
-                        else:
-                            latest_time = 0
-
-                        if latest_time > 0 and latest_time >= sampled_timestamp - sampling_interval:
-                            latest_volume = rt_volumes.get(latest_time, 0.0)
-                        else:
-                            latest_volume = 0.0
-                        
-                        lookback_volume = sum(
-                            vol for t, vol in rt_volumes.items()
-                            if t >= lookback_threshold
-                        )
-
-                        compact_roundtrip[uid_item][book_id] = {
-                            'lookback_roundtrip_volume': lookback_volume,
-                            'latest_roundtrip_volume': latest_volume,
-                            'latest_roundtrip_timestamp': latest_time
-                        }
-                else:
-                    for book_id in range(self.simulation.book_count):
+                if uid_item not in self.roundtrip_volumes:
+                    for book_id in range(book_count):
                         compact_roundtrip[uid_item][book_id] = {
                             'lookback_roundtrip_volume': 0.0,
                             'latest_roundtrip_volume': 0.0,
                             'latest_roundtrip_timestamp': 0
                         }
+                    continue
+                
+                for book_id, rt_volumes in self.roundtrip_volumes[uid_item].items():
+                    if not rt_volumes:
+                        compact_roundtrip[uid_item][book_id] = {
+                            'lookback_roundtrip_volume': 0.0,
+                            'latest_roundtrip_volume': 0.0,
+                            'latest_roundtrip_timestamp': 0
+                        }
+                        continue
+
+                    # Single-pass filtering with pre-computed thresholds
+                    lookback_volume = 0.0
+                    latest_time = 0
+                    latest_volume = 0.0
+                    
+                    for ts, vol in rt_volumes.items():
+                        if ts >= lookback_threshold:
+                            lookback_volume += vol
+                        if vol > 0 and ts <= sampled_timestamp and ts > latest_time:
+                            latest_time = ts
+                    
+                    if latest_time > 0 and latest_time >= sampled_timestamp - sampling_interval:
+                        latest_volume = rt_volumes[latest_time]
+
+                    compact_roundtrip[uid_item][book_id] = {
+                        'lookback_roundtrip_volume': lookback_volume,
+                        'latest_roundtrip_volume': latest_volume,
+                        'latest_roundtrip_timestamp': latest_time
+                    }
+            
             bt.logging.debug(f"[REWARD] Compacted roundtrip volumes in {time.time()-compact_start:.4f}s")
             return compact_roundtrip
 
@@ -2377,9 +2369,9 @@ if __name__ != "__mp_main__":
                     recent_trades_book.extend([TradeInfo.model_construct(**t) for t in trades])
                     del recent_trades_book[:-25]
 
-            volume_deltas = defaultdict(lambda: defaultdict(lambda: {'total': 0.0, 'maker': 0.0, 'taker': 0.0, 'self': 0.0}))
-            realized_pnl_updates = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-            roundtrip_volume_updates = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+            volume_deltas = {}
+            realized_pnl_updates = {}
+            roundtrip_volume_updates = {}
             uids_to_round = set()
 
             uid_count = 0
@@ -2445,6 +2437,9 @@ if __name__ != "__mp_main__":
                         trades = [notice for notice in notices[uid_item] if notice['y'] in ['EVENT_TRADE', "ET"]]
                         if trades:
                             recent_miner_trades_uid = self.recent_miner_trades[uid_item]
+                            
+                            if uid_item not in volume_deltas:
+                                volume_deltas[uid_item] = {}
 
                             for trade in trades:
                                 is_maker = trade['Ma'] == uid_item
@@ -2461,6 +2456,9 @@ if __name__ != "__mp_main__":
 
                                 book_volumes = trade_volumes_uid[book_id]
                                 trade_value = trade['q'] * trade['p']
+                                
+                                if book_id not in volume_deltas[uid_item]:
+                                    volume_deltas[uid_item][book_id] = {'total': 0.0, 'maker': 0.0, 'taker': 0.0, 'self': 0.0}
 
                                 book_volumes['total'][sampled_timestamp] += trade_value
                                 volume_deltas[uid_item][book_id]['total'] += trade_value
@@ -2490,10 +2488,22 @@ if __name__ != "__mp_main__":
                                 )
 
                                 if realized_pnl != 0.0:
+                                    if uid_item not in realized_pnl_updates:
+                                        realized_pnl_updates[uid_item] = {}
+                                    if timestamp not in realized_pnl_updates[uid_item]:
+                                        realized_pnl_updates[uid_item][timestamp] = {}
+                                    if book_id not in realized_pnl_updates[uid_item][timestamp]:
+                                        realized_pnl_updates[uid_item][timestamp][book_id] = 0.0
                                     realized_pnl_updates[uid_item][timestamp][book_id] += realized_pnl
 
                                 if roundtrip_volume > 0:
                                     roundtrip_value = roundtrip_volume * price
+                                    if uid_item not in roundtrip_volume_updates:
+                                        roundtrip_volume_updates[uid_item] = {}
+                                    if sampled_timestamp not in roundtrip_volume_updates[uid_item]:
+                                        roundtrip_volume_updates[uid_item][sampled_timestamp] = {}
+                                    if book_id not in roundtrip_volume_updates[uid_item][sampled_timestamp]:
+                                        roundtrip_volume_updates[uid_item][sampled_timestamp][book_id] = 0.0
                                     roundtrip_volume_updates[uid_item][sampled_timestamp][book_id] += roundtrip_value
                                     if timestamp not in self.realized_pnl_history[uid_item]:
                                         self.realized_pnl_history[uid_item][timestamp] = {
@@ -2643,97 +2653,87 @@ if __name__ != "__mp_main__":
             else:
                 bt.logging.debug(f"[UPDATE_VOLUMES] Total: {total_time:.4f}s ({uid_count} UIDs)")
 
-        async def _prepare_inventory_compact(self):
+        async def _prepare_compact_histories(self):
             """
-            Convert inventory history to compact format with async yielding.
+            Prepare both inventory and realized P&L history in one pass.
             
             Returns:
-                Dict: Compact inventory history with lookback applied
-                    Format: {uid: {timestamp: {book_id: value}}}
+                tuple: (inventory_compact, realized_pnl_compact)
             """
-            bt.logging.debug("[REWARD] Converting inventory history...")
             convert_start = time.time()
+            lookback = self.config.scoring.sharpe.lookback
+            
+            # Cache UIDs list
+            uids_list = [uid.item() for uid in self.metagraph.uids]
+            
             inventory_compact = {}
+            realized_pnl_compact = {}
             
             uid_count = 0
-            for uid in self.metagraph.uids:
-                uid_item = uid.item()
+            for uid_item in uids_list:
                 uid_count += 1
                 if uid_count % 64 == 0:
                     await asyncio.sleep(0)
                 
-                if uid_item in self.inventory_history and len(self.inventory_history[uid_item]) > 0:
+                # Process inventory history
+                if uid_item in self.inventory_history and self.inventory_history[uid_item]:
                     hist = self.inventory_history[uid_item]
-                    lookback = min(self.config.scoring.sharpe.lookback, len(hist))
-                    sorted_timestamps = sorted(hist.keys())[-lookback:]
-                    inventory_compact[uid_item] = {ts: hist[ts] for ts in sorted_timestamps}
+                    if len(hist) > lookback:
+                        sorted_timestamps = sorted(hist.keys())[-lookback:]
+                        inventory_compact[uid_item] = {ts: hist[ts] for ts in sorted_timestamps}
+                    else:
+                        inventory_compact[uid_item] = dict(hist)
                 else:
                     inventory_compact[uid_item] = {}
-            
-            bt.logging.debug(f"[REWARD] Converted inventory history in {time.time()-convert_start:.4f}s ({uid_count} UIDs)")
-            return inventory_compact
-
-        async def _prepare_realized_pnl_compact(self):
-            """
-            Convert realized P&L history to compact format with async yielding.
-            
-            Returns:
-                Dict: Compact realized P&L history with lookback applied
-                    Format: {uid: {timestamp: {book_id: pnl}}}
-            """
-            bt.logging.debug("[REWARD] Converting realized P&L history...")
-            convert_start = time.time()
-            realized_pnl_compact = {}
-            
-            uid_count = 0
-            for uid in self.metagraph.uids:
-                uid_item = uid.item()
-                uid_count += 1
-                if uid_count % 64 == 0:
-                    await asyncio.sleep(0)                
-                if uid_item in self.realized_pnl_history and len(self.realized_pnl_history[uid_item]) > 0:
+                
+                # Process realized P&L history
+                if uid_item in self.realized_pnl_history and self.realized_pnl_history[uid_item]:
                     hist = self.realized_pnl_history[uid_item]
-                    lookback = min(self.config.scoring.sharpe.lookback, len(hist))
-                    sorted_timestamps = sorted(hist.keys())[-lookback:]
-                    realized_pnl_compact[uid_item] = {ts: hist[ts] for ts in sorted_timestamps}
+                    if len(hist) > lookback:
+                        sorted_timestamps = sorted(hist.keys())[-lookback:]
+                        realized_pnl_compact[uid_item] = {ts: hist[ts] for ts in sorted_timestamps}
+                    else:
+                        realized_pnl_compact[uid_item] = dict(hist)
                 else:
                     realized_pnl_compact[uid_item] = {}
             
-            bt.logging.debug(f"[REWARD] Converted realized P&L history in {time.time()-convert_start:.4f}s ({uid_count} UIDs)")
-            return realized_pnl_compact
+            bt.logging.debug(f"[REWARD] Converted histories in {time.time()-convert_start:.4f}s ({uid_count} UIDs)")
+            return inventory_compact, realized_pnl_compact
 
         async def _extract_miner_positions(self, state: MarketSimulationStateUpdate):
             """
-            Extract current miner positions from simulation state with async yielding.
-            
-            Args:
-                state (MarketSimulationStateUpdate): Current simulation state
-            
-            Returns:
-                Dict: Miner positions for all UIDs
-                    Format: {uid: {book_id: {'base': float, 'quote': float, 'midquote': float}}}
+            Extract current miner positions from simulation state with pre-computed book IDs.
             """
-            bt.logging.debug("[REWARD] Extracting miner positions...")
             positions_start = time.time()
-            miner_positions = {}
             
+            # Cache UIDs list and pre-compute book info
+            uids_list = [uid.item() for uid in self.metagraph.uids]
+            price_decimals = self.simulation.priceDecimals
+            books = state.books
+            
+            miner_positions = {}
             uid_count = 0
-            for uid in self.metagraph.uids:
-                uid_item = uid.item()
+            
+            for uid_item in uids_list:
                 uid_count += 1
                 if uid_count % 64 == 0:
                     await asyncio.sleep(0)
-                if uid_item in state.accounts:
-                    miner_positions[uid_item] = {}
-                    for book_id, account in state.accounts[uid_item].items():
-                        miner_positions[uid_item][book_id] = {
-                            'base': account['bb']['t'] - account['bl'] + account['bc'],
-                            'quote': account['qb']['t'] - account['ql'] + account['qc'],
-                            'midquote': round(
-                                (state.books[book_id]['b'][0]['p'] + state.books[book_id]['a'][0]['p']) / 2,
-                                self.simulation.priceDecimals
-                            )
-                        }
+                
+                if uid_item not in state.accounts:
+                    continue
+                
+                miner_positions[uid_item] = {}
+                for book_id, account in state.accounts[uid_item].items():
+                    book = books[book_id]
+                    miner_positions[uid_item][book_id] = {
+                        'base': account['bb']['t'] - account['bl'] + account['bc'],
+                        'quote': account['qb']['t'] - account['ql'] + account['qc'],
+                        'midquote': round(
+                            (book['b'][0]['p'] + book['a'][0]['p']) / 2,
+                            price_decimals
+                        )
+                    }
+            
             bt.logging.debug(f"[REWARD] Extracted positions for {len(miner_positions)} miners in {time.time()-positions_start:.4f}s")
             return miner_positions
 
@@ -2745,32 +2745,7 @@ if __name__ != "__mp_main__":
 
         async def _reward(self, state: MarketSimulationStateUpdate):
             """
-            Asynchronously perform the full reward computation pipeline.
-
-            This function is executed within an async lock to ensure that reward
-            calculation never overlaps across threads or scheduler ticks.
-
-            Steps Performed:
-                1. Acquire async lock to prevent concurrent reward computation.
-                2. Update trade volumes via `_update_trade_volumes()`.
-                3. If the timestamp does not align with the scoring interval, exit early.
-                4. Convert inventory history into compact, lookback-bounded form (async).
-                5. Compute compact volume metrics (async).
-                6. Compute compact round-trip volume metrics (async).
-                7. Convert realized P&L history to compact form (async).
-                8. Extract current miner balances from simulation state (async).
-                9. Construct the complete `validator_data` payload for the scoring engine.
-                10. Run get_rewards() in a thread pool to prevent blocking.
-                11. Apply computed rewards and update internal score tables.
-
-            Args:
-                state (MarketSimulationStateUpdate):
-                    Full simulation tick state used as the basis for scoring.
-
-            Logs:
-                • Execution times for major phases
-                • Reward calculation progress
-                • Detailed traceback in case of failure
+            Asynchronously perform the full reward computation pipeline with parallel task execution.
             """
             if not hasattr(self, "_reward_lock"):
                 self._reward_lock = asyncio.Lock()
@@ -2798,11 +2773,28 @@ if __name__ != "__mp_main__":
                         if timestamp % self.config.scoring.interval != 0:
                             bt.logging.info(f"Agent Scores Data Updated for {duration} ({time.time()-start:.4f}s)")
                             return
-                        inventory_compact = await self._prepare_inventory_compact()
-                        compact_volumes = await self._compute_compact_volumes()
-                        compact_roundtrip_volumes = await self._compute_compact_roundtrip_volumes()
-                        realized_pnl_compact = await self._prepare_realized_pnl_compact()
-                        miner_positions = await self._extract_miner_positions(state)
+                        
+                        # Execute all data preparation tasks in parallel
+                        bt.logging.debug("[REWARD] Starting parallel data preparation...")
+                        prep_parallel_start = time.time()
+                        
+                        volume_task = asyncio.create_task(self._compute_compact_volumes())
+                        roundtrip_task = asyncio.create_task(self._compute_compact_roundtrip_volumes())
+                        history_task = asyncio.create_task(self._prepare_compact_histories())
+                        position_task = asyncio.create_task(self._extract_miner_positions(state))
+                        
+                        # Wait for all tasks to complete
+                        (compact_volumes, 
+                        compact_roundtrip_volumes, 
+                        (inventory_compact, realized_pnl_compact), 
+                        miner_positions) = await asyncio.gather(
+                            volume_task,
+                            roundtrip_task,
+                            history_task,
+                            position_task
+                        )
+                        
+                        bt.logging.debug(f"[REWARD] Parallel preparation completed in {time.time()-prep_parallel_start:.4f}s")
 
                         prep_start = time.time()
                         validator_data = {

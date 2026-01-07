@@ -46,7 +46,7 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
         num_books = len(book_ids)
         
         # ===== UNREALIZED SHARPE =====
-        np_inventory_values = np.empty((num_books, num_values), dtype=np.float64)
+        np_inventory_values = np.zeros((num_books, num_values), dtype=np.float64)
         for i, ts in enumerate(timestamps):
             ts_values = inventory_values[ts]
             for j, book_id in enumerate(book_ids):
@@ -112,10 +112,10 @@ def sharpe(uid, inventory_values, realized_pnl_values, lookback, norm_min, norm_
                 )
         
         sharpe_values = {
-            'books': {book_id: float(sharpe_ratios[i]) for i, book_id in enumerate(book_ids)},
+            'books': {book_ids[i]: float(sharpe_ratios[i]) for i in range(num_books)},
             'books_realized': {
-                book_id: (float(sharpe_ratios_realized[i]) if not np.isnan(sharpe_ratios_realized[i]) else None)
-                for i, book_id in enumerate(book_ids)
+                book_ids[i]: (float(sharpe_ratios_realized[i]) if not np.isnan(sharpe_ratios_realized[i]) else None)
+                for i in range(num_books)
             }
         }
         

@@ -36,7 +36,6 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     Args:
         validator_data (Dict): Dictionary containing validator state
         uid (int): UID of miner being scored
-        inventory_values (Dict[int, Dict[int, float]]): Inventory values for the miner
 
     Returns:
         float: The new score value for the given UID.
@@ -49,9 +48,7 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     config = validator_data['config']['scoring']
     simulation_config = validator_data['simulation_config']
     reward_weights = validator_data['reward_weights']
-
     simulation_timestamp = validator_data['simulation_timestamp']
-    publish_interval = simulation_config['publish_interval']
 
     if not sharpe_values[uid]:
         return 0.0
@@ -65,13 +62,24 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     norm_range = norm_max - norm_min
     norm_range_inv = 1.0 / norm_range if norm_range != 0 else 0.0
     
+    book_ids = list(sharpes_unrealized.keys())
+    sharpes_unrealized_array = np.array([sharpes_unrealized[bid] for bid in book_ids])
+    sharpes_realized_array = np.array([
+        sharpes_realized[bid] if sharpes_realized[bid] is not None else norm_min  # ← Use norm_min instead of 0.0
+        for bid in book_ids
+    ])
+    sharpes_unrealized_clamped = np.clip(sharpes_unrealized_array, norm_min, norm_max)
+    sharpes_realized_clamped = np.clip(sharpes_realized_array, norm_min, norm_max)
+    normalized_sharpes_unrealized_array = (sharpes_unrealized_clamped - norm_min) * norm_range_inv
+    normalized_sharpes_realized_array = (sharpes_realized_clamped - norm_min) * norm_range_inv
+    
     normalized_sharpes_unrealized = {
-        book_id: max(0.0, min(1.0, (sharpe_val - norm_min) * norm_range_inv))
-        for book_id, sharpe_val in sharpes_unrealized.items()
+        book_id: normalized_sharpes_unrealized_array[i]
+        for i, book_id in enumerate(book_ids)
     }
     normalized_sharpes_realized = {
-        book_id: (max(0.0, min(1.0, (sharpe_val - norm_min) * norm_range_inv)) if sharpe_val is not None else 0.0)
-        for book_id, sharpe_val in sharpes_realized.items()
+        book_id: normalized_sharpes_realized_array[i]
+        for i, book_id in enumerate(book_ids)
     }
 
     volume_cap = round(
@@ -96,19 +104,26 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     decay_window_ns_inv = 1.0 / decay_window_ns if decay_window_ns > 0 else 0.0
 
     compact_volumes_uid = compact_volumes[uid]
-    miner_volumes = {book_id: data['lookback_volume'] for book_id, data in compact_volumes_uid.items()}
-    latest_volumes = {book_id: data['latest_volume'] for book_id, data in compact_volumes_uid.items()}
-    latest_timestamps = {book_id: data['latest_timestamp'] for book_id, data in compact_volumes_uid.items()}
+    compact_roundtrip_volumes_uid = compact_roundtrip_volumes[uid]
+    activity_factors_uid = activity_factors[uid]
+    activity_factors_realized_uid = activity_factors_realized[uid]
     
     # Calculate the activity factors to be multiplied onto the unrealized Sharpes to obtain the final values for assessment
     # If the miner has traded in the previous Sharpe assessment window, the factor is equal to the ratio of the miner trading volume to the cap multipled by the impact factor
     # If the miner has not traded, their existing activity factor is decayed by the factor defined above, with accelerating decay after the grace period
-    activity_factors_uid = activity_factors[uid]
-    for book_id, miner_volume in miner_volumes.items():
-        if latest_volumes[book_id] > 0:
-            activity_factors_uid[book_id] = min(1 + ((miner_volume * volume_cap_inv) * activity_impact), 2.0)
+    for book_id in book_ids:
+        volume_data = compact_volumes_uid.get(book_id, {
+            'lookback_volume': 0.0,
+            'latest_volume': 0.0,
+            'latest_timestamp': 0
+        })
+        latest_volume = volume_data['latest_volume']
+        
+        if latest_volume > 0:
+            lookback_volume = volume_data['lookback_volume']
+            activity_factors_uid[book_id] = min(1 + ((lookback_volume * volume_cap_inv) * activity_impact), 2.0)
         else:
-            latest_time = latest_timestamps[book_id]
+            latest_time = volume_data['latest_timestamp']
             
             if latest_time > 0:
                 inactive_time = max(0, simulation_timestamp - latest_time)
@@ -130,29 +145,22 @@ def score_uid(validator_data: Dict, uid: int) -> float:
             decay_factor = base_decay_factor ** total_acceleration
             activity_factors_uid[book_id] *= decay_factor
     
-    compact_roundtrip_volumes_uid = compact_roundtrip_volumes[uid]
-    miner_roundtrip_volumes = {
-        book_id: data['lookback_roundtrip_volume'] 
-        for book_id, data in compact_roundtrip_volumes_uid.items()
-    }
-    latest_roundtrip_volumes = {
-        book_id: data['latest_roundtrip_volume'] 
-        for book_id, data in compact_roundtrip_volumes_uid.items()
-    }
-    latest_roundtrip_timestamps = {
-        book_id: data['latest_roundtrip_timestamp']
-        for book_id, data in compact_roundtrip_volumes_uid.items()
-    }
-    
     # Calculate the activity factors to be multiplied onto the realized Sharpes to obtain the final values for assessment
     # If the miner has traded in the previous Sharpe assessment window, the factor is equal to the ratio of the miner trading volume to the cap multipled by the impact factor
     # If the miner has not traded, their existing activity factor is decayed by the factor defined above, with accelerating decay after the grace period
-    activity_factors_realized_uid = activity_factors_realized[uid]
-    for book_id, roundtrip_volume in miner_roundtrip_volumes.items():
-        if latest_roundtrip_volumes[book_id] > 0:
-            activity_factors_realized_uid[book_id] = min(1 + ((roundtrip_volume * volume_cap_inv) * activity_impact), 2.0)
+    for book_id in book_ids:
+        rt_volume_data = compact_roundtrip_volumes_uid.get(book_id, {
+            'lookback_roundtrip_volume': 0.0,
+            'latest_roundtrip_volume': 0.0,
+            'latest_roundtrip_timestamp': 0
+        })
+        latest_rt_volume = rt_volume_data['latest_roundtrip_volume']
+        
+        if latest_rt_volume > 0:
+            lookback_rt_volume = rt_volume_data['lookback_roundtrip_volume']
+            activity_factors_realized_uid[book_id] = min(1 + ((lookback_rt_volume * volume_cap_inv) * activity_impact), 2.0)
         else:
-            latest_time = latest_roundtrip_timestamps[book_id]
+            latest_time = rt_volume_data['latest_roundtrip_timestamp']
             
             if latest_time > 0:
                 inactive_time = max(0, simulation_timestamp - latest_time)
@@ -174,69 +182,68 @@ def score_uid(validator_data: Dict, uid: int) -> float:
             activity_factors_realized_uid[book_id] *= decay_factor
     
     # Calculate activity weighted normalized sharpes
-    activity_weighted_normalized_sharpes_unrealized = []
-    for book_id, activity_factor in activity_factors_uid.items():
-        norm_sharpe = normalized_sharpes_unrealized[book_id]
-        if activity_factor < 1 or norm_sharpe > 0.5:
-            weighted = activity_factor * norm_sharpe
-        else:
-            weighted = (2 - activity_factor) * norm_sharpe
-        activity_weighted_normalized_sharpes_unrealized.append(min(weighted, 1))
+    activity_factors_array = np.array([activity_factors_uid[bid] for bid in book_ids])
+    activity_factors_realized_array = np.array([activity_factors_realized_uid[bid] for bid in book_ids])
+    
+    mask_unrealized = (activity_factors_array < 1) & (normalized_sharpes_unrealized_array <= 0.5)
+    activity_weighted_normalized_sharpes_unrealized = np.where(
+        mask_unrealized,
+        (2 - activity_factors_array) * normalized_sharpes_unrealized_array,
+        activity_factors_array * normalized_sharpes_unrealized_array
+    )
+    activity_weighted_normalized_sharpes_unrealized = np.minimum(activity_weighted_normalized_sharpes_unrealized, 1.0)
 
-    activity_weighted_normalized_sharpes_realized = []
-    for book_id, activity_factor_realized in activity_factors_realized_uid.items():
-        norm_sharpe_realized = normalized_sharpes_realized[book_id]
-        if activity_factor_realized < 1 or norm_sharpe_realized > 0.5:
-            weighted_realized = activity_factor_realized * norm_sharpe_realized
-        else:
-            weighted_realized = (2 - activity_factor_realized) * norm_sharpe_realized
-        activity_weighted_normalized_sharpes_realized.append(min(weighted_realized, 1))
+    mask_realized = (activity_factors_realized_array < 1) & (normalized_sharpes_realized_array <= 0.5)
+    activity_weighted_normalized_sharpes_realized = np.where(
+        mask_realized,
+        (2 - activity_factors_realized_array) * normalized_sharpes_realized_array,
+        activity_factors_realized_array * normalized_sharpes_realized_array
+    )
+    activity_weighted_normalized_sharpes_realized = np.minimum(activity_weighted_normalized_sharpes_realized, 1.0)
 
     uid_sharpe['books_weighted'] = {
-        book_id: weighted_sharpe
-        for book_id, weighted_sharpe in enumerate(activity_weighted_normalized_sharpes_unrealized)
+        book_id: float(activity_weighted_normalized_sharpes_unrealized[i])
+        for i, book_id in enumerate(book_ids)
     }
     uid_sharpe['books_weighted_realized'] = {
-        book_id: weighted_sharpe
-        for book_id, weighted_sharpe in enumerate(activity_weighted_normalized_sharpes_realized)
+        book_id: float(activity_weighted_normalized_sharpes_realized[i])
+        for i, book_id in enumerate(book_ids)
     }
     
     # Use the 1.5 rule to detect left-hand outliers in the activity-weighted Sharpes    
-    data_unrealized = np.array(activity_weighted_normalized_sharpes_unrealized)
-    q1_unrealized, q3_unrealized = np.percentile(data_unrealized, [25, 75])
+    q1_unrealized, q3_unrealized = np.percentile(activity_weighted_normalized_sharpes_unrealized, [25, 75])
     iqr_unrealized = q3_unrealized - q1_unrealized
     # Apply minimum IQR and scale penalty to reward consistency
     min_iqr = 0.01
 
     effective_iqr = max(iqr_unrealized, min_iqr)
     lower_threshold_unrealized = q1_unrealized - 1.5 * effective_iqr
-    outliers_unrealized = data_unrealized[data_unrealized < lower_threshold_unrealized]
+    outliers_unrealized = activity_weighted_normalized_sharpes_unrealized[activity_weighted_normalized_sharpes_unrealized < lower_threshold_unrealized]
     
     # Outliers detected here are activity-weighted Sharpes which are significantly lower than those achieved on other books
     # A penalty equal to 67% of the difference between the mean outlier value and the value at the centre of the possible activity weighted Sharpe values is calculated
     # Penalty is scaled by consistency: tight clusters (low IQR) get reduced penalty to reward consistent performance
     if len(outliers_unrealized) > 0 and np.median(outliers_unrealized) < 0.5:
         base_penalty = (0.5 - np.median(outliers_unrealized)) / 1.5
-        consistency_bonus = 1.0 - np.exp(-5 * iqr_unrealized)  # Sigmoid-like scaling
+        consistency_bonus = 1.0 - np.exp(-5 * iqr_unrealized)
         outlier_penalty_unrealized = base_penalty * consistency_bonus
     else:
         outlier_penalty_unrealized = 0
     
     # The median of the activity weighted Sharpes provides the base score for the miner
-    activity_weighted_normalized_median_unrealized = np.median(data_unrealized)
+    activity_weighted_normalized_median_unrealized = np.median(activity_weighted_normalized_sharpes_unrealized)
     # The penalty factor is subtracted from the base score to punish particularly poor performance on any particular book
     sharpe_score_unrealized = max(
         activity_weighted_normalized_median_unrealized - abs(outlier_penalty_unrealized), 
         0.0
     )
 
-    data_realized = np.array(activity_weighted_normalized_sharpes_realized)
-    q1_realized, q3_realized = np.percentile(data_realized, [25, 75])
+    q1_realized, q3_realized = np.percentile(activity_weighted_normalized_sharpes_realized, [25, 75])
     iqr_realized = q3_realized - q1_realized
     # Apply minimum IQR and scale penalty to reward consistency
     effective_iqr_realized = max(iqr_realized, min_iqr)
     lower_threshold_realized = q1_realized - 1.5 * effective_iqr_realized
-    outliers_realized = data_realized[data_realized < lower_threshold_realized]
+    outliers_realized = activity_weighted_normalized_sharpes_realized[activity_weighted_normalized_sharpes_realized < lower_threshold_realized]
     # Outliers detected here are activity-weighted Sharpes which are significantly lower than those achieved on other books
     # A penalty equal to 67% of the difference between the mean outlier value and the value at the centre of the possible activity weighted Sharpe values is calculated
     # Penalty is scaled by consistency: tight clusters (low IQR) get reduced penalty to reward consistent performance
@@ -248,16 +255,16 @@ def score_uid(validator_data: Dict, uid: int) -> float:
         outlier_penalty_realized = 0
     
     # The median of the activity weighted Sharpes provides the base score for the miner
-    activity_weighted_normalized_median_realized = np.median(data_realized)
+    activity_weighted_normalized_median_realized = np.median(activity_weighted_normalized_sharpes_realized)
     # The penalty factor is subtracted from the base score to punish particularly poor performance on any particular book
     sharpe_score_realized = max(
         activity_weighted_normalized_median_realized - abs(outlier_penalty_realized), 
         0.0
     )
 
-    uid_sharpe['activity_weighted_normalized_median'] = activity_weighted_normalized_median_unrealized
+    uid_sharpe['activity_weighted_normalized_median'] = float(activity_weighted_normalized_median_unrealized)
     uid_sharpe['penalty'] = abs(outlier_penalty_unrealized)
-    uid_sharpe['activity_weighted_normalized_median_realized'] = activity_weighted_normalized_median_realized
+    uid_sharpe['activity_weighted_normalized_median_realized'] = float(activity_weighted_normalized_median_realized)
     uid_sharpe['penalty_realized'] = abs(outlier_penalty_realized)
     uid_sharpe['score_realized'] = sharpe_score_realized
 

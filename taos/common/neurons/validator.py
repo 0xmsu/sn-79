@@ -174,8 +174,9 @@ class BaseValidatorNeuron(BaseNeuron):
         """
         Sets the validator weights to the metagraph hotkeys based on the scores it has received from the miners. 
         The weights determine the trust and incentive level the validator assigns to miner nodes on the network.
+        
+        If burn_uid and burn_ratio are configured, automatically allocates a percentage of emissions to the burn address.
         """
-        # return
         # Check if self.scores contains any NaN values and log a warning if it does.
         if torch.isnan(self.scores).any():
             bt.logging.warning(
@@ -189,6 +190,33 @@ class BaseValidatorNeuron(BaseNeuron):
         if min(self.scores) < 0:
             weight_scores = self.scores - min(self.scores)
         raw_weights = torch.nn.functional.normalize(weight_scores, p=1, dim=0)
+
+        # Apply burn mechanism if configured
+        burn_uid = getattr(self.config.neuron, 'burn_uid', None)
+        burn_ratio = getattr(self.config.neuron, 'burn_ratio', 0.0)
+        
+        if burn_uid is not None and burn_ratio > 0:
+            # Validate burn_ratio is between 0 and 1
+            burn_ratio = max(0.0, min(1.0, burn_ratio))
+            
+            # Validate burn_uid exists in metagraph
+            if burn_uid >= len(raw_weights):
+                bt.logging.warning(
+                    f"Burn UID {burn_uid} is out of range (metagraph size: {len(raw_weights)}). Skipping burn allocation."
+                )
+            else:
+                bt.logging.info(f"Applying {burn_ratio*100:.2f}% emission burn to UID {burn_uid}")
+                
+                # Scale down all existing weights by (1 - burn_ratio)
+                raw_weights = raw_weights * (1.0 - burn_ratio)
+                
+                # Allocate burn_ratio to the burn_uid
+                raw_weights[burn_uid] = burn_ratio
+                
+                # Renormalize to ensure sum is 1.0
+                raw_weights = torch.nn.functional.normalize(raw_weights, p=1, dim=0)
+                
+                bt.logging.debug(f"Post-burn weight for UID {burn_uid}: {raw_weights[burn_uid]:.6f}")
 
         bt.logging.debug(f"raw_weights={raw_weights}")
         bt.logging.debug(f"raw_weight_uids={self.metagraph.uids}")

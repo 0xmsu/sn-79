@@ -219,6 +219,20 @@ def add_validator_args(cls, parser):
         default=False,
     )
 
+    parser.add_argument(
+        "--neuron.burn_uid",
+        type=int,
+        help="Uid to assign weights to in order to burn emissions.",
+        default=0,
+    )
+
+    parser.add_argument(
+        "--neuron.burn_ratio",
+        type=float,
+        help="Ratio of miner emissions to burn.",
+        default=0.79,
+    )
+
 
 def config(cls):
     """

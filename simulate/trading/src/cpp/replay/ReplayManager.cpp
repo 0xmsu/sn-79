@@ -2,9 +2,10 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/replay/ReplayManager.hpp"
+#include <taosim/replay/ReplayManager.hpp>
 
-#include "taosim/replay/helpers.hpp"
+#include <taosim/filesystem/utils.hpp>
+#include <taosim/replay/helpers.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -31,10 +32,12 @@ void ReplayManager::populateInitialBalancesPaths()
 {
     static const std::regex pat{R"(^Replay-Balances-(\d+)-(\d+)\.json$)"};
 
-    std::vector<fs::path> res = helpers::collectMatchingPaths(pat, m_desc.dir);
-    ranges::sort(
-        res,
-        [&](auto&& lhs, auto&& rhs) {
+    auto paths = filesystem::collectMatchingPaths(
+        m_desc.dir,
+        [&](const fs::path& p) {
+            return fs::is_regular_file(p) && std::regex_match(p.filename().string(), pat);
+        })
+        | ranges::actions::sort([&](auto&& lhs, auto&& rhs) {
             const auto lhsStr = lhs.filename().string();
             std::smatch matchLhs;
             std::regex_search(lhsStr, matchLhs, pat);
@@ -45,13 +48,14 @@ void ReplayManager::populateInitialBalancesPaths()
         });
 
     m_bookCountTotal = [&] {
-        const auto lastFilenameStr = res.back().filename().string();
+        const auto lastFilenameStr = paths.back().filename().string();
         if (std::smatch match; std::regex_match(lastFilenameStr, match, pat)) {
             return std::stoul(match[2]) + 1;
         }
         throw helpers::ReplayError{};
     }();
-    m_initialBalancesPaths = std::move(res);
+
+    m_initialBalancesPaths = std::move(paths);
 }
 
 //-------------------------------------------------------------------------
@@ -77,7 +81,11 @@ void ReplayManager::populateRuntimePathGroups()
     };
 
     auto getMatchingPathsSorted = [&](const std::regex& pat) {
-        const auto paths = helpers::collectMatchingPaths(pat, m_desc.dir);
+        const auto paths = filesystem::collectMatchingPaths(
+            m_desc.dir,
+            [&](const fs::path& p) {
+                return fs::is_regular_file(p) && std::regex_match(p.filename().string(), pat);
+            });
         std::vector<std::vector<fs::path>> res(m_bookCountTotal);
         for (auto&& path : paths) {
             const auto bookIdCanon = parseBookId(path, pat);

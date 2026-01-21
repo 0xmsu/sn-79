@@ -7,8 +7,8 @@ add_library(taosim::net ALIAS net)
 target_include_directories(net
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${src_dir}/serialization"
-        "${src_dir}/util"
+        "${SRC_DIR}/serialization"
+        "${SRC_DIR}/util"
 )
 
 target_link_libraries(net

@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/accounting/Balances.hpp"
+#include <taosim/accounting/Balances.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -66,7 +66,6 @@ void Balances::releaseReservation(OrderID id, BookId bookId)
 ReservationAmounts Balances::freeReservation(OrderID id, decimal_t price, decimal_t bestBid, decimal_t bestAsk,
     OrderDirection direction, BookId bookId, std::optional<decimal_t> amount)
 {
-    
     if (getLeverage(id, direction) == 0_dec) {
         if (direction == OrderDirection::BUY) {
             const auto freed = ReservationAmounts{.quote = quote.freeReservation(id, bookId, amount)};
@@ -126,11 +125,9 @@ ReservationAmounts Balances::makeReservation(OrderID id, decimal_t price, decima
 
     if (leverage == 0_dec) {
         if (direction == OrderDirection::BUY) {
-            const ReservationAmounts reserved{.quote = quote.makeReservation(id, amount, bookId)};
-            return reserved;
+            return {.quote = quote.makeReservation(id, amount, bookId)};
         } else {
-            const ReservationAmounts reserved{.base = base.makeReservation(id, amount, bookId)};
-            return reserved;
+            return {.base = base.makeReservation(id, amount, bookId)};
         }
     }
 
@@ -299,44 +296,6 @@ void Balances::jsonSerialize(rapidjson::Document& json, const std::string& key) 
         json.AddMember("baseCollateral", rapidjson::Value{taosim::util::decimal2double(m_baseCollateral)}, allocator);
         base.jsonSerialize(json, "base");
         quote.jsonSerialize(json, "quote");
-        json::serializeHelper(
-            json,
-            "Loans",
-            [this](rapidjson::Document& json) {
-                json.SetArray();
-                auto& allocator = json.GetAllocator();
-                for (const auto& [id, loan] : m_loans) {
-                    rapidjson::Document loanJson{rapidjson::kObjectType, &allocator};
-                    loanJson.AddMember("id", rapidjson::Value{id}, allocator);
-                    loanJson.AddMember("amount", rapidjson::Value{taosim::util::decimal2double(loan.amount())}, allocator);
-                    loanJson.AddMember("currency", rapidjson::Value{
-                        std::to_underlying(loan.direction() == OrderDirection::BUY ? Currency::QUOTE : Currency::BASE)
-                    }, allocator);
-                    loanJson.AddMember("baseCollateral", rapidjson::Value{taosim::util::decimal2double(loan.collateral().base())}, allocator);
-                    loanJson.AddMember("quoteCollateral", rapidjson::Value{taosim::util::decimal2double(loan.collateral().quote())}, allocator);
-                }
-            }
-        );
-    };
-    json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void Balances::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("baseDecimals", rapidjson::Value{m_baseDecimals}, allocator);
-        json.AddMember("quoteDecimals", rapidjson::Value{m_quoteDecimals}, allocator);
-        json.AddMember("quoteLoan", rapidjson::Value{taosim::util::decimal2double(m_quoteLoan)}, allocator);
-        json.AddMember("baseLoan", rapidjson::Value{taosim::util::decimal2double(m_baseLoan)}, allocator);
-        json.AddMember("quoteCollateral", rapidjson::Value{taosim::util::decimal2double(m_quoteCollateral)}, allocator);
-        json.AddMember("baseCollateral", rapidjson::Value{taosim::util::decimal2double(m_baseCollateral)}, allocator);
-        base.checkpointSerialize(json, "base");
-        quote.checkpointSerialize(json, "quote");
         json::serializeHelper(
             json,
             "Loans",

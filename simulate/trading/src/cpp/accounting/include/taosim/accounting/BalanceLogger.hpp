@@ -5,7 +5,7 @@
 #pragma once
 
 #include "AccountRegistry.hpp"
-#include "ExchangeSignals.hpp"
+#include <taosim/exchange/ExchangeSignals.hpp>
 #include "common.hpp"
 
 #include <spdlog/spdlog.h>

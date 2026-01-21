@@ -68,7 +68,7 @@ Miners in the subnet function as trading agents in the distributed simulation; t
 <div style="page-break-after: always;"></div>
 
 ## Technical Operation <span id="technical"><span>
-The subnet operates at technical level in the first implementation in quite familiar manner for the Bittensor ecosystem.  Validators construct requests containing the simulation state, which results from a series of computations by the simulator, and publishes these requests to miners at a pre-defined interval.  Miners must respond to validator requests within a reasonable timeframe in order for their instructions to be submitted to the simulation for execution.  Scores are calculated in general as a weighted sum of several risk-adjusted performance metrics; although, at least until others are required, only an intraday Sharpe ratio is evaluated.  Miners are also required to maintain a certain level of trading volume in order for their risk-adjusted performance score to be allocated in full - this prevents inactive miners from gaining incentives, and aligns with the objective of the project to encourage active automated trading rather than simple buy & hold or other very low-frequency strategies.
+The subnet operates at technical level in the first implementation in quite familiar manner for the Bittensor ecosystem.  Validators construct requests containing the simulation state, which results from a series of computations by the simulator, and publishes these requests to miners at a pre-defined interval.  Miners must respond to validator requests within a reasonable timeframe in order for their instructions to be submitted to the simulation for execution.  Scores are calculated in general as a weighted sum of several risk-adjusted performance metrics; although, at least until others are required, only an intraday Kappa-3 ratio is evaluated.  Miners are also required to maintain a certain level of trading volume in order for their risk-adjusted performance score to be allocated in full - this prevents inactive miners from gaining incentives, and aligns with the objective of the project to encourage active automated trading rather than simple buy & hold or other very low-frequency strategies.
 
 In the current approach, a new simulation configuration is intended to be deployed on approximately weekly basis, with each simulation being executed as an independent run where all miner agents begin with the same initial capital allocation.  Multiple runs of a particular configuration may be executed by validators before a new configuration is published, due to varying rate of progression resulting from differing resources deployed by validators. Miner scores are however calculated using a rolling window which is not cleared at the start of a new simulation, so that performance in previous races does still contribute to the miner's overall weighting.  Deregistrations are handled by resetting the account balance and positions of the agent associated with the UID which was newly registered to the configured starting values.
 
@@ -100,12 +100,12 @@ Requirements are subject to change as the subnet matures and evolves; this secti
 ### Validator <span id="requirements-validator"><span>
 Validators need to host the C++ simulator as well as the Python validator.  In the early days of the subnet, the number of orderbooks simulated as well as the count and type of background agents will be reduced so as to limit the requirements before the subnet matures and sufficient emissions are gained to justify the expense of hosting more powerful machinery.  Basic requirements:
 
-- 16GB RAM
-- 8 CORE CPU
+- 32GB RAM
+- 16 CORE CPU
 - Ubuntu >= 22.04
 - g++ 14.
 
-We hope to increase both major parameters significantly as soon as possible so that validators may wish to prepare a larger machine for easier expansion.  It should be noted however that increasing the CPU resources available will result in a faster progression of simulations due to multi-threaded processing of the orderbook realizations.  This should not inherently be a problem, but may cause divergences in scoring if there is a major discrepancy in resources with the other validators in the subnet.  We plan to communicate the setup employed by our validator whenever changes are made, and will enable to configure the resources allocated for simulation processing if necessary.
+We hope to increase both major parameters significantly so that validators may wish to prepare a larger machine for easier expansion.  It should be noted however that increasing the CPU resources available will result in a faster progression of simulations due to multi-threaded processing of the orderbook realizations.  This should not inherently be a problem, but may cause divergences in scoring if there is a major discrepancy in resources with the other validators in the subnet.  We plan to communicate the setup employed by our validator whenever changes are made, and will enable to configure the resources allocated for simulation processing if necessary.
 
 ### Miner <span id="requirements-miner"><span>
 There are no set requirements for miners except that the basic Bittensor package and subnet miner tools occupy ~1GB of RAM per miner instance; resources needed will depend on the complexity and efficiency of the specific strategy implementation.
@@ -113,7 +113,7 @@ There are no set requirements for miners except that the basic Bittensor package
 ---
 
 ## Agents <span id="agents"><span>
-In order to separate the basic network logic from the actual trading logic and allow to easily switch between different strategies, miners in this subnet define a separate class containing the agent logic which is referenced in the configuration of the miner and loaded for handling of simulation state updates.  Some simple example agents are provided in the `agents` directory of this repository, and are copied to a directory `~/.taos/agents` if using the miner install script to prepare your environment.  The objective in agent development is to produce logic which maximizes performance over all realizations in terms of the evaluation metrics applied by the validators.  Currently assessment is based on an intraday Sharpe ratio of the changes in estimated total inventory value in conjunction with a requirement to maintain a certain level of cumulative trading volume; this will be continuously monitored and reviewed, and other relevant risk-adjusted performance measures incorporated if a need is observed.
+In order to separate the basic network logic from the actual trading logic and allow to easily switch between different strategies, miners in this subnet define a separate class containing the agent logic which is referenced in the configuration of the miner and loaded for handling of simulation state updates.  Some simple example agents are provided in the `agents` directory of this repository, and are copied to a directory `~/.taos/agents` if using the miner install script to prepare your environment.  The objective in agent development is to produce logic which maximizes performance over all realizations in terms of the evaluation metrics applied by the validators.  Currently assessment is based on an intraday Kappa-3 ratio in conjunction with a requirement to maintain a certain level of cumulative round-trip volume; this will be continuously monitored and reviewed, and other relevant risk-adjusted performance measures incorporated if a need is observed.
 
 Only some basic agents are immediately included as examples, designed to illustrate the fundamentals of reading the state updates and creating instructions.  We expect miners to develop their own custom logic in order to compete in the subnet, but plan to release additional examples, tools and templates to facilitate implementation of certain common classes of trading strategies.  An overview of the information needed to begin developing strategies is provided [here](agents/README.md).  It is also possible to test agents offline against the background model on your local machine by following [these instructions](agents/proxy/README.md).
 
@@ -188,8 +188,7 @@ To run a validator, you can use the provided `run_validator.sh` which accepts th
 - `-t` : Timeout for miner queries; this allows validators to tune the time allowed for miners to respond to account for differences in server geolocation or networking capability (default=`3.0`).
 - `-s` : Flag to indicate that the simulator should not be restarted when performing the update; this allows to easily execute updates which only affect the Python validator operation (default=`0`; append `-s 1` to command to preserve running simulator during update).
 - `-x` : Flag to indicate if wanting to launch tmux session for monitoring (default=`1`; append `-x 0` to command to disable tmux session creation).
-<!-- - `-c` : If the simulator has been stopped for whatever reason, and you wish to resume the previous simulation rather than starting a new one, you can set this argument to the location of the `ckpt.json` found 
-in the output directory of the simulation.(default=`0` => start a new simulation) -->
+- `-c` : If you wish to resume a previous simulation rather than starting a new one, you can set this argument to the location of the output directory of the simulation, or to `latest` to resume the most recently started simulation. (default=`0` => start a new simulation)
 
 The script will:
 1. Pull and install the latest changes from the taos repository
@@ -206,13 +205,16 @@ Example run command:
 
 **We recommend running as root to avoid any permissions issues.**
 
-<div style="page-break-after: always;"></div>
-
-<!-- CHECKPOINTING FUNCTIONALITY RESTORED SOON
 To resume from a checkpoint, replace the last line with:
 ```
 ../build/src/cpp/taosim -c $CHECKPOINT
-``` -->
+```
+To resume the latest simulation from a checkpoint, us `-c latest`, or pass the log directory for the simulation e.g.
+```
+../build/src/cpp/taosim -c /root/sn-79/simulate/trading/run/logs/YYYYMMDD_HHmmss
+```
+
+<div style="page-break-after: always;"></div>
 
 ### Miner <span id="run-miner"><span>
 To run a miner, you can use the provided `run_miner.sh` which accepts the following arguments:

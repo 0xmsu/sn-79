@@ -9,7 +9,6 @@
 #include "LocalAgentRoster.hpp"
 #include "MultiBookExchangeAgent.hpp"
 #include "PythonAgent.hpp"
-#include "TradeLogAgent.hpp"
 
 #include <span>
 
@@ -31,7 +30,7 @@ public:
         pugi::xml_node node,
         std::function<void(pugi::xml_node)> creationCallback = {});
 
-    [[nodiscard]] std::span<const std::unique_ptr<Agent>> agents() const noexcept { return m_agents; }
+    [[nodiscard]] auto&& agents(this auto&& self) noexcept { return self.m_agents; }
     [[nodiscard]] const std::unique_ptr<LocalAgentRoster>& roster() const noexcept { return m_roster; }
 
 private:
@@ -54,8 +53,5 @@ void LocalAgentManager::createAgentInstanced<MultiBookExchangeAgent>(pugi::xml_n
 
 template<>
 void LocalAgentManager::createAgentInstanced<PythonAgent>(pugi::xml_node node);
-
-template<>
-void LocalAgentManager::createAgentInstanced<TradeLogAgent>(pugi::xml_node node);
 
 //-------------------------------------------------------------------------

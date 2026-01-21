@@ -56,7 +56,6 @@ double getClosestPreviousEntry(const std::string& filename, long long currentTim
     std::ifstream file(filename);
     std::string line;
     double closestRet =  0.0;
-    long long closestTimestamp = 0;
     long long closestDiff = std::numeric_limits<long long>::max();
 
     while (std::getline(file, line)) {
@@ -77,7 +76,6 @@ double getClosestPreviousEntry(const std::string& filename, long long currentTim
         if (timestamp <= currentTimestamp) {
             long long diff = currentTimestamp - timestamp;
             if (diff < closestDiff) {
-                closestTimestamp = timestamp;
                 closestRet = value;
                 closestDiff = diff;
             }

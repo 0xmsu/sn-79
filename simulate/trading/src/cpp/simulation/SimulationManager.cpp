@@ -2,13 +2,20 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/serialization/msgpack_util.hpp"
-#include "taosim/simulation/SimulationManager.hpp"
-#include "taosim/simulation/serialization/ValidatorRequest.hpp"
-#include "taosim/simulation/serialization/ValidatorResponse.hpp"
-#include "taosim/replay/helpers.hpp"
-#include "taosim/simulation/util.hpp"
-#include "taosim/message/MultiBookMessagePayloads.hpp"
+#include <taosim/checkpoint/CheckpointError.hpp>
+#include <taosim/checkpoint/helpers.hpp>
+#include <taosim/filesystem/TempPath.hpp>
+#include <taosim/filesystem/utils.hpp>
+#include <taosim/message/MultiBookMessagePayloads.hpp>
+#include <taosim/message/PayloadFactory.hpp>
+#include <taosim/replay/helpers.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
+#include <taosim/serialization/msgpack/utils.hpp>
+#include <taosim/simulation/SimulationError.hpp>
+#include <taosim/simulation/SimulationManager.hpp>
+#include <taosim/simulation/serialization/ValidatorRequest.hpp>
+#include <taosim/simulation/util.hpp>
+#include <taosim/xml/helpers.hpp>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/uuid/random_generator.hpp>
@@ -38,11 +45,7 @@ void SimulationManager::runSimulations()
     std::barrier barrier{
         m_blockInfo.count,
         [&] {
-            if (m_useMessagePack) {
-                publishStateMessagePack();
-            } else {
-                publishState();
-            }
+            publishState();
             m_stepSignal();
         }};
     std::latch latch{m_blockInfo.count};
@@ -66,8 +69,6 @@ void SimulationManager::runSimulations()
 
 void SimulationManager::runReplay()
 {
-    static constexpr auto ctx = std::source_location::current().function_name();
-
     const auto& replayDesc = m_replayManager->desc();
 
     const auto& simulation = m_simulations.at(*replayDesc.bookId / m_blockInfo.dimension);
@@ -125,10 +126,6 @@ void SimulationManager::runReplay()
 
 void SimulationManager::runReplayAdvanced()
 {
-    static constexpr auto ctx = std::source_location::current().function_name();
-
-    const auto& replayDesc = m_replayManager->desc();
-
     for (const auto& [simulation, path] : views::zip(m_simulations, m_replayManager->initialBalancesPaths())) {
         rapidjson::Document balancesJson = json::loadJson(path);
         for (const auto& member : balancesJson.GetObject()) {
@@ -198,8 +195,8 @@ void SimulationManager::runReplayAdvanced()
         | ranges::to<std::vector>;
 
     m_stepSignal.connect([&] {
-        const auto& representativeSimulation = m_simulations.front();
-        const auto& time = representativeSimulation->time();
+        const auto& reprSimu = m_simulations.front();
+        const auto& time = reprSimu->time();
         const auto cutoff = time.current + time.step;
         for (BookId bookId{}; bookId < bookIdToReplayFilesState.size(); ++bookId) {
             const auto& simulation = m_simulations.at(bookId / m_blockInfo.dimension);
@@ -225,12 +222,12 @@ void SimulationManager::runReplayAdvanced()
 
 void SimulationManager::publishStartInfo()
 {
-    if (!online()) return;
+    if (!online() || m_simulations.front()->state() != SimulationState::INACTIVE) return;
 
     rapidjson::Document json = [this] {
-        const auto& representativeSimulation = m_simulations.front();
+        const auto& reprSimu = m_simulations.front();
         const auto msg = Message::create(
-            representativeSimulation->time().start,
+            reprSimu->time().start,
             0,
             "SIMULATION",
             "*",
@@ -265,9 +262,9 @@ void SimulationManager::publishEndInfo()
     if (!online()) return;
 
     rapidjson::Document json = [this] {
-        const auto& representativeSimulation = m_simulations.front();
+        const auto& reprSimu = m_simulations.front();
         const auto msg = Message::create(
-            representativeSimulation->time().start,
+            reprSimu->time().start,
             0,
             "SIMULATION",
             "*",
@@ -299,10 +296,19 @@ void SimulationManager::publishEndInfo()
 
 void SimulationManager::publishState()
 {
-    const auto& representativeSimulation = m_simulations.front();
+    if (warmingUp() || !online()) return;
 
-    if (representativeSimulation->currentTimestamp() < m_gracePeriod || !online()) return;
+    if (m_useMessagePack) {
+        publishStateMessagePack();
+    } else {
+        publishStateJson();
+    }
+}
 
+//-------------------------------------------------------------------------
+
+void SimulationManager::publishStateJson()
+{
     rapidjson::Document stateJson = makeStateJson();
     rapidjson::Document resJson;
 
@@ -311,11 +317,12 @@ void SimulationManager::publishState()
         ctx, asyncSendOverNetwork(stateJson, m_netInfo.bookStateEndpoint, resJson), net::detached);
     ctx.run();
 
-    const Timestamp now = representativeSimulation->currentTimestamp();
+    const auto& reprSimu = m_simulations.front();
+    const Timestamp now = reprSimu->currentTimestamp();
 
     for (const auto& response : resJson["responses"].GetArray()) {
         const auto [msg, blockIdx] = decanonize(
-            Message::fromJsonResponse(response, now, representativeSimulation->proxy()->name()),
+            Message::fromJsonResponse(response, now, reprSimu->proxy()->name()),
             m_blockInfo.dimension);
         if (!blockIdx) {
             for (const auto& simulation : m_simulations) {
@@ -333,10 +340,8 @@ void SimulationManager::publishStateMessagePack()
 {
     static constexpr auto ctx = std::source_location::current().function_name();
 
-    const auto& representativeSimulation = m_simulations.front();
-    const auto now = representativeSimulation->currentTimestamp();
-
-    if (now < m_gracePeriod || !online()) return;
+    const auto& reprSimu = m_simulations.front();
+    const auto now = reprSimu->currentTimestamp();
 
     auto getTime = [] {
         return std::make_optional(std::chrono::high_resolution_clock::now());
@@ -362,7 +367,7 @@ void SimulationManager::publishStateMessagePack()
     std::memcpy(reqRegion.get_address(), stream.data(), stream.size());
 
     if (m_measureStepWallClockTime && m_measurements.t0parse) {
-        const auto simuTimeDetails = representativeSimulation->time();
+        const auto simuTimeDetails = reprSimu->time();
         using namespace std::chrono;
         const std::pair stepTimeSpan{
             duration<Timestamp, std::nano>{simuTimeDetails.current - simuTimeDetails.step},
@@ -416,8 +421,19 @@ void SimulationManager::publishStateMessagePack()
     };
     bipc::mapped_region resRegion{shmRes, bipc::read_write};
 
-    msgpack::object_handle oh =
-        msgpack::unpack(std::bit_cast<const char*>(resRegion.get_address()), resByteSize);
+    msgpack::object_handle oh;
+    try {
+        oh = msgpack::unpack(std::bit_cast<const char*>(resRegion.get_address()), resByteSize);
+    }
+    catch (const std::exception& e) {
+        fmt::println("Error unpacking responses: {}", e.what());
+        if (m_measureStepWallClockTime) {
+            const auto t = getTime();
+            m_measurements.t1parse = t;
+            m_measurements.t0proc = t;
+        }
+        return;
+    }
     msgpack::object obj = oh.get();
 
     auto unpackResponse = [&](const msgpack::object& o) {
@@ -466,40 +482,33 @@ void SimulationManager::publishStateMessagePack()
         auto msg = std::make_shared<Message>();
         msg->occurrence = now;
         msg->arrival = now + *res.delay;
-        msg->source = representativeSimulation->proxy()->name();
-        msg->targets = {representativeSimulation->exchange()->name()};
+        msg->source = reprSimu->proxy()->name();
+        msg->targets = {reprSimu->exchange()->name()};
         msg->type = fmt::format("{}_{}", "DISTRIBUTED", res.type);
         msg->payload =
             MessagePayload::create<DistributedAgentResponsePayload>(*res.agentId, res.payload);
         return msg;
     };
 
-    if (obj.type != msgpack::type::MAP) {
-        fmt::println("MAP type check failed for responses");
+    if (m_measureStepWallClockTime) {
         const auto t = getTime();
         m_measurements.t1parse = t;
         m_measurements.t0proc = t;
+    }
+    if (obj.type != msgpack::type::MAP) {
+        fmt::println("MAP type check failed for responses");
         return;
     }
     if (obj.via.map.size != 1) {
         fmt::println("MAP size == 1 check failed for responses");
-        const auto t = getTime();
-        m_measurements.t1parse = t;
-        m_measurements.t0proc = t;
         return;
     }
     const auto& val = obj.via.map.ptr[0].val;
     if (val.type != msgpack::type::ARRAY) {
         fmt::println("ARRAY type check failed for responses");
-        const auto t = getTime();
-        m_measurements.t1parse = t;
-        m_measurements.t0proc = t;
         return;
     }
     if (val.via.array.size == 0) {
-        const auto t = getTime();
-        m_measurements.t1parse = t;
-        m_measurements.t0proc = t;
         return;
     }
     std::vector<Message::Ptr> unpackedResponses;
@@ -557,12 +566,6 @@ void SimulationManager::publishStateMessagePack()
         }
     }
 
-    if (m_measureStepWallClockTime) {
-        const auto t = getTime();
-        m_measurements.t1parse = t;
-        m_measurements.t0proc = t;
-    }
-
     for (const auto& response : unpackedResponses) {
         const auto [msg, blockIdx] = decanonize(response, m_blockInfo.dimension);
         if (!blockIdx) {
@@ -577,214 +580,28 @@ void SimulationManager::publishStateMessagePack()
 
 //-------------------------------------------------------------------------
 
-rapidjson::Document SimulationManager::makeStateJson() const
+bool SimulationManager::online() const noexcept
 {
-    const auto& representativeSimulation = m_simulations.front();
-
-    const auto bookStatePublishMsg = Message::create(
-        representativeSimulation->currentTimestamp(),
-        0,
-        representativeSimulation->exchange()->name(),
-        representativeSimulation->proxy()->name(),
-        "MULTIBOOK_STATE_PUBLISH",
-        MessagePayload::create<BookStateMessagePayload>(makeCollectiveBookStateJson()));
-
-    rapidjson::Document json;
-    auto& allocator = json.GetAllocator();
-    bookStatePublishMsg->jsonSerialize(json);
-    json["payload"].AddMember(
-        "notices",
-        [&] {
-            rapidjson::Document noticesJson{rapidjson::kArrayType, &allocator};
-            std::unordered_map<decltype(Message::type), uint32_t> msgTypeToCount{
-                { "RESPONSE_DISTRIBUTED_RESET_AGENT", 0 },
-                { "ERROR_RESPONSE_DISTRIBUTED_RESET_AGENT", 0 }
-            };
-            auto checkGlobalDuplicate = [&](Message::Ptr msg) -> bool {
-                const auto payload = std::dynamic_pointer_cast<DistributedAgentResponsePayload>(msg->payload);
-                if (payload == nullptr) return false;
-                auto relevantPayload = [&] {
-                    const auto pld = payload->payload;
-                    return std::dynamic_pointer_cast<ResetAgentsResponsePayload>(pld) != nullptr
-                        || std::dynamic_pointer_cast<ResetAgentsErrorResponsePayload>(pld) != nullptr;
-                };
-                if (!relevantPayload()) return true;
-                auto it = msgTypeToCount.find(msg->type);
-                if (it == msgTypeToCount.end()) return true;
-                if (it->second > 0) return false;
-                it->second++;
-                return true;
-            };
-            for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
-                for (const auto msg : simulation->proxy()->messages()) {
-                    if (!checkGlobalDuplicate(msg)) continue;
-                    canonize(msg, blockIdx, m_blockInfo.dimension);
-                    rapidjson::Document msgJson{&allocator};
-                    msg->jsonSerialize(msgJson);
-                    noticesJson.PushBack(msgJson, allocator);
-                }
-                simulation->proxy()->clearMessages();
-            }
-            return noticesJson;
-        }().Move(),
-        allocator);
-    
-    return json;
+    return !m_replayMode && !m_netInfo.host.empty() && !m_netInfo.port.empty();
 }
 
 //-------------------------------------------------------------------------
 
-rapidjson::Document SimulationManager::makeCollectiveBookStateJson() const
+bool SimulationManager::warmingUp() const noexcept
 {
-    auto serialize = [this](rapidjson::Document& json) {
-        auto& allocator = json.GetAllocator();
-        // Log directory.
-        json.AddMember("logDir", rapidjson::Value{m_logDir.c_str(), allocator}, allocator);
-        // Books.
-        auto serializeBooks = [this](rapidjson::Document& json) {
-            json.SetArray();
-            auto& allocator = json.GetAllocator();
-            for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
-                const auto exchange = simulation->exchange();
-                for (const auto book : exchange->books()) {
-                    json.PushBack(
-                        [&] {
-                            rapidjson::Document bookJson{rapidjson::kObjectType, &allocator};
-                            const BookId bookIdCanon = blockIdx * m_blockInfo.dimension + book->id();
-                            bookJson.AddMember("bookId", rapidjson::Value{bookIdCanon}, allocator);
-                            exchange->L3Record().at(book->id()).jsonSerialize(bookJson, "record");
-                            rapidjson::Document bidAskJson{&allocator};
-                            book->jsonSerialize(bidAskJson);
-                            bookJson.AddMember("bid", bidAskJson["bid"], allocator);
-                            bookJson.AddMember("ask", bidAskJson["ask"], allocator);
-                            return bookJson;
-                        }().Move(),
-                        allocator);
-                }
-            }
-        };
-        json::serializeHelper(json, "books", serializeBooks);
-        // Accounts.
-        auto serializeAccounts = [this](rapidjson::Document& json) {
-            json.SetObject();
-            auto& allocator = json.GetAllocator();
-            const auto& representativeSimulation = m_simulations.front();
-            for (AgentId agentId : views::keys(representativeSimulation->exchange()->accounts())) {
-                if (agentId < 0) continue;
-                const auto agentIdStr = std::to_string(agentId);
-                const char* agentIdCStr = agentIdStr.c_str();
-                json.AddMember(
-                    rapidjson::Value{agentIdCStr, allocator},
-                    rapidjson::Document{rapidjson::kObjectType, &allocator}.Move(),
-                    allocator);
-                json[agentIdCStr].AddMember("agentId", rapidjson::Value{agentId}, allocator);
-                json[agentIdCStr].AddMember("holdings", rapidjson::Document{rapidjson::kArrayType, &allocator}, allocator);
-                json[agentIdCStr].AddMember("orders", rapidjson::Document{rapidjson::kArrayType, &allocator}, allocator);
-                json[agentIdCStr].AddMember("loans", rapidjson::Document{rapidjson::kArrayType, &allocator}, allocator);
-                rapidjson::Document feesJson{rapidjson::kObjectType, &allocator};
-                for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
-                    const auto exchange = simulation->exchange();
-                    const auto books = exchange->books();
-                    const auto& account = exchange->accounts().at(agentId);
-                    const auto feePolicy = exchange->clearingManager().feePolicy();
-                    for (const auto book : books) {
-                        const BookId bookIdCanon = blockIdx * m_blockInfo.dimension + book->id();
-                        json[agentIdCStr]["orders"].PushBack(
-                            rapidjson::Document{rapidjson::kArrayType, &allocator}.Move(), allocator);
-                        json[agentIdCStr]["holdings"].PushBack(
-                            [&] {
-                                rapidjson::Document holdingsJson{&allocator};
-                                account.at(book->id()).jsonSerialize(holdingsJson);
-                                return holdingsJson;
-                            }().Move(),
-                            allocator);
-                        json[agentIdCStr]["loans"].PushBack(
-                            [&] {
-                                rapidjson::Document loansObjectJson{rapidjson::kObjectType, &allocator};
-                                for (const auto& [id, loan] : account.at(book->id()).m_loans) {
-                                    rapidjson::Document loanJson{rapidjson::kObjectType, &allocator};
-                                    loanJson.AddMember("id", rapidjson::Value{id}, allocator);
-                                    loanJson.AddMember("amount", rapidjson::Value{taosim::util::decimal2double(loan.amount())}, allocator);
-                                    loanJson.AddMember("currency", rapidjson::Value{
-                                        std::to_underlying(loan.direction() == OrderDirection::BUY ? Currency::QUOTE : Currency::BASE)
-                                    }, allocator);
-                                    loanJson.AddMember("baseCollateral", rapidjson::Value{taosim::util::decimal2double(loan.collateral().base())}, allocator);
-                                    loanJson.AddMember("quoteCollateral", rapidjson::Value{taosim::util::decimal2double(loan.collateral().quote())}, allocator);
-                                    const auto idStr = std::to_string(id);
-                                    const char* idCStr = idStr.c_str();
-                                    loansObjectJson.AddMember(rapidjson::Value{idCStr, allocator}, loanJson, allocator);
-                                }
-                                return loansObjectJson;
-                            }().Move(),
-                            allocator);
-                        json::serializeHelper(
-                            feesJson,
-                            std::to_string(bookIdCanon).c_str(),
-                            [&](rapidjson::Document& feeJson) {
-                                feeJson.SetObject();
-                                auto& allocator = feeJson.GetAllocator();
-                                feeJson.AddMember(
-                                    "volume",
-                                    rapidjson::Value{util::decimal2double(
-                                        feePolicy->agentVolume(book->id(), agentId))},
-                                    allocator);
-                                const auto rates = feePolicy->getRates(book->id(), agentId);
-                                feeJson.AddMember(
-                                    "makerFeeRate",
-                                    rapidjson::Value{util::decimal2double(rates.maker)},
-                                    allocator);
-                                feeJson.AddMember(
-                                    "takerFeeRate",
-                                    rapidjson::Value{util::decimal2double(rates.taker)},
-                                    allocator);
-                            });
-                    }
-                }
-                json[agentIdCStr].AddMember("fees", feesJson, allocator);
-            }
-            for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
-                const auto books = simulation->exchange()->books();
-                for (const auto book : books) {
-                    const BookId bookIdCanon = blockIdx * m_blockInfo.dimension + book->id();
-                    auto serializeSide = [&](OrderDirection side) {
-                        const auto& levels =
-                            side == OrderDirection::BUY ? book->buyQueue() : book->sellQueue();
-                        for (const auto& level : levels) {
-                            for (const auto tick : level) {
-                                const auto [agentId, clientOrderId] =
-                                    books[book->id()]->orderClientContext(tick->id());
-                                if (agentId < 0) continue;
-                                const auto agentIdStr = std::to_string(agentId);
-                                const char* agentIdCStr = agentIdStr.c_str();
-                                rapidjson::Document orderJson{&allocator};
-                                tick->jsonSerialize(orderJson);
-                                json::setOptionalMember(orderJson, "clientOrderId", clientOrderId);
-                                json[agentIdCStr]["orders"][bookIdCanon].PushBack(orderJson, allocator);
-                            }
-                        }
-                    };
-                    serializeSide(OrderDirection::BUY);
-                    serializeSide(OrderDirection::SELL);
-                }
-            }
-        };
-        json::serializeHelper(json, "accounts", serializeAccounts);
-    };
-
-    rapidjson::Document json{rapidjson::kObjectType};
-    serialize(json);
-    return json;
+    return m_simulations.front()->currentTimestamp() < m_gracePeriod;
 }
 
 //-------------------------------------------------------------------------
 
-std::unique_ptr<SimulationManager> SimulationManager::fromConfig(const fs::path& path)
+std::unique_ptr<SimulationManager> SimulationManager::fromConfig(
+    const fs::path& configPath, const fs::path& baseDir)
 {
     static constexpr auto ctx = std::source_location::current().function_name();
 
     pugi::xml_document doc;
-    pugi::xml_parse_result result = doc.load_file(path.c_str());
-    fmt::println(" - '{}' loaded successfully", path.c_str());
+    doc.load_file(configPath.c_str());
+    fmt::println(" - '{}' loaded successfully", configPath.c_str());
     pugi::xml_node node = doc.child("Simulation");
 
     auto mngr = std::make_unique<SimulationManager>();
@@ -805,8 +622,7 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(const fs::path&
         const auto booksNode = node.child("Agents").child("MultiBookExchangeAgent").child("Books");
         if (!booksNode) {
             throw std::runtime_error{fmt::format(
-                "{}: missing node 'Agents/MultiBookExchangeAgent/Books'",
-                ctx
+                "{}: missing node 'Agents/MultiBookExchangeAgent/Books'", ctx
             )};
         }
         return {
@@ -814,14 +630,31 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(const fs::path&
             .dimension = booksNode.attribute("instanceCount").as_uint(1)
         };
     }();
-    mngr->m_threadPool = std::make_unique<boost::asio::thread_pool>(mngr->m_blockInfo.count);
+
+    mngr->m_threadPool = std::make_unique<boost::asio::thread_pool>([&] {
+        const auto ckptWorkerCount = node.attribute("ckptIntervalInSteps").as_ullong() > 0ull
+            ? std::min(node.attribute("ckptNumWorkers").as_uint(1), mngr->m_blockInfo.count)
+            : 0u;
+        const auto requestedThreadCount = mngr->m_blockInfo.count + ckptWorkerCount;
+        const auto maxAllowedThreadCount = std::thread::hardware_concurrency();
+        if (requestedThreadCount > maxAllowedThreadCount) {
+            throw SimulationError{fmt::format(
+                "Requested thread count ({}) exceeds count available ({})",
+                requestedThreadCount,
+                maxAllowedThreadCount
+            )};
+        }
+        return requestedThreadCount;
+    }());
+
     boost::asio::signal_set{mngr->m_io, SIGINT, SIGTERM}.async_wait(
         [&](boost::system::error_code, int) {
             mngr->m_threadPool->stop();
             mngr->m_io.stop();
         });
 
-    mngr->setupLogDir(node);
+    mngr->setupLogDir(node, baseDir);
+
     mngr->m_simulations =
         views::iota(0u, mngr->m_blockInfo.count)
         | views::transform([&](auto blockIdx) {
@@ -856,14 +689,14 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(const fs::path&
 
     if (node.attribute("traceTime").as_bool()) {
         mngr->m_stepSignal.connect([&] {
-            const auto& representativeSimulation = mngr->m_simulations.front();
+            const auto& reprSimu = mngr->m_simulations.front();
             uint64_t total, seconds, hours, minutes, nanos;
-            total = representativeSimulation->time().current / 1'000'000'000;
+            total = reprSimu->time().current / 1'000'000'000;
             minutes = total / 60;
             seconds = total % 60;
             hours = minutes / 60;
             minutes = minutes % 60;
-            nanos = representativeSimulation->time().current % 1'000'000'000;
+            nanos = reprSimu->time().current % 1'000'000'000;
             fmt::println("TIME : {:02d}:{:02d}:{:02d}.{:09d}", hours, minutes, seconds, nanos); 
         });
     }
@@ -875,7 +708,87 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(const fs::path&
 
     mngr->m_useMessagePack = node.attribute("useMessagePack").as_bool();
 
+    if (size_t ckptIntervalInSteps = node.attribute("ckptIntervalInSteps").as_ullong()) {
+        mngr->m_checkpointManager =
+            std::make_unique<checkpoint::CheckpointManager>(checkpoint::CheckpointingDesc{
+                .simuMngr = mngr.get(),
+                .runDir = mngr->m_logDir,
+                .intervalInSteps = ckptIntervalInSteps,
+                .numLastFilesToKeep = (ssize_t)node.attribute("ckptNumLastFilesToKeep").as_ullong(),
+                .measureWallClockTime = node.attribute("ckptMeasureWallClockTime").as_bool()
+            });
+    }
+
     mngr->m_measureStepWallClockTime = node.attribute("measureStepWallClockTime").as_bool();
+
+    return mngr;
+}
+
+//-------------------------------------------------------------------------
+
+std::unique_ptr<SimulationManager> SimulationManager::fromCheckpoint(
+    const checkpoint::CheckpointToken& ckptToken)
+{
+    const fs::path runDir = checkpoint::runDirFromToken(ckptToken);
+    const fs::path ckptDir = checkpoint::ckptDirFromToken(ckptToken);
+    const fs::path configPath = runDir / "config.xml";
+
+    fmt::println("Loading checkpoint {}...", ckptDir.c_str());
+
+    // Common.
+    const auto commonCkptFile =
+        ckptDir / fmt::format("common{}", checkpoint::CheckpointManager::s_fileExtension);
+    std::ifstream ifs{commonCkptFile, std::ios::binary};
+    const size_t commonCkptByteSize = fs::file_size(commonCkptFile);
+    std::vector<char> commonCkptByteBuffer(commonCkptByteSize);
+    ifs.read(commonCkptByteBuffer.data(), commonCkptByteSize);
+    msgpack::object_handle commonOh =
+        msgpack::unpack(commonCkptByteBuffer.data(), commonCkptByteSize);
+    msgpack::object commonObj = commonOh.get();
+
+    // Blocks.
+    std::vector<msgpack::object_handle> blockObjHandles;
+    static const std::regex blockCkptPattern{
+        fmt::format("^\\d+\\{}$", checkpoint::CheckpointManager::s_fileExtension)};
+    const auto blockCkptFilesSorted = filesystem::collectMatchingPaths(
+        ckptDir,
+        [&](auto&& p) {
+            return std::regex_match(p.filename().string(), blockCkptPattern);
+        })
+        | ranges::actions::sort([](auto&& lhs, auto&& rhs) {
+            return std::stoul(lhs.stem().string()) < std::stoul(rhs.stem().string());
+        });
+    for (auto&& ckptFile : blockCkptFilesSorted) {
+        std::ifstream ifs{ckptFile, std::ios::binary};
+        const size_t ckptByteSize = fs::file_size(ckptFile);
+        std::vector<char> ckptByteBuffer(ckptByteSize);
+        ifs.read(ckptByteBuffer.data(), ckptByteSize);
+        blockObjHandles.push_back(msgpack::unpack(ckptByteBuffer.data(), ckptByteSize));
+    }
+
+    fmt::println("Checkpoint loaded successfully; initializing simulation...");
+
+    auto ckptTimestamp = taosim::serialization::msgpackFindMap<Timestamp>(commonObj, "timestamp");
+    if (!ckptTimestamp) {
+        throw checkpoint::CheckpointError{};
+    }
+
+    pugi::xml_document doc;
+    if (pugi::xml_parse_result result = doc.load_file(configPath.c_str()); !result) {
+        throw checkpoint::CheckpointError{};
+    }
+    pugi::xml_node simuNode = doc.child("Simulation");
+    xml::setAttribute(simuNode, "current", *ckptTimestamp);
+    const filesystem::TempPath tempConfigPath{"config.xml"};
+    doc.save_file(tempConfigPath);
+
+    auto mngr = SimulationManager::fromConfig(tempConfigPath, runDir.parent_path());
+
+    fmt::println("Setting up simulation state according to the checkpoint...");
+
+    checkpoint::setupUsingCkptData(mngr.get(), commonObj, blockObjHandles);
+
+    fmt::println("Load from checkpoint successful.");
 
     return mngr;
 }
@@ -887,8 +800,8 @@ std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const replay::R
     static constexpr auto ctx = std::source_location::current().function_name();
 
     pugi::xml_document doc;
-    const fs::path configPath = desc.dir / "config.xml";;
-    pugi::xml_parse_result result = doc.load_file(configPath.c_str());
+    const fs::path configPath = desc.dir / "config.xml";
+    doc.load_file(configPath.c_str());
     fmt::println(" - '{}' loaded successfully", configPath.c_str());
     pugi::xml_node node = doc.child("Simulation");
     node.attribute("id").set_value(
@@ -945,7 +858,7 @@ std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const replay::R
             }
         });
 
-    mngr->setupLogDir(node);
+    mngr->setupLogDir(node, desc.dir.parent_path());
     mngr->m_simulations = [&] {
         std::vector<std::unique_ptr<Simulation>> res;
         for (uint32_t blockIdx{}; blockIdx < mngr->m_blockInfo.count; ++blockIdx) {
@@ -964,19 +877,19 @@ std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const replay::R
 
     if (node.attribute("traceTime").as_bool()) {
         mngr->m_stepSignal.connect([&] {
-            const auto& representativeSimulation = mngr->m_simulations.front();
+            const auto& reprSimu = mngr->m_simulations.front();
             uint64_t total, seconds, hours, minutes, nanos;
-            total = representativeSimulation->time().current / 1'000'000'000;
+            total = reprSimu->time().current / 1'000'000'000;
             minutes = total / 60;
             seconds = total % 60;
             hours = minutes / 60;
             minutes = minutes % 60;
-            nanos = representativeSimulation->time().current % 1'000'000'000;
+            nanos = reprSimu->time().current % 1'000'000'000;
             fmt::println("TIME : {:02d}:{:02d}:{:02d}.{:09d}", hours, minutes, seconds, nanos); 
         });
     }
 
-    mngr->m_disallowPublish = true;
+    mngr->m_replayMode = true;
 
     mngr->m_useMessagePack = node.attribute("useMessagePack").as_bool();
 
@@ -985,131 +898,230 @@ std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const replay::R
 
 //-------------------------------------------------------------------------
 
-void SimulationManager::setupLogDir(pugi::xml_node node)
+void SimulationManager::setupLogDir(pugi::xml_node simuNode, const fs::path& baseDir)
 {
-    struct ChildAttributeGetter
-    {
-        std::vector<std::string> searchContext;
-
-        std::string operator()(
-            pugi::xml_node node,
-            const std::string& searchPath,
-            const std::string& attrName,
-            std::function<bool(pugi::xml_node)> criterion = [](auto) { return true; })
-        {
-            const auto [current, rest] = [&searchPath] -> std::pair<std::string, std::string> {
-                auto splitPos = searchPath.find_first_of("/");
-                return {
-                    searchPath.substr(0, splitPos),
-                    splitPos != std::string::npos
-                        ? searchPath.substr(splitPos + 1, searchPath.size())
-                        : ""
-                };
-            }();
-            searchContext.push_back(current);
-
-            if (!rest.empty()) {
-                pugi::xml_node child = node.find_child([&current](pugi::xml_node child) {
-                    return std::string_view{child.name()} == current;
-                });
-                if (!child) {
-                    const auto searchContextCopy = searchContext;
-                    searchContext.clear();
-                    throw std::runtime_error(fmt::format(
-                        "{}: cannot find node '{}'",
-                        std::source_location::current().function_name(),
-                        fmt::join(searchContextCopy, "/")));
-                }
-                return operator()(child, rest, attrName);
-            }
-    
-            pugi::xml_attribute attr;
-            for (pugi::xml_node child : node.children()) {
-                if (std::string_view{child.name()} == current && criterion(child)) {
-                    attr = child.attribute(attrName.c_str());
-                    break;
-                }
-            }
-            if (!attr) {
-                const auto searchContextCopy = searchContext;
-                searchContext.clear();
-                throw std::runtime_error(fmt::format(
-                    "{}: node '{}' has no attribute '{}'",
-                    std::source_location::current().function_name(),
-                    fmt::join(searchContextCopy, "/"),
-                    attrName));
-            }
-            searchContext.clear();
-            return attr.as_string();
-        }
-    };
-
-    auto createLogDir = [&] {
-        m_logDir = fs::current_path() / "logs" / m_logDir;
-        fs::create_directories(m_logDir);
-        pugi::xml_document doc;
-        doc.append_copy(node);
-        doc.save_file((m_logDir / "config.xml").c_str());
-    };
-
-    m_logDir = node.attribute("id").as_string();
-    if (m_logDir != "{{BG_CONFIG}}") {
-        if (m_logDir.empty()) {
-            m_logDir = boost::uuids::to_string(boost::uuids::random_generator{}());
-        }
-        createLogDir();
-        return;
-    }
-    
-    pugi::xml_node agentsNode;
-    if (agentsNode = node.child("Agents"); !agentsNode) {
-        throw std::invalid_argument(fmt::format(
-            "{}: missing required child 'Agents'",
-            std::source_location::current().function_name()));
-    }
-
-    auto getAttr = ChildAttributeGetter{};
-
-    const std::string dt = date::format(
-        "%Y%m%d_%H%M",
-        date::make_zoned(date::current_zone(), std::chrono::system_clock::now()));
-    const std::string duration = node.attribute("duration").as_string();
-    const std::string books = std::to_string(m_blockInfo.count * m_blockInfo.dimension);
-
-    const auto balances = [&] -> std::string {
-        try {
-            return fmt::format(
-                "{}_{}",
-                getAttr(agentsNode, "MultiBookExchangeAgent/Balances/Base", "total"),
-                getAttr(agentsNode, "MultiBookExchangeAgent/Balances/Quote", "total"));
-        }
-        catch (...) {
-            return fmt::format(
-                "{}_{}",
-                getAttr(agentsNode, "MultiBookExchangeAgent/Balances", "type"),
-                getAttr(agentsNode, "MultiBookExchangeAgent/Balances", "wealth"));
-        }
+    const std::string simuId = [&] {
+        const std::string specifiedId = simuNode.attribute("id").as_string();
+        if (!specifiedId.empty()) return specifiedId;
+        using namespace std::chrono;
+        const auto dateTimeId = date::format(
+            "%Y%m%d_%H%M%S",
+            date::make_zoned(
+                date::current_zone(), time_point_cast<seconds>(system_clock::now())));
+        xml::setAttribute(simuNode, "id", dateTimeId.c_str());
+        return dateTimeId;
     }();
 
-    const std::string priceDecimals = getAttr(agentsNode, "MultiBookExchangeAgent", "priceDecimals");
-    const std::string volumeDecimals = getAttr(agentsNode, "MultiBookExchangeAgent", "volumeDecimals");
-    const std::string baseDecimals = getAttr(agentsNode, "MultiBookExchangeAgent", "baseDecimals");
-    const std::string quoteDecimals = getAttr(agentsNode, "MultiBookExchangeAgent", "quoteDecimals");
-    const std::string iCount = getAttr(agentsNode, "InitializationAgent", "instanceCount");
-    const std::string iPrice = getAttr(agentsNode, "MultiBookExchangeAgent", "initialPrice");
-    const std::string fWeight = getAttr(agentsNode, "StylizedTraderAgent", "sigmaF");
-    const std::string cWeight = getAttr(agentsNode, "StylizedTraderAgent", "sigmaC");
-    const std::string nWeight = getAttr(agentsNode, "StylizedTraderAgent", "sigmaN");
-    const std::string tau = getAttr(agentsNode, "StylizedTraderAgent", "tau");
-    const std::string sigmaEps = getAttr(agentsNode, "StylizedTraderAgent", "sigmaEps");
-    const std::string riskAversion = getAttr(agentsNode, "StylizedTraderAgent", "r_aversion");
+    m_logDir = baseDir / simuId;
 
-    m_logDir = fmt::format(
-        "{}-{}-{}-{}-i{}_p{}-f{}_c{}_n{}_t{}_s{}_r{}_d{}_v{}_b{}_q{}",
-        dt, duration, books, balances, iCount, iPrice, fWeight, cWeight, nWeight,
-        tau, sigmaEps, riskAversion, priceDecimals, volumeDecimals, baseDecimals, quoteDecimals);
+    fs::create_directories(m_logDir);
 
-    createLogDir();
+    if (const auto configSavePath = m_logDir / "config.xml"; !fs::exists(configSavePath)) {
+        pugi::xml_document doc;
+        doc.append_copy(simuNode);
+        doc.save_file(configSavePath.c_str());
+    }
+}
+
+//-------------------------------------------------------------------------
+
+rapidjson::Document SimulationManager::makeStateJson() const
+{
+    const auto& reprSimu = m_simulations.front();
+
+    const auto bookStatePublishMsg = Message::create(
+        reprSimu->currentTimestamp(),
+        0,
+        reprSimu->exchange()->name(),
+        reprSimu->proxy()->name(),
+        "MULTIBOOK_STATE_PUBLISH",
+        MessagePayload::create<BookStateMessagePayload>(makeCollectiveBookStateJson()));
+
+    rapidjson::Document json;
+    auto& allocator = json.GetAllocator();
+    bookStatePublishMsg->jsonSerialize(json);
+    json["payload"].AddMember(
+        "notices",
+        [&] {
+            rapidjson::Document noticesJson{rapidjson::kArrayType, &allocator};
+            std::unordered_map<decltype(Message::type), uint32_t> msgTypeToCount{
+                { "RESPONSE_DISTRIBUTED_RESET_AGENT", 0 },
+                { "ERROR_RESPONSE_DISTRIBUTED_RESET_AGENT", 0 }
+            };
+            auto checkGlobalDuplicate = [&](Message::Ptr msg) -> bool {
+                const auto payload = std::dynamic_pointer_cast<DistributedAgentResponsePayload>(msg->payload);
+                if (payload == nullptr) return false;
+                auto relevantPayload = [&] {
+                    const auto pld = payload->payload;
+                    return std::dynamic_pointer_cast<ResetAgentsResponsePayload>(pld) != nullptr
+                        || std::dynamic_pointer_cast<ResetAgentsErrorResponsePayload>(pld) != nullptr;
+                };
+                if (!relevantPayload()) return true;
+                auto it = msgTypeToCount.find(msg->type);
+                if (it == msgTypeToCount.end()) return true;
+                if (it->second > 0) return false;
+                it->second++;
+                return true;
+            };
+            for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
+                for (const auto& msg : simulation->proxy()->messages()) {
+                    if (!checkGlobalDuplicate(msg)) continue;
+                    canonize(msg, blockIdx, m_blockInfo.dimension);
+                    rapidjson::Document msgJson{&allocator};
+                    msg->jsonSerialize(msgJson);
+                    noticesJson.PushBack(msgJson, allocator);
+                }
+                simulation->proxy()->clearMessages();
+            }
+            return noticesJson;
+        }().Move(),
+        allocator);
+    
+    return json;
+}
+
+//-------------------------------------------------------------------------
+
+rapidjson::Document SimulationManager::makeCollectiveBookStateJson() const
+{
+    auto serialize = [this](rapidjson::Document& json) {
+        auto& allocator = json.GetAllocator();
+        // Log directory.
+        json.AddMember("logDir", rapidjson::Value{m_logDir.c_str(), allocator}, allocator);
+        // Books.
+        auto serializeBooks = [this](rapidjson::Document& json) {
+            json.SetArray();
+            auto& allocator = json.GetAllocator();
+            for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
+                const auto exchange = simulation->exchange();
+                for (const auto& book : exchange->books()) {
+                    json.PushBack(
+                        [&] {
+                            rapidjson::Document bookJson{rapidjson::kObjectType, &allocator};
+                            const BookId bookIdCanon = blockIdx * m_blockInfo.dimension + book->id();
+                            bookJson.AddMember("bookId", rapidjson::Value{bookIdCanon}, allocator);
+                            exchange->L3Record().at(book->id()).jsonSerialize(bookJson, "record");
+                            rapidjson::Document bidAskJson{&allocator};
+                            book->jsonSerialize(bidAskJson);
+                            bookJson.AddMember("bid", bidAskJson["bid"], allocator);
+                            bookJson.AddMember("ask", bidAskJson["ask"], allocator);
+                            return bookJson;
+                        }().Move(),
+                        allocator);
+                }
+            }
+        };
+        json::serializeHelper(json, "books", serializeBooks);
+        // Accounts.
+        auto serializeAccounts = [this](rapidjson::Document& json) {
+            json.SetObject();
+            auto& allocator = json.GetAllocator();
+            const auto& reprSimu = m_simulations.front();
+            for (AgentId agentId : views::keys(reprSimu->exchange()->accounts())) {
+                if (agentId < 0) continue;
+                const auto agentIdStr = std::to_string(agentId);
+                const char* agentIdCStr = agentIdStr.c_str();
+                json.AddMember(
+                    rapidjson::Value{agentIdCStr, allocator},
+                    rapidjson::Document{rapidjson::kObjectType, &allocator}.Move(),
+                    allocator);
+                json[agentIdCStr].AddMember("agentId", rapidjson::Value{agentId}, allocator);
+                json[agentIdCStr].AddMember("holdings", rapidjson::Document{rapidjson::kArrayType, &allocator}, allocator);
+                json[agentIdCStr].AddMember("orders", rapidjson::Document{rapidjson::kArrayType, &allocator}, allocator);
+                json[agentIdCStr].AddMember("loans", rapidjson::Document{rapidjson::kArrayType, &allocator}, allocator);
+                rapidjson::Document feesJson{rapidjson::kObjectType, &allocator};
+                for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
+                    const auto exchange = simulation->exchange();
+                    const auto books = exchange->books();
+                    const auto& account = exchange->accounts().at(agentId);
+                    const auto feePolicy = exchange->clearingManager().feePolicy();
+                    for (const auto& book : books) {
+                        const BookId bookIdCanon = blockIdx * m_blockInfo.dimension + book->id();
+                        json[agentIdCStr]["orders"].PushBack(
+                            rapidjson::Document{rapidjson::kArrayType, &allocator}.Move(), allocator);
+                        json[agentIdCStr]["holdings"].PushBack(
+                            [&] {
+                                rapidjson::Document holdingsJson{&allocator};
+                                account.at(book->id()).jsonSerialize(holdingsJson);
+                                return holdingsJson;
+                            }().Move(),
+                            allocator);
+                        json[agentIdCStr]["loans"].PushBack(
+                            [&] {
+                                rapidjson::Document loansObjectJson{rapidjson::kObjectType, &allocator};
+                                for (const auto& [id, loan] : account.at(book->id()).m_loans) {
+                                    rapidjson::Document loanJson{rapidjson::kObjectType, &allocator};
+                                    loanJson.AddMember("id", rapidjson::Value{id}, allocator);
+                                    loanJson.AddMember("amount", rapidjson::Value{taosim::util::decimal2double(loan.amount())}, allocator);
+                                    loanJson.AddMember("currency", rapidjson::Value{
+                                        std::to_underlying(loan.direction() == OrderDirection::BUY ? Currency::QUOTE : Currency::BASE)
+                                    }, allocator);
+                                    loanJson.AddMember("baseCollateral", rapidjson::Value{taosim::util::decimal2double(loan.collateral().base())}, allocator);
+                                    loanJson.AddMember("quoteCollateral", rapidjson::Value{taosim::util::decimal2double(loan.collateral().quote())}, allocator);
+                                    const auto idStr = std::to_string(id);
+                                    const char* idCStr = idStr.c_str();
+                                    loansObjectJson.AddMember(rapidjson::Value{idCStr, allocator}, loanJson, allocator);
+                                }
+                                return loansObjectJson;
+                            }().Move(),
+                            allocator);
+                        json::serializeHelper(
+                            feesJson,
+                            std::to_string(bookIdCanon).c_str(),
+                            [&](rapidjson::Document& feeJson) {
+                                feeJson.SetObject();
+                                auto& allocator = feeJson.GetAllocator();
+                                feeJson.AddMember(
+                                    "volume",
+                                    rapidjson::Value{util::decimal2double(
+                                        feePolicy->agentVolume(book->id(), agentId))},
+                                    allocator);
+                                const auto rates = feePolicy->getRates(book->id(), agentId);
+                                feeJson.AddMember(
+                                    "makerFeeRate",
+                                    rapidjson::Value{util::decimal2double(rates.maker)},
+                                    allocator);
+                                feeJson.AddMember(
+                                    "takerFeeRate",
+                                    rapidjson::Value{util::decimal2double(rates.taker)},
+                                    allocator);
+                            });
+                    }
+                }
+                json[agentIdCStr].AddMember("fees", feesJson, allocator);
+            }
+            for (const auto& [blockIdx, simulation] : views::enumerate(m_simulations)) {
+                const auto books = simulation->exchange()->books();
+                for (const auto& book : books) {
+                    const BookId bookIdCanon = blockIdx * m_blockInfo.dimension + book->id();
+                    auto serializeSide = [&](OrderDirection side) {
+                        const auto& levels =
+                            side == OrderDirection::BUY ? book->buyQueue() : book->sellQueue();
+                        for (const auto& level : levels) {
+                            for (const auto& tick : level) {
+                                const auto [agentId, clientOrderId] =
+                                    books[book->id()]->orderToClientInfo().at(tick->id());
+                                if (agentId < 0) continue;
+                                const auto agentIdStr = std::to_string(agentId);
+                                const char* agentIdCStr = agentIdStr.c_str();
+                                rapidjson::Document orderJson{&allocator};
+                                tick->jsonSerialize(orderJson);
+                                json::setOptionalMember(orderJson, "clientOrderId", clientOrderId);
+                                json[agentIdCStr]["orders"][bookIdCanon].PushBack(orderJson, allocator);
+                            }
+                        }
+                    };
+                    serializeSide(OrderDirection::BUY);
+                    serializeSide(OrderDirection::SELL);
+                }
+            }
+        };
+        json::serializeHelper(json, "accounts", serializeAccounts);
+    };
+
+    rapidjson::Document json{rapidjson::kObjectType};
+    serialize(json);
+    return json;
 }
 
 //-------------------------------------------------------------------------
@@ -1117,7 +1129,7 @@ void SimulationManager::setupLogDir(pugi::xml_node node)
 net::awaitable<void> SimulationManager::asyncSendOverNetwork(
     const rapidjson::Value& reqBody, const std::string& endpoint, rapidjson::Document& resJson)
 {
-    const auto& representativeSimulation = m_simulations.front();
+    const auto& reprSimu = m_simulations.front();
 
 retry:
     auto resolver =
@@ -1138,7 +1150,7 @@ retry:
     auto [e1, endpoints] = std::get<0>(endpointsVariant);
     while (e1) {
         const auto loc = std::source_location::current();
-        representativeSimulation->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e1.what());
+        reprSimu->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e1.what());
         attempts++;
         fmt::println("Unable to resolve connection to validator at {}:{}{} - Retrying (Attempt {})", m_netInfo.host, m_netInfo.port, endpoint, attempts);
         std::this_thread::sleep_for(10s);
@@ -1159,7 +1171,7 @@ retry:
     auto [e2, _2] = std::get<0>(connectVariant);
     while (e2) {
         const auto loc = std::source_location::current();
-        representativeSimulation->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e2.what());
+        reprSimu->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e2.what());
         attempts++;
         fmt::println("Unable to connect to validator at {}:{}{} - Retrying (Attempt {})", m_netInfo.host, m_netInfo.port, endpoint, attempts);
         std::this_thread::sleep_for(10s);
@@ -1183,7 +1195,7 @@ retry:
     auto [e3, _3] = std::get<0>(writeVariant);
     while (e3) {
         const auto loc = std::source_location::current();
-        representativeSimulation->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e3.what());
+        reprSimu->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e3.what());
         attempts++;
         fmt::println("Unable to send request to validator at {}:{}{} - Retrying (Attempt {})", m_netInfo.host, m_netInfo.port, endpoint, attempts);
         goto retry;
@@ -1203,7 +1215,7 @@ retry:
     auto [e4, _4] = std::get<0>(readVariant);
     while (e4) {
         const auto loc = std::source_location::current();
-        representativeSimulation->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e4.what());
+        reprSimu->logDebug("{}#L{}: {}:{}: {}", loc.file_name(), loc.line(), m_netInfo.host, m_netInfo.port, e4.what());
         attempts++;          
         fmt::println("Unable to read response from validator at {}:{}{} : {} - re-sending request.", m_netInfo.host, m_netInfo.port, endpoint, e4.what(), attempts);
         goto retry;

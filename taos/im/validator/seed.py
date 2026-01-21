@@ -137,8 +137,7 @@ def seed(config):
         nonlocal last_seed, seed_count, pending_seed_data
         nonlocal last_external, external_count, pending_external_data
         nonlocal next_sampled_external
-        
-        # Check for log directory changes
+
         check_log_dir_change()
         
         match trade['product_id']:
@@ -152,8 +151,7 @@ def seed(config):
     def on_binance_trade(trade: dict):
         nonlocal last_seed, seed_count, pending_seed_data
         nonlocal last_external, external_count, pending_external_data
-        
-        # Check for log directory changes
+
         check_log_dir_change()
         
         match trade['product_id']:
@@ -250,7 +248,6 @@ def seed(config):
     
     def connect() -> None:
         nonlocal last_reconnect_time, seed_exchange, seed_client
-        # Rate-limit reconnects
         time_since_reconnect = time.time() - last_reconnect_time
         if time_since_reconnect < reconnect_cooldown:
             bt.logging.debug(
@@ -359,6 +356,219 @@ def seed(config):
             bt.logging.error(f"Exception in seed loop: {ex}")
             bt.logging.debug(traceback.format_exc())
             time.sleep(2)            
+            
+def seed_thread(self) -> None:
+        """
+        Retrieve data for use as simulation fundamental price and external seed, and record to simulator-accessible location.
+        This process is run in a separate thread parallel to the FastAPI server.
+        """
+        while True:
+            try:
+                self.seed_count = 0
+                self.seed_filename = None
+                self.last_seed_count = self.seed_count
+                self.last_seed = None
+                self.pending_seed_data = ''
+                
+                self.external_count = 0
+                self.sampled_external_count = 0
+                self.external_filename = None
+                self.sampled_external_filename = None
+                self.last_external_count = self.external_count
+                self.last_external = None
+                self.last_sampled_external = None
+                self.next_sampled_external = None
+                self.next_external_sampling_time = None
+                self.pending_external_data = ''
+                self.seed_exchange = 'coinbase'
+                
+                def on_coinbase_trade(trade : dict):
+                    match trade['product_id']:
+                        case self.config.simulation.seeding.fundamental.symbol.coinbase:
+                            record_seed(trade)
+                        case self.config.simulation.seeding.external.symbol.coinbase:
+                            if self.next_external_sampling_time and trade['received'] <= self.next_external_sampling_time:
+                                self.next_sampled_external = trade
+                            record_external(trade)
+
+                def on_binance_trade(trade : dict):
+                    match trade['product_id']:
+                        case self.config.simulation.seeding.fundamental.symbol.binance:
+                            record_seed(trade)
+                        case self.config.simulation.seeding.external.symbol.binance:
+                            record_external(trade)
+
+                def record_seed(trade : dict) -> None:
+                    try:
+                        seed = trade['price']
+                        if not self.last_seed or self.last_seed['price'] != seed:
+                            if not self.simulation.logDir:
+                                self.seed_count += 1
+                                self.pending_seed_data += f"{self.seed_count},{seed}\n"
+                                if len(self.pending_seed_data.split("\n")) > 10000:
+                                    self.pending_seed_data = "\n".join(self.pending_seed_data.split("\n")[-10000:])
+                            else:
+                                if self.seed_filename != os.path.join(self.simulation.logDir,"fundamental_seed.csv"):
+                                    self.last_seed = None
+                                    self.seed_count = 0
+                                    self.pending_seed_data = ''
+                                if not self.last_seed:
+                                    self.seed_filename = os.path.join(self.simulation.logDir,"fundamental_seed.csv")
+                                    if os.path.exists(self.seed_filename) and os.stat(self.seed_filename).st_size > 0:
+                                        with open(self.seed_filename) as f:
+                                            for line in f:
+                                                self.seed_count += 1
+                                    self.seed_file = open(self.seed_filename,'a')
+                                    self.seed_file.write(self.pending_seed_data)
+                                    self.pending_seed_data = ''
+                                self.seed_count += 1
+                                self.seed_file.write(f"{self.seed_count},{seed}\n")
+                                self.seed_file.flush()
+                                self.last_seed = trade
+                    except Exception as ex:
+                        bt.logging.error(f"Exception in seed handling : Seed={seed} | Error={ex}")
+                        
+                def record_external(trade : dict) -> None:
+                    try:
+                        if not self.last_external or self.last_external != trade:
+                            if not self.simulation.logDir:
+                                self.external_count += 1
+                                self.pending_external_data += f"{self.external_count},{trade['price']},{trade['time']}\n"
+                                if len(self.pending_external_data.split("\n")) > 10000:
+                                    self.pending_external_data = "\n".join(self.pending_external_data.split("\n")[-10000:])
+                            else:
+                                if self.external_filename != os.path.join(self.simulation.logDir,"external_seed.csv"):
+                                    self.last_external = None
+                                    self.external_count = 0
+                                    self.pending_external_data = ''
+                                if not self.last_external:
+                                    self.external_filename = os.path.join(self.simulation.logDir,"external_seed.csv")
+                                    if os.path.exists(self.external_filename) and os.stat(self.external_filename).st_size > 0:
+                                        with open(self.external_filename) as f:
+                                            for line in f:
+                                                self.external_count += 1
+                                    self.external_file = open(self.external_filename,'a')
+                                    self.external_file.write(self.pending_external_data)
+                                    self.pending_external_data = ''
+                                    
+                                    self.sampled_external_filename = os.path.join(self.simulation.logDir,"external_seed_sampled.csv")
+                                    if os.path.exists(self.sampled_external_filename) and os.stat(self.sampled_external_filename).st_size > 0:
+                                        with open(self.sampled_external_filename) as f:
+                                            for line in f:
+                                                self.sampled_external_count += 1
+                                    self.sampled_external_file = open(self.sampled_external_filename,'a')
+                                self.external_count += 1
+                                self.external_file.write(f"{self.external_count},{trade['price']},{trade['time']}\n")
+                                self.external_file.flush()
+                                self.last_external = trade
+                                
+                    except Exception as ex:
+                        bt.logging.error(f"Exception in external price handling : trade={trade} | Error={ex}")
+                    
+                last_reconnect_time = 0
+                reconnect_cooldown = 5.0
+                
+                def connect() -> None:
+                    nonlocal last_reconnect_time
+                    
+                    # Rate-limit reconnects
+                    time_since_reconnect = time.time() - last_reconnect_time
+                    if time_since_reconnect < reconnect_cooldown:
+                        bt.logging.debug(
+                            f"Reconnect on cooldown ({time_since_reconnect:.1f}s < {reconnect_cooldown}s), waiting..."
+                        )
+                        time.sleep(reconnect_cooldown - time_since_reconnect)
+                    
+                    attempts = 0
+                    while True:
+                        attempts += 1
+                        self.seed_exchange='coinbase'
+                        self.seed_client, ex = connect_coinbase([self.config.simulation.seeding.fundamental.symbol.coinbase, self.config.simulation.seeding.external.symbol.coinbase], on_coinbase_trade)
+                        if not self.seed_client:
+                            bt.logging.warning(f"Unable to connect to Coinbase Trades Stream! {ex}. Trying Binance.")
+                            self.seed_exchange='binance'
+                            self.seed_client, ex = connect_binance([self.config.simulation.seeding.fundamental.symbol.binance,self.config.simulation.seeding.external.symbol.binance], on_binance_trade)
+                            if not self.seed_client:
+                                bt.logging.error(f"Unable to connect to Binance Trades Stream : {ex}.")
+                                if attempts >= 3:
+                                    self.pagerduty_alert(f"Failed connecting to seed streams after {attempts} attempts")
+                                time.sleep(min(attempts * 2, 30))  # Exponential backoff capped at 30s
+                            else:
+                                last_reconnect_time = time.time()
+                                bt.logging.info(f"Connected to Binance seed stream")
+                                break
+                        else:
+                            last_reconnect_time = time.time()
+                            bt.logging.info(f"Connected to Coinbase seed stream")
+                            break
+                
+                def check_seeds():
+                    reconnect = False
+                    current_time = time.time()
+                    
+                    if self.last_seed:
+                        self.seed_file.flush()
+                        time_since_seed = current_time - self.last_seed['received']
+                        if time_since_seed > 10:
+                            bt.logging.warning(f"No new seed in last {time_since_seed:.1f}s! Will reconnect.")
+                            if self.seed_exchange=='coinbase' and self.seed_client._is_websocket_open():
+                                try:
+                                    self.seed_client.close()
+                                except:
+                                    pass
+                            reconnect = True
+                            self.last_seed = None
+                            self.seed_count = 0
+                        self.last_seed_count = self.seed_count
+                        
+                    if self.last_external:
+                        self.external_file.flush()
+                        time_since_external = current_time - self.last_external['received']
+                        if time_since_external > 120:
+                            bt.logging.warning(f"No new external price in last {time_since_external:.1f}s! Will reconnect.")
+                            if self.seed_exchange=='coinbase' and self.seed_client._is_websocket_open():
+                                try:
+                                    self.seed_client.close()
+                                except:
+                                    pass
+                            reconnect = True
+                            self.last_external = None
+                            self.external_count = 0
+                        sampling_period = self.config.simulation.seeding.external.sampling_seconds
+                        if not self.next_external_sampling_time or not self.next_sampled_external:
+                            seconds_since_start_of_day = current_time % 86400
+                            start_of_day = current_time - seconds_since_start_of_day
+                            self.next_external_sampling_time = start_of_day + seconds_since_start_of_day + (sampling_period - (seconds_since_start_of_day % sampling_period))
+                        if current_time >= self.next_external_sampling_time and self.next_sampled_external:
+                            self.sampled_external_count += 1
+                            self.next_sampled_external['received'] = self.next_external_sampling_time
+                            self.sampled_external_file.write(f"{self.sampled_external_count},{self.next_sampled_external['price']}\n")
+                            self.sampled_external_file.flush()
+                            self.last_sampled_external = self.next_sampled_external
+                            self.last_sampled_external['received'] = self.next_external_sampling_time
+                            self.next_external_sampling_time = self.next_external_sampling_time + sampling_period
+                    return not reconnect
+
+                connect()
+                while True:
+                    try:
+                        if self.seed_exchange=='coinbase':
+                            maintain_coinbase(self.seed_client, connect, check_seeds, 1)
+                        if self.seed_exchange=='binance':
+                            maintain_binance(self.seed_client, connect, check_seeds, 1)
+                    except Exception as ex:
+                        bt.logging.error(f"Exception in seed loop : {ex}")
+                        bt.logging.debug(traceback.format_exc())
+                        time.sleep(2)
+                        
+            except Exception as ex:
+                bt.logging.error(f"Fatal error in seeding process: {ex}")
+                bt.logging.error(traceback.format_exc())
+                self.pagerduty_alert(
+                    f"Seeding process crashed, restarting in 10s: {ex}", 
+                    details={"traceback": traceback.format_exc()}
+                )
+                time.sleep(10)
 
 
 if __name__ == "__main__":

@@ -122,58 +122,51 @@ def add_im_validator_args(cls, parser):
     )
 
     parser.add_argument(
-        "--scoring.sharpe.parallel_workers",
+        "--scoring.kappa.parallel_workers",
         type=int,
-        help="Number of parallel workers to use in Sharpe calculation. (0 => no parallelization, -1 => auto [half available cores])",
+        help="Number of parallel workers to use in Kappa-3 calculation. (0 => no parallelization, -1 => auto [half available cores])",
         default=-1,
     )
 
     parser.add_argument(
-        "--scoring.sharpe.lookback",
+        "--scoring.kappa.min_lookback",
         type=int,
-        help="Number of previous liquidation value observations to use for Sharpe ratio calculation.",
-        default=3600,
-    )    
-    
-    parser.add_argument(
-        "--scoring.sharpe.unrealized_weight",
-        type=int,
-        help="The weight assigned to unrealized PnL score in the reward function.",
-        default=0.0,
-    )
-    
-    parser.add_argument(
-        "--scoring.sharpe.realized_weight",
-        type=int,
-        help="The weight assigned to realized PnL score in the reward function.",
-        default=1.0,
-    )
-    
-    parser.add_argument(
-        "--scoring.sharpe.min_realized_observations",
-        type=int,
-        help="The minimum number of realized PnL observations (round-trips) required in the assessment window for realized Sharpe score to be assigned.",
-        default=6,
-    )
-
-    parser.add_argument(
-        "--scoring.sharpe.min_lookback",
-        type=int,
-        help="Minimum number of previous observations required for Sharpe calculation.",
+        help="Minimum number of previous observations required for Kappa calculation.",
         default=1800,
     )
 
     parser.add_argument(
-        "--scoring.sharpe.normalization_min",
+        "--scoring.kappa.lookback",
+        type=int,
+        help="Number of previous realized P&L observations to use for Kappa-3 ratio calculation.",
+        default=3600,
+    )
+
+    parser.add_argument(
+        "--scoring.kappa.tau",
         type=float,
-        help="Sharpe values are normalized to fall within a range so as to produce non-negative value and facilitate scoring calculations.  This is the minimum value in the normalization range.",
+        help="Threshold return parameter for Kappa-3 calculation (minimum acceptable return per period).",
+        default=0.0,
+    )
+    
+    parser.add_argument(
+        "--scoring.kappa.min_realized_observations",
+        type=int,
+        help="The minimum number of realized P&L observations (round-trips) required in the assessment window for Kappa-3 score to be assigned.",
+        default=6,
+    )
+
+    parser.add_argument(
+        "--scoring.kappa.normalization_min",
+        type=float,
+        help="Kappa-3 values are normalized to fall within a range so as to produce non-negative value and facilitate scoring calculations. This is the minimum value in the normalization range.",
         default=-10.0,
     )
 
     parser.add_argument(
-        "--scoring.sharpe.normalization_max",
+        "--scoring.kappa.normalization_max",
         type=float,
-        help="Sharpe values are normalized to fall within a range so as to produce non-negative value and facilitate scoring calculations.  This is the maximum value in the normalization range.",
+        help="Kappa-3 values are normalized to fall within a range so as to produce non-negative value and facilitate scoring calculations. This is the maximum value in the normalization range.",
         default=10.0,
     )
     
@@ -193,7 +186,7 @@ def add_im_validator_args(cls, parser):
     
     parser.add_argument(
         "--scoring.activity.impact",
-        type=int,
+        type=float,
         help="Multiplied onto activity factors to modify the impact of volume weighting in scoring calculations.",
         default=0.33,
     )
@@ -201,7 +194,7 @@ def add_im_validator_args(cls, parser):
     parser.add_argument(
         "--scoring.activity.decay_grace_period",
         type=int,
-        help="The period in simulation timesteps for which the decay factor is unaccelerated.  After this duration of not trading/round-tripping, activity factor decay accelerates.",
+        help="The period in simulation timesteps for which the decay factor is unaccelerated. After this duration of not trading/round-tripping, activity factor decay accelerates.",
         default=600_000_000_000,
     )
 
@@ -215,14 +208,14 @@ def add_im_validator_args(cls, parser):
     parser.add_argument(
         "--scoring.inventory.min_balance_ratio_multiplier",
         type=float,
-        help="The minimum value for the multiplier applied to Sharpe scores to penalize holding of small ratio of BASE currency.",
+        help="The minimum value for the multiplier applied to Kappa-3 scores to penalize holding of small ratio of BASE currency.",
         default=0.5,
     )
 
     parser.add_argument(
         "--scoring.inventory.max_balance_ratio_multiplier",
         type=float,
-        help="The maximum value for the multiplier applied to Sharpe scores to reward holding larger ratio of BASE currency.",
+        help="The maximum value for the multiplier applied to Kappa-3 scores to reward holding larger ratio of BASE currency.",
         default=1.2,
     )
 

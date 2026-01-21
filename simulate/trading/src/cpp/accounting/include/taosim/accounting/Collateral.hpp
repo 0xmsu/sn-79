@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "taosim/decimal/decimal.hpp"
+#include <taosim/decimal/decimal.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -57,10 +57,7 @@ struct fmt::formatter<taosim::accounting::Collateral>
     auto format(const taosim::accounting::Collateral& coll, FormatContext& ctx) const
     {
         return fmt::format_to(
-            ctx.out(),
-            "Collateral{{.base = {}, .quote = {}}}",
-            coll.base(),
-            coll.quote());
+            ctx.out(), "Collateral{{.base = {}, .quote = {}}}", coll.base(), coll.quote());
     }
 };
 

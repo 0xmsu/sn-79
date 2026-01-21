@@ -1,8 +1,9 @@
-<Simulation id="{{BG_CONFIG}}" start="0" step="1000000000" duration="86400000000000"
+<Simulation start="0" step="1000000000" duration="86400000000000"
     logWindow="3600000000000" timescale="ns"
-    enableCheckpointing="0" traceTime="1" debug="0" error="1" blockCount="8"
+    traceTime="1" debug="0" error="1" blockCount="8"
     host="localhost" port="8000" bookStateEndpoint="/orderbook"
-    generalMsgEndpoint="/account" useMessagePack="1" measureStepWallClockTime="1">
+    generalMsgEndpoint="/account" useMessagePack="1" measureStepWallClockTime="1"
+    ckptIntervalInSteps="60" ckptNumLastFilesToKeep="3" ckptMeasureWallClockTime="1" ckptNumWorkers="8">
     <Agents>
         <MultiBookExchangeAgent name="EXCHANGE" remoteAgentCount="256" gracePeriod="600000000000"
             priceDecimals="2" volumeDecimals="4" baseDecimals="4" quoteDecimals="10"
@@ -11,13 +12,13 @@
 		     <FeePolicy type="dynamic" historySlots="300"
                 makerFee="0.000" takerFee="0.00023" maxMakerRate="0.0075" maxTakerRate="0.0075"
                 targetMTR="0.4" shapeMakerFee="2" shapeMakerRebate="2"/>
-            <Books instanceCount="5" algorithm="PriceTime" maxDepth="21" detailedDepth="5">
+            <Books instanceCount="5" maxDepth="21" detailedDepth="5">
                 <Processes>
-                    <FundamentalPrice name="fundamental" seedInterval="30000000000" mu="0.0" sigma="0.068"
-                        lambda="0.00206" muJump="0.0" sigmaJump="0.025" updatePeriod="30000000000"
-                        Hurst="0.80" epsilon="0.07"/>
+                    <FundamentalPrice name="fundamental" seedInterval="30000000000" mu="0.0" sigma="0.034"
+                        lambda="0.000206" muJump="0.0" sigmaJump="0.025" updatePeriod="30000000000"
+                        Hurst="0.75" epsilon="0.07"/>
                     <FuturesSignal name="external" lambda="0.001155" seedInterval="10000000000" updatePeriod="10000000000"/>
-                    <MagneticField name="magneticfield" numRows="32" beta="1.0" alpha="20.0" 
+                    <MagneticField name="magneticfield" numRows="32" beta="0.5" alpha="20.0" 
                         updatePeriod="60000000000"/>
                 </Processes>
             </Books>
@@ -65,9 +66,10 @@
             activationMidpoint="0.025"
             activationRate="100.0"
             immediateBase="600.0"
+            wakeDeviationCoef="0.5"
             wakeupTimeCoef="259200000000000"
             >
-            <VolumeDistribution type="lognormal" mu="2.0" sigma="0.9"/>
+            <VolumeDistribution type="lognormal" mu="1.8" sigma="0.9"/>
               <Balances>
                 <Base total="167000.0" maxLeverage="1" maxLoan="10000"/>
                 <Quote total="50000000.0" maxLeverage="1" maxLoan="10000"/>
@@ -82,14 +84,14 @@
             minOPLatency="1000000"
             maxOPLatency="50000000"
             opLatencyScaleRay="0.235"
-            tau="1"
+            tau="2"
             delta="750000000"
-            psiHFT_constant="250"
+            psiHFT_constant="100"
             gHFT="0.5"
             sigmaSqr="0.01"
             kappa="1.6"
             spread="0.0015"
-            orderMean="2.3"
+            orderMean="2.5"
             orderSTD="1.0"
             noiseRay="0.23"
             shiftPercentage="0.05"
@@ -116,11 +118,11 @@
 			meanVolume="2.3"
             tau="1800000000000"
             balanceCoef="0.90"
-            acdOmega="2.3"
+            acdOmega="2.5"
 			acdAlpha="0.45"
 			acdBeta="0.45"
             acdGamma="15.0"
-            sigmaExp="0.0000001"
+            sigmaExp="0.00000001"
             weight="1.0"
             minDMD="2000000000"
             maxDMD="600000000000"
@@ -130,8 +132,8 @@
                 scale="0.8"
                 shape="1.16"
                 seed="1337"
-                wealth="15000.0"
-                cap="1000000.0"
+                wealth="10000.0"
+                cap="500000.0"
                 price="300.0"
             />
 		</NoiseTraderAgent>
@@ -179,7 +181,7 @@
             HARA="2.0"
             GBMSigma="0.01"
             regimeChangeFlag="0"
-            acdOmega="2.3"
+            acdOmega="3.5"
             acdAlpha="0.45"
 			acdBeta="0.45"
             minDMD="2000000000"

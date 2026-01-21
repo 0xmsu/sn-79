@@ -29,6 +29,7 @@ class QueryService:
         - Wallet and dendrite client for querying miners
         - Service configuration
         - IPC resource placeholders
+        - Notification pipe
         - Internal running state
 
         Args:
@@ -49,6 +50,7 @@ class QueryService:
         self.response_queue = None
         self.request_shm = None
         self.response_shm = None
+        self.notify_fd = config.notify_fd if hasattr(config, 'notify_fd') else None
 
     def setup_ipc(self):
         """
@@ -107,12 +109,19 @@ class QueryService:
         This includes:
         - Setting up POSIX IPC
         - Ensuring a valid dendrite session is active
+        - Sending ready signal via pipe
 
         Returns:
             None
         """
         self.setup_ipc()
         DendriteManager.configure_session(self)
+        if self.notify_fd is not None:
+            try:
+                os.write(self.notify_fd, b'R')
+                bt.logging.info("Query service sent ready signal")
+            except Exception as e:
+                bt.logging.error(f"Query service failed to send ready signal: {e}")
         bt.logging.info("Query service initialized")
 
     def validate_responses(self, synapses: dict, request_data: dict, deregistered_uids: set) -> dict:
@@ -290,8 +299,13 @@ class QueryService:
                 }
         """
         gc_was_enabled = gc.isenabled()
+        old_dendrite = None
         try:
             gc.disable()
+            
+            old_dendrite = self.dendrite
+            self.dendrite = bt.dendrite(wallet=self.wallet)
+            
             class MinimalMetagraph:
                 def __init__(self, axons, uids):
                     self.axons = axons
@@ -469,6 +483,16 @@ class QueryService:
             )
             bt.logging.info(f"Validated Responses ({time.time()-validate_start:.4f}s).")
 
+            del compressed_books
+            del axon_synapses
+            del query_tasks
+            del done
+            del pending
+            del self.metagraph
+            
+            if old_dendrite:
+                del old_dendrite
+
             return {
                 'success': True,
                 'responses': synapse_responses,
@@ -527,7 +551,6 @@ class QueryService:
                 command = message.decode('utf-8')
 
                 if command == 'query':
-                    gc.collect()
                     read_start = time.time()
                     bt.logging.info(f"Starting read, {read_start - receive_time:.4f}s after receive")                    
                     self.request_mem.seek(0)
@@ -545,19 +568,31 @@ class QueryService:
                     bt.logging.info(f"Read Query request data ({time.time()-read_start:.4f}s).")
 
                     result = await self.query_miners(request_data)
+                    del request_data
 
                     write_start = time.time()
                     result_bytes = pickle.dumps(result, protocol=5)
-                    self.response_mem.seek(0)
-                    self.response_mem.write(struct.pack('Q', 0))
-                    self.response_mem.write(result_bytes)
-                    self.response_mem.flush()
+                    del result
                     self.response_mem.seek(0)
                     self.response_mem.write(struct.pack('Q', len(result_bytes)))
+                    self.response_mem.write(result_bytes)
                     self.response_mem.flush()
+                    del result_bytes
                     
                     bt.logging.info(f"Wrote Query response data ({time.time()-write_start:.4f}s).")
-
+                    
+                    if self.notify_fd is not None:
+                        try:
+                            os.write(self.notify_fd, b'1')
+                            bt.logging.info("Sent query completion notification")
+                        except Exception as e:
+                            bt.logging.error(f"Failed to send notification: {e}")
+                    else:
+                        bt.logging.error("Cannot send notification - notify_fd is None!")
+                    
+                    gc_start = time.time()
+                    gc.collect(generation=2)
+                    bt.logging.info(f"Query GC completed in {time.time()-gc_start:.4f}s")
                 elif command == 'shutdown':
                     bt.logging.info("Shutdown command received")
                     self.running = False
@@ -621,7 +656,9 @@ if __name__ == '__main__':
     parser.add_argument('--compression.level', type=int, default=1)
     parser.add_argument('--compression.engine', type=str, default='zlib')
     parser.add_argument('--compression.parallel_workers', type=int, default=0)
-    parser.add_argument('--cpu-cores', type=str, default=None)
+    parser.add_argument('--cpu-cores', type=str, default=None)    
+    parser.add_argument('--notify-fd', type=int, default=None)
+    
 
     config = bt.config(parser)
     bt.logging(config=config)

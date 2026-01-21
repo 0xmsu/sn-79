@@ -18,6 +18,7 @@ target_link_libraries(replay
     PRIVATE
         taosim::book
         taosim::decimal
+        taosim::filesystem
         taosim::message
         taosim::serialization
         taosim::util

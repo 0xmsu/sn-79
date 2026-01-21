@@ -5,9 +5,6 @@
 #pragma once
 
 #include <cstdint>
-
-#include <pugixml.hpp>
-
 #include <source_location>
 
 //-------------------------------------------------------------------------

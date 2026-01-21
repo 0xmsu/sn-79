@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/ipc/PosixMessageQueue.hpp"
+#include <taosim/ipc/PosixMessageQueue.hpp>
 
-#include "taosim/ipc/util.hpp"
+#include <taosim/ipc/util.hpp>
 
 #include <fmt/format.h>
 

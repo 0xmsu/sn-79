@@ -5,7 +5,7 @@
 #pragma once
 
 #include "JsonSerializable.hpp"
-#include "mp.hpp"
+#include <taosim/mp/mp.hpp>
 #include "util.hpp"
 
 //-------------------------------------------------------------------------
@@ -28,6 +28,8 @@ public:
 
     [[nodiscard]] decltype(auto) begin(this auto&& self) { return self.m_entries.begin(); }
     [[nodiscard]] decltype(auto) end(this auto&& self) { return self.m_entries.end(); }
+
+    [[nodiscard]] auto&& entries(this auto&& self) noexcept { return self.m_entries; }
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const

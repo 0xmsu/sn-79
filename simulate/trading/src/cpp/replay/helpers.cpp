@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/replay/helpers.hpp"
+#include <taosim/replay/helpers.hpp>
 
 #include <boost/algorithm/string.hpp>
 #include <rapidcsv.h>
@@ -23,20 +23,6 @@ fs::path cleanReplayPath(const std::string& path)
         return pathStr.substr(0, pathStr.size() - 1);
     }
     return pathStr;
-}
-
-//-------------------------------------------------------------------------
-
-std::vector<fs::path> collectMatchingPaths(const std::regex& pat, const fs::path& dir)
-{
-    std::vector<fs::path> res;
-    for (auto&& entry : fs::directory_iterator(dir)) {
-        const auto path = entry.path();
-        if (entry.is_regular_file() && std::regex_match(path.filename().string(), pat)) {
-            res.push_back(path);
-        }
-    }
-    return res;
 }
 
 //-------------------------------------------------------------------------
@@ -68,7 +54,6 @@ std::unordered_map<Timestamp, decimal_t>
             return DEC(0.5) * (bid + ask);
         });
 
-    
     return views::zip(timestamps, midPrices)
         | ranges::to<std::unordered_map<Timestamp, decimal_t>>;
 }

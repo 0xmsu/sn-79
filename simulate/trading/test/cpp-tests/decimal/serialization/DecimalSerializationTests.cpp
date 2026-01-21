@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "taosim/decimal/serialization/decimal.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include "taosim/serialization/msgpack/common.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>

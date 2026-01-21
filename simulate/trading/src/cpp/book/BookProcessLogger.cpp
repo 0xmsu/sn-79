@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "BookProcessLogger.hpp"
+#include <taosim/book/BookProcessLogger.hpp>
 
 #include "Simulation.hpp"
 
@@ -11,19 +11,26 @@
 
 //-------------------------------------------------------------------------
 
+namespace taosim::book
+{
+
+//-------------------------------------------------------------------------
+
 BookProcessLogger::BookProcessLogger(
     const fs::path& filepath, std::span<const double> X0s, Simulation* simulation)
     : m_filepath{filepath}
 {
-    fs::remove(filepath);
+    const bool fileExisted = fs::exists(m_filepath);
 
     m_logger = std::make_unique<spdlog::logger>(
         fmt::format("BookProcessLogger-{}", filepath.stem().c_str()),
-        std::make_unique<spdlog::sinks::basic_file_sink_st>(filepath));
+        std::make_unique<spdlog::sinks::basic_file_sink_st>(m_filepath));
     m_logger->set_level(spdlog::level::trace);
     m_logger->set_pattern("%v");
 
-    m_logger->trace(fmt::format(
+    if (fileExisted) return;
+
+    const auto headerAndX0s = fmt::format(
         "{},Timestamp\n"
         "{},0",
         fmt::join(
@@ -31,7 +38,10 @@ BookProcessLogger::BookProcessLogger(
                 simulation->blockIdx() * X0s.size(),
                 simulation->blockIdx() * X0s.size() + X0s.size()),
             ","),
-        fmt::join(X0s, ",")));
+        fmt::join(X0s, ",")
+    );
+
+    m_logger->trace(headerAndX0s);
     m_logger->flush();
 }
 
@@ -103,5 +113,9 @@ BookProcessLogger::BookProcessLogger(const fs::path& filepath)
     m_logger->set_level(spdlog::level::trace);
     m_logger->set_pattern("%v");
 }
+
+//-------------------------------------------------------------------------
+
+}  // namespace taosim::book
 
 //-------------------------------------------------------------------------

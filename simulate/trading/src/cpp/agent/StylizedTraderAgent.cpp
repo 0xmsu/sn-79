@@ -2,17 +2,14 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "StylizedTraderAgent.hpp"
+#include <taosim/agent/StylizedTraderAgent.hpp>
 
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/MessagePayload.hpp"
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/MessagePayload.hpp>
 #include "DistributionFactory.hpp"
-#include "MagneticField.hpp"
+#include <taosim/process/MagneticField.hpp>
 #include "RayleighDistribution.hpp"
 #include "Simulation.hpp"
-
-#include <boost/algorithm/string/regex.hpp>
-#include <boost/bimap.hpp>
 
 #include <boost/accumulators/accumulators.hpp>
 #include <boost/accumulators/statistics/stats.hpp>
@@ -28,6 +25,8 @@ namespace br = boost::random;
 
 //-------------------------------------------------------------------------
 
+namespace taosim::agent
+{
 
 //-------------------------------------------------------------------------
 
@@ -415,9 +414,11 @@ void StylizedTraderAgent::handleSimulationStart()
                 fmt::format("{}_{}", m_baseName, chosenAgent),
                 "WAKEUP",
                 MessagePayload::create<RetrieveL1Payload>(bookId));  
-            const auto field = dynamic_cast<MagneticField*>(simulation()->exchange()->process("magneticfield",bookId));
+            const auto field = dynamic_cast<taosim::process::MagneticField*>(
+                simulation()->exchange()->process("magneticfield",bookId));
             float initValue = std::exp((float) m_maxDelay/3.0f);
-            field->insertDurationComp(m_baseName,DurationComp{.delay=initValue, .psi=initValue});
+            field->insertDurationComp(
+                m_baseName, taosim::process::DurationComp{.delay=initValue, .psi=initValue});
         }
     }
 }
@@ -928,7 +929,8 @@ Timestamp StylizedTraderAgent::marketFeedLatency()
 
 Timestamp StylizedTraderAgent::decisionMakingDelay(BookId bookId)
 {
-    const auto field = dynamic_cast<MagneticField*>(simulation()->exchange()->process("magneticfield", bookId));
+    const auto field = dynamic_cast<taosim::process::MagneticField*>(
+        simulation()->exchange()->process("magneticfield", bookId));
     const auto lastDurationComp = field->getDurationComp(m_baseName);
     float lastDelay = lastDurationComp.delay;
     float psi_prev = lastDurationComp.psi; 
@@ -942,6 +944,6 @@ Timestamp StylizedTraderAgent::decisionMakingDelay(BookId bookId)
 
 //-------------------------------------------------------------------------
 
-// namespace taosim::agent
+}  // namespace taosim::agent
 
 //-------------------------------------------------------------------------

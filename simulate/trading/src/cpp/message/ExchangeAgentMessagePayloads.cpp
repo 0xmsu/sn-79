@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
 
 #include "json_util.hpp"
 #include "util.hpp"
@@ -18,14 +18,6 @@ void StartSimulationPayload::jsonSerialize(
         json.AddMember("logDir", rapidjson::Value{logDir.c_str(), allocator}, allocator);
     };
     taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void StartSimulationPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
 }
 
 //-------------------------------------------------------------------------
@@ -103,14 +95,6 @@ void PlaceOrderMarketPayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void PlaceOrderMarketPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-
-}
-
-//-------------------------------------------------------------------------
-
 PlaceOrderMarketPayload::Ptr PlaceOrderMarketPayload::fromJson(const rapidjson::Value& json)
 {
     return MessagePayload::create<PlaceOrderMarketPayload>(
@@ -152,20 +136,6 @@ void PlaceOrderMarketResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void PlaceOrderMarketResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("orderId", rapidjson::Value{}.SetUint(id), allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 PlaceOrderMarketResponsePayload::Ptr PlaceOrderMarketResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -184,20 +154,6 @@ void PlaceOrderMarketErrorResponsePayload::jsonSerialize(
         auto& allocator = json.GetAllocator();
         requestPayload->jsonSerialize(json, "requestPayload");
         errorPayload->jsonSerialize(json, "errorPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void PlaceOrderMarketErrorResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        requestPayload->checkpointSerialize(json, "requestPayload");
-        errorPayload->checkpointSerialize(json, "errorPayload");
     };
     taosim::json::serializeHelper(json, key, serialize);
 }
@@ -291,14 +247,6 @@ void PlaceOrderLimitPayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void PlaceOrderLimitPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-
-}
-
-//-------------------------------------------------------------------------
-
 PlaceOrderLimitPayload::Ptr PlaceOrderLimitPayload::fromJson(const rapidjson::Value& json)
 {
     return MessagePayload::create<PlaceOrderLimitPayload>(
@@ -351,20 +299,6 @@ void PlaceOrderLimitResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void PlaceOrderLimitResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("orderId", rapidjson::Value{id}, allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 PlaceOrderLimitResponsePayload::Ptr PlaceOrderLimitResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -382,19 +316,6 @@ void PlaceOrderLimitErrorResponsePayload::jsonSerialize(
         json.SetObject();
         requestPayload->jsonSerialize(json, "requestPayload");
         errorPayload->jsonSerialize(json, "errorPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void PlaceOrderLimitErrorResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        requestPayload->checkpointSerialize(json, "requestPayload");
-        errorPayload->checkpointSerialize(json, "errorPayload");
     };
     taosim::json::serializeHelper(json, key, serialize);
 }
@@ -424,14 +345,6 @@ void RetrieveOrdersPayload::jsonSerialize(rapidjson::Document& json, const std::
         json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
     };
     taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void RetrieveOrdersPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
 }
 
 //-------------------------------------------------------------------------
@@ -468,26 +381,6 @@ void RetrieveOrdersResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void RetrieveOrdersResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value ordersJson{rapidjson::kArrayType};
-        for (const auto& order : orders) {
-            rapidjson::Document orderJson{rapidjson::kObjectType, &allocator};
-            order.checkpointSerialize(orderJson);
-            ordersJson.PushBack(orderJson, allocator);
-        }
-        json.AddMember("orders", ordersJson, allocator);
-        json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 RetrieveOrdersResponsePayload::Ptr RetrieveOrdersResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -509,26 +402,6 @@ RetrieveOrdersResponsePayload::Ptr RetrieveOrdersResponsePayload::fromJson(
 //-------------------------------------------------------------------------
 
 void CancelOrdersPayload::jsonSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value cancellationsJson{rapidjson::kArrayType};
-        for (const taosim::event::Cancellation& cancellation : cancellations) {
-            rapidjson::Document cancellationJson{rapidjson::kObjectType, &allocator};
-            cancellation.jsonSerialize(cancellationJson);
-            cancellationsJson.PushBack(cancellationJson, allocator);
-        }
-        json.AddMember("cancellations", cancellationsJson, allocator);
-        json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void CancelOrdersPayload::checkpointSerialize(
     rapidjson::Document& json, const std::string& key) const
 {
     auto serialize = [this](rapidjson::Document& json) {
@@ -585,24 +458,6 @@ void CancelOrdersResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void CancelOrdersResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value orderIdsJson{rapidjson::kArrayType};
-        for (OrderID orderId : orderIds) {
-            orderIdsJson.PushBack(orderId, allocator);
-        }
-        json.AddMember("orderIds", orderIdsJson, allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 CancelOrdersResponsePayload::Ptr CancelOrdersResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -636,25 +491,6 @@ void CancelOrdersErrorResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void CancelOrdersErrorResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value orderIdsJson{rapidjson::kArrayType};
-        for (OrderID orderId : orderIds) {
-            orderIdsJson.PushBack(orderId, allocator);
-        }
-        json.AddMember("orderIds", orderIdsJson, allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
-        errorPayload->checkpointSerialize(json, "errorPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 CancelOrdersErrorResponsePayload::Ptr CancelOrdersErrorResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -680,26 +516,6 @@ void ClosePositionsPayload::jsonSerialize(
         for (const ClosePosition& closePosition : closePositions) {
             rapidjson::Document closePositionJson{rapidjson::kObjectType, &allocator};
             closePosition.jsonSerialize(closePositionJson);
-            closePositionsJson.PushBack(closePositionJson, allocator);
-        }
-        json.AddMember("closePositions", closePositionsJson, allocator);
-        json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void ClosePositionsPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value closePositionsJson{rapidjson::kArrayType};
-        for (const ClosePosition& closePosition : closePositions) {
-            rapidjson::Document closePositionJson{rapidjson::kObjectType, &allocator};
-            closePosition.checkpointSerialize(closePositionJson);
             closePositionsJson.PushBack(closePositionJson, allocator);
         }
         json.AddMember("closePositions", closePositionsJson, allocator);
@@ -747,24 +563,6 @@ void ClosePositionsResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void ClosePositionsResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value orderIdsJson{rapidjson::kArrayType};
-        for (OrderID orderId : orderIds) {
-            orderIdsJson.PushBack(orderId, allocator);
-        }
-        json.AddMember("orderIds", orderIdsJson, allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 ClosePositionsResponsePayload::Ptr ClosePositionsResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -798,25 +596,6 @@ void ClosePositionsErrorResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void ClosePositionsErrorResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value orderIdsJson{rapidjson::kArrayType};
-        for (OrderID orderId : orderIds) {
-            orderIdsJson.PushBack(orderId, allocator);
-        }
-        json.AddMember("orderIds", orderIdsJson, allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
-        errorPayload->checkpointSerialize(json, "errorPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 ClosePositionsErrorResponsePayload::Ptr ClosePositionsErrorResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -842,14 +621,6 @@ void RetrieveL2Payload::jsonSerialize(
         json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
     };
     taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void RetrieveL2Payload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
 }
 
 //-------------------------------------------------------------------------
@@ -904,12 +675,6 @@ void RetrieveL2ResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void RetrieveL2ResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{}
-
-//-------------------------------------------------------------------------
-
 RetrieveL2ResponsePayload::Ptr RetrieveL2ResponsePayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -952,13 +717,6 @@ void RetrieveL1Payload::jsonSerialize(rapidjson::Document& json, const std::stri
 
 //-------------------------------------------------------------------------
 
-void RetrieveL1Payload::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
-}
-
-//-------------------------------------------------------------------------
-
 RetrieveL1Payload::Ptr RetrieveL1Payload::fromJson(const rapidjson::Value& json)
 {
     return MessagePayload::create<RetrieveL1Payload>(json["bookId"].GetUint());
@@ -992,14 +750,6 @@ void RetrieveL1ResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void RetrieveL1ResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-
-}
-
-//-------------------------------------------------------------------------
-
 RetrieveL1ResponsePayload::Ptr RetrieveL1ResponsePayload::fromJson(const rapidjson::Value& json)
 {
     return MessagePayload::create<RetrieveL1ResponsePayload>(
@@ -1028,14 +778,6 @@ void SubscribeEventTradeByOrderPayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void SubscribeEventTradeByOrderPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
-}
-
-//-------------------------------------------------------------------------
-
 SubscribeEventTradeByOrderPayload::Ptr SubscribeEventTradeByOrderPayload::fromJson(
     const rapidjson::Value& json)
 {
@@ -1050,18 +792,6 @@ void EventOrderMarketPayload::jsonSerialize(
     auto serialize = [this](rapidjson::Document& json) {
         json.SetObject();
         order.jsonSerialize(json, "order");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void EventOrderMarketPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        order.checkpointSerialize(json, "order");
     };
     taosim::json::serializeHelper(json, key, serialize);
 }
@@ -1093,18 +823,6 @@ void EventOrderLimitPayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void EventOrderLimitPayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        order.checkpointSerialize(json, "order");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 EventOrderLimitPayload::Ptr EventOrderLimitPayload::fromJson(const rapidjson::Value& json)
 {
     return MessagePayload::create<EventOrderLimitPayload>(
@@ -1126,21 +844,6 @@ void EventTradePayload::jsonSerialize(rapidjson::Document& json, const std::stri
         auto& allocator = json.GetAllocator();
         trade.jsonSerialize(json, "trade");
         context.jsonSerialize(json, "context");
-        json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
-        taosim::json::setOptionalMember(json, "clientOrderId", clientOrderId);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void EventTradePayload::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        trade.checkpointSerialize(json, "trade");
-        context.checkpointSerialize(json, "context");
         json.AddMember("bookId", rapidjson::Value{bookId}, allocator);
         taosim::json::setOptionalMember(json, "clientOrderId", clientOrderId);
     };
@@ -1192,13 +895,6 @@ void ResetAgentsPayload::jsonSerialize(rapidjson::Document& json, const std::str
 
 //-------------------------------------------------------------------------
 
-void ResetAgentsPayload::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
-}
-
-//-------------------------------------------------------------------------
-
 ResetAgentsPayload::Ptr ResetAgentsPayload::fromJson(const rapidjson::Value& json)
 {
     std::vector<AgentId> agentIds;
@@ -1222,24 +918,6 @@ void ResetAgentsResponsePayload::jsonSerialize(
         }
         json.AddMember("agentIds", agentIdsJson, allocator);
         requestPayload->jsonSerialize(json, "requestPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void ResetAgentsResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value agentIdsJson{rapidjson::kArrayType};
-        for (AgentId agentId : agentIds) {
-            agentIdsJson.PushBack(agentId, allocator);
-        }
-        json.AddMember("agentIds", agentIdsJson, allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
     };
     taosim::json::serializeHelper(json, key, serialize);
 }
@@ -1272,25 +950,6 @@ void ResetAgentsErrorResponsePayload::jsonSerialize(
         json.AddMember("agentIds", agentIdsJson, allocator);
         requestPayload->jsonSerialize(json, "requestPayload");
         errorPayload->jsonSerialize(json, "errorPayload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void ResetAgentsErrorResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        rapidjson::Value agentIdsJson{rapidjson::kArrayType};
-        for (AgentId agentId : agentIds) {
-            agentIdsJson.PushBack(agentId, allocator);
-        }
-        json.AddMember("agentIds", agentIdsJson, allocator);
-        requestPayload->checkpointSerialize(json, "requestPayload");
-        errorPayload->checkpointSerialize(json, "errorPayload");
     };
     taosim::json::serializeHelper(json, key, serialize);
 }

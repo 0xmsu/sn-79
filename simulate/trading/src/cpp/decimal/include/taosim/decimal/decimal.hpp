@@ -9,7 +9,6 @@
 #include <bdldfp_decimalutil.h>
 #include <fmt/format.h>
 
-#include <bit>
 #include <spanstream>
 
 //-------------------------------------------------------------------------

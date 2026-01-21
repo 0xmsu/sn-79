@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "taosim/simulation/TimeConfig.hpp"
+#include <taosim/simulation/TimeConfig.hpp>
 
 #include <pugixml.hpp>
 

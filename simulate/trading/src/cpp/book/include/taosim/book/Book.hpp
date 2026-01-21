@@ -4,23 +4,13 @@
  */
 #pragma once
 
-#include "BookSignals.hpp"
 #include "CSVPrintable.hpp"
 #include "IHumanPrintable.hpp"
-#include "taosim/book/OrderContainer.hpp"
-#include "OrderFactory.hpp"
-#include "taosim/book/TickContainer.hpp"
-#include "TradeFactory.hpp"
-#include "common.hpp"
 
-#include <functional>
-#include <iostream>
-#include <map>
-#include <memory>
-#include <numeric>
-#include <optional>
-#include <queue>
-#include <string>
+#include <taosim/book/BookSignals.hpp>
+#include <taosim/book/OrderContainer.hpp>
+#include <taosim/book/TickContainer.hpp>
+#include "common.hpp"
 
 //-------------------------------------------------------------------------
 
@@ -28,133 +18,129 @@ class Simulation;
 
 //-------------------------------------------------------------------------
 
-class Book
-    : public CSVPrintable,
-      public JsonSerializable
+namespace taosim::book
+{
+
+//-------------------------------------------------------------------------
+
+class Book : public CSVPrintable, public JsonSerializable
 {
 public:
     using Ptr = std::shared_ptr<Book>;
 
-    Book(
-        Simulation* simulation,
-        BookId id,
-        size_t maxDepth,
-        size_t detailedDepth);
+    Book(Simulation* simulation, BookId id, size_t maxDepth, size_t detailedDepth);
 
-    virtual ~Book() noexcept = default;
-
-    [[nodiscard]] Simulation* simulation() const noexcept { return m_simulation; }
-    [[nodiscard]] BookId id() const noexcept { return m_id; }    
-    [[nodiscard]] const OrderFactory& orderFactory() const noexcept { return m_orderFactory; }
-    [[nodiscard]] const TradeFactory& tradeFactory() const noexcept { return m_tradeFactory; }
-    [[nodiscard]] const taosim::book::OrderContainer& buyQueue() const { return m_buyQueue; }
-    [[nodiscard]] const taosim::book::OrderContainer& sellQueue() const { return m_sellQueue; }
+    [[nodiscard]] BookId id() const noexcept { return m_id; }
+    [[nodiscard]] size_t maxDepth() const noexcept { return m_maxDepth; }
+    [[nodiscard]] size_t detailedDepth() const noexcept { return m_detailedDepth; }
     [[nodiscard]] BookSignals& signals() noexcept { return m_signals; }
+    [[nodiscard]] auto&& buyQueue(this auto&& self) noexcept { return self.m_buyQueue; }
+    [[nodiscard]] auto&& sellQueue(this auto&& self) noexcept { return self.m_sellQueue; }
+    [[nodiscard]] auto&& orderIdCounter(this auto&& self) noexcept { return self.m_orderIdCounter; }
+    [[nodiscard]] auto&& tradeIdCounter(this auto&& self) noexcept { return self.m_tradeIdCounter; }
+    [[nodiscard]] auto&& orderToClientInfo(this auto&& self) noexcept { return self.m_order2clientCtx; }
+    [[nodiscard]] auto&& orderIdMap(this auto&& self) noexcept { return self.m_orderIdMap; }
     [[nodiscard]] taosim::decimal_t midPrice() const noexcept;
     [[nodiscard]] taosim::decimal_t bestBid() const noexcept;
     [[nodiscard]] taosim::decimal_t bestAsk() const noexcept;
-    [[nodiscard]] size_t maxDepth() const noexcept { return m_maxDepth; }
-    [[nodiscard]] size_t detailedDepth() const noexcept { return m_detailedDepth; }
 
-    [[nodiscard]] const OrderClientContext& orderClientContext(OrderID orderId) const
-    {
-        return m_order2clientCtx.at(orderId);
-    }
+    template<typename... Args>
+    [[nodiscard]] MarketOrder::Ptr placeMarketOrder(OrderClientContext ctx, Args&&... args);
 
-    MarketOrder::Ptr placeMarketOrder(
-        OrderDirection direction,
-        Timestamp timestamp,
-        taosim::decimal_t volume,
-        taosim::decimal_t leverage,
-        OrderClientContext ctx,
-        STPFlag stpFlag = STPFlag::CO,
-        SettleFlag settleFlag = SettleType::FIFO,
-        Currency currency = Currency::BASE);
+    template<typename... Args>
+    [[nodiscard]] LimitOrder::Ptr placeLimitOrder(OrderClientContext ctx, Args&&... args);
 
-    LimitOrder::Ptr placeLimitOrder(
-        OrderDirection direction,
-        Timestamp timestamp,
-        taosim::decimal_t volume,
-        taosim::decimal_t price,
-        taosim::decimal_t leverage,
-        OrderClientContext ctx,
-        STPFlag stpFlag = STPFlag::CO,
-        SettleFlag settleFlag = SettleType::FIFO,
-        bool postOnly = false,
-        taosim::TimeInForce timeInForce = taosim::TimeInForce::GTC,
-        std::optional<Timestamp> expiryPeriod = std::nullopt,
-        Currency currency = Currency::BASE);
-        
-    bool cancelOrderOpt(OrderID orderId, std::optional<taosim::decimal_t> volumeToCancel = {});
+    template<typename... Args>
+    void logTrade(Args&&... args);
 
-    bool tryGetOrder(OrderID id, LimitOrder::Ptr& orderPtr) const;
-    std::optional<LimitOrder::Ptr> getOrder(OrderID orderId) const;
-    void L2Serialize(rapidjson::Document& json, const std::string& key = {}) const;
-
-    virtual void printCSV() const override;
-    virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-
-    void printCSV(uint32_t depth) const;
-
-protected:
     void placeOrder(MarketOrder::Ptr order);
     void placeOrder(LimitOrder::Ptr order);
     void placeLimitBuy(LimitOrder::Ptr order);
     void placeLimitSell(LimitOrder::Ptr order);
-
+    bool cancelOrder(OrderID orderId, std::optional<taosim::decimal_t> volumeToCancel = {});
+    [[nodiscard]] std::optional<LimitOrder::Ptr> getOrder(OrderID orderId) const;
     void registerLimitOrder(LimitOrder::Ptr order);
     void unregisterLimitOrder(LimitOrder::Ptr order);
-    std::map<OrderID, LimitOrder::Ptr> m_orderIdMap;
+    taosim::decimal_t processAgainstTheBuyQueue(Order::Ptr order, taosim::decimal_t minPrice);
+    taosim::decimal_t processAgainstTheSellQueue(Order::Ptr order, taosim::decimal_t maxPrice);
+    [[nodiscard]] taosim::book::TickContainer* preventSelfTrade(
+        taosim::book::TickContainer* queue, LimitOrder::Ptr iop, Order::Ptr order, AgentId agentId);
+    void printCSV(uint32_t depth) const;
+
+    virtual void printCSV() const override { printCSV(5); }
+    virtual void jsonSerialize(
+        rapidjson::Document& json, const std::string& key = {}) const override;
+
+private:
+    void dumpCSVLOB(auto begin, auto end, uint32_t depth) const;
+
+    void emitL2Signal([[maybe_unused]] auto&&... args) const { m_signals.L2(this); }
+    void setupL2Signal();
 
     Simulation* m_simulation;
     BookId m_id;
     size_t m_maxDepth;
     size_t m_detailedDepth;
-    OrderFactory m_orderFactory;
-    TradeFactory m_tradeFactory;
     BookSignals m_signals;
+    OrderID m_orderIdCounter{};
+    TradeID m_tradeIdCounter{};
+    std::map<OrderID, LimitOrder::Ptr> m_orderIdMap;
     std::map<OrderID, OrderClientContext> m_order2clientCtx;
     taosim::book::OrderContainer m_buyQueue;
-    LimitOrder::Ptr m_lastBetteringBuyOrder = nullptr;
     taosim::book::OrderContainer m_sellQueue;
-    LimitOrder::Ptr m_lastBetteringSellOrder = nullptr;
     bool m_initMode = false;
 
-    virtual taosim::decimal_t processAgainstTheBuyQueue(Order::Ptr order, taosim::decimal_t minPrice) = 0;
-    virtual taosim::decimal_t processAgainstTheSellQueue(Order::Ptr order, taosim::decimal_t maxPrice) = 0;
-
-    void logTrade(
-        OrderDirection direction,
-        OrderID aggressorId,
-        OrderID restingId,
-        taosim::decimal_t volume,
-        taosim::decimal_t execPrice);
-
-private:
-    void setupL2Signal();
-
-    template<typename... Args>
-    void emitL2Signal([[maybe_unused]] Args&&... args) const;
-
-    template<typename CIteratorType>
-    void dumpCSVLOB(CIteratorType begin, CIteratorType end, unsigned int depth) const;
-
-    friend class Simulation;
+    friend class ::Simulation;
 };
 
 //-------------------------------------------------------------------------
 
 template<typename... Args>
-void Book::emitL2Signal(Args&&... args) const
+MarketOrder::Ptr Book::placeMarketOrder(OrderClientContext clientCtx, Args&&... args)
 {
-    m_signals.L2(this);
+    static_assert(std::constructible_from<MarketOrder, OrderID, Args...>);
+    const auto marketOrder =
+        std::make_shared<MarketOrder>(m_orderIdCounter++, std::forward<Args>(args)...);
+    m_order2clientCtx.insert({marketOrder->id(), clientCtx});
+    m_signals.orderCreated(
+        marketOrder, OrderContext{clientCtx.agentId, m_id, clientCtx.clientOrderId});
+    placeOrder(marketOrder);
+    m_order2clientCtx.erase(marketOrder->id());
+    m_signals.orderLog(
+        marketOrder, OrderContext{clientCtx.agentId, m_id, clientCtx.clientOrderId});
+    return marketOrder;
 }
 
 //-------------------------------------------------------------------------
 
-template<typename CIteratorType>
-void Book::dumpCSVLOB(CIteratorType begin, CIteratorType end, unsigned int depth) const
+template<typename... Args>
+LimitOrder::Ptr Book::placeLimitOrder(OrderClientContext clientCtx, Args&&... args)
+{
+    static_assert(std::constructible_from<LimitOrder, OrderID, Args...>);
+    const auto limitOrder =
+        std::make_shared<LimitOrder>(m_orderIdCounter++, std::forward<Args>(args)...);
+    m_order2clientCtx.insert({limitOrder->id(), clientCtx});
+    m_signals.orderCreated(
+        limitOrder, OrderContext{clientCtx.agentId, m_id, clientCtx.clientOrderId});
+    placeOrder(limitOrder);
+    m_signals.orderLog(
+        limitOrder, OrderContext{clientCtx.agentId, m_id, clientCtx.clientOrderId});
+    return limitOrder;
+}
+
+//-------------------------------------------------------------------------
+
+template<typename... Args>
+void Book::logTrade(Args&&... args)
+{
+    static_assert(std::constructible_from<Trade, TradeID, Args...>);
+    const auto trade = Trade::create(m_tradeIdCounter++, std::forward<Args>(args)...);
+    m_signals.trade(trade, m_id);
+}
+
+//-------------------------------------------------------------------------
+
+void Book::dumpCSVLOB(auto begin, auto end, uint32_t depth) const
 {
     while (depth > 0 && begin != end) {
         const taosim::decimal_t totalVolume = [&] {
@@ -179,5 +165,9 @@ void Book::dumpCSVLOB(CIteratorType begin, CIteratorType end, unsigned int depth
         ++begin;
     }
 }
+
+//-------------------------------------------------------------------------
+
+}  // namespace taosim::book
 
 //-------------------------------------------------------------------------

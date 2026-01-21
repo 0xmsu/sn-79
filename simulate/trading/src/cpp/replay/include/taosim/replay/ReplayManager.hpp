@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "taosim/replay/ReplayDesc.hpp"
+#include <taosim/replay/ReplayDesc.hpp>
 
 //-------------------------------------------------------------------------
 

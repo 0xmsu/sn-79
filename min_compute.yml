@@ -41,9 +41,9 @@ compute_spec:
 
   validator:
     cpu:
-      min_cores: 8            # Minimum number of CPU cores
+      min_cores: 16            # Minimum number of CPU cores
       min_speed: 2.5          # Minimum speed per core (GHz)
-      recommended_cores: 8    # Recommended number of CPU cores
+      recommended_cores: 16    # Recommended number of CPU cores
       recommended_speed: 2.5  # Recommended speed per core (GHz)
       architecture: "x86_64"  # Architecture type (e.g., x86_64, arm64)
 
@@ -57,8 +57,9 @@ compute_spec:
       recommended_gpu: null               # provide a recommended GPU to purchase/rent
 
     memory:
-      min_ram: 16             # Minimum RAM (GB)
+      min_ram: 32             # Minimum RAM (GB)
       min_swap: 4             # Minimum swap space (GB)
+      recommended_ram: 48     # Recommended RAM (GB)
       recommended_swap: 8     # Recommended swap space (GB)
       ram_type: "DDR4"        # RAM type (e.g., DDR4, DDR3, etc.)
 

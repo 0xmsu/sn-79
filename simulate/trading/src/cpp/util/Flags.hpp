@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/serialization/msgpack/common.hpp>
 #include "common.hpp"
 
 //-------------------------------------------------------------------------

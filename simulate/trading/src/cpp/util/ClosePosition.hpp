@@ -4,7 +4,6 @@
  */
 #pragma once
 
-#include "CheckpointSerializable.hpp"
 #include "JsonSerializable.hpp"
 #include "Order.hpp"
 #include "common.hpp"
@@ -17,7 +16,7 @@
 
 //-------------------------------------------------------------------------
 
-struct ClosePosition : public JsonSerializable, public CheckpointSerializable
+struct ClosePosition : public JsonSerializable
 {
     using Ptr = std::shared_ptr<ClosePosition>;
 
@@ -31,8 +30,6 @@ struct ClosePosition : public JsonSerializable, public CheckpointSerializable
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -60,6 +57,7 @@ struct convert<ClosePosition>
 
         for (const auto& [k, val] : o.via.map) {
             auto key = k.as<std::string_view>();
+
             if (key == "orderId") {
                 v.id = val.as<OrderID>();
             }
@@ -78,17 +76,15 @@ struct pack<ClosePosition>
     template<typename Stream>
     msgpack::packer<Stream>& operator()(msgpack::packer<Stream>& o, const ClosePosition& v) const
     {
-        using namespace std::string_literals;
-
         o.pack_map(3);
 
-        o.pack("event"s);
-        o.pack("close"s);
+        o.pack("event");
+        o.pack("close");
 
-        o.pack("orderId"s);
+        o.pack("orderId");
         o.pack(v.id);
 
-        o.pack("volume"s);
+        o.pack("volume");
         o.pack(v.volume);
 
         return o;

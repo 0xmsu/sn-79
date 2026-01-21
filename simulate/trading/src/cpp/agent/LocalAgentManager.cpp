@@ -4,17 +4,14 @@
  */
 #include "LocalAgentManager.hpp"
 
-#include "ALGOTraderAgent.hpp"
+#include <taosim/agent/ALGOTraderAgent.hpp>
+#include <taosim/agent/FuturesTraderAgent.hpp>
+#include <taosim/agent/HighFrequencyTraderAgent.hpp>
+#include <taosim/agent/NoiseTraderAgent.hpp>
+#include <taosim/agent/RandomTraderAgent.hpp>
+#include <taosim/agent/StylizedTraderAgent.hpp>
 #include "InitializationAgent.hpp"
 #include "Simulation.hpp"
-#include "StylizedTraderAgent.hpp"
-#include "HighFrequencyTraderAgent.hpp"
-#include "FuturesTraderAgent.hpp"
-#include "NoiseTraderAgent.hpp"
-#include "RandomTraderAgent.hpp"
-
-#include <cassert>
-#include <string_view>
 
 //-------------------------------------------------------------------------
 
@@ -39,22 +36,19 @@ void LocalAgentManager::createAgentsInstanced(
             createAgentInstanced<DistributedProxyAgent>(child);
         }
         else if (name == "StylizedTraderAgent") {
-            createAgentInstanced<StylizedTraderAgent>(child);
+            createAgentInstanced<taosim::agent::StylizedTraderAgent>(child);
         }
         else if (name == "HighFrequencyTraderAgent") {
-            createAgentInstanced<HighFrequencyTraderAgent>(child);
+            createAgentInstanced<taosim::agent::HighFrequencyTraderAgent>(child);
         }
         else if (name == "InitializationAgent") {
             createAgentInstanced<InitializationAgent>(child);
-        }
-        else if (name == "TradeLogAgent") {
-            createAgentInstanced<TradeLogAgent>(child);
         }
         else if (name == "ALGOTraderAgent") {
             createAgentInstanced <taosim::agent::ALGOTraderAgent>(child);
         }
         else if (name == "FuturesTraderAgent") {
-            createAgentInstanced<FuturesTraderAgent>(child);
+            createAgentInstanced<taosim::agent::FuturesTraderAgent>(child);
         } 
         else if (name == "NoiseTraderAgent") {
             createAgentInstanced<taosim::agent::NoiseTraderAgent>(child);
@@ -129,18 +123,6 @@ void LocalAgentManager::createAgentInstanced<MultiBookExchangeAgent>(pugi::xml_n
         auto agent = std::make_unique<MultiBookExchangeAgent>(m_simulation);
         agent->configure(node);
         m_simulation->m_exchange = agent.get();
-        return agent;
-    }());
-}
-
-//-------------------------------------------------------------------------
-
-template<>
-void LocalAgentManager::createAgentInstanced<TradeLogAgent>(pugi::xml_node node)
-{
-    m_agents.push_back([this, node] {
-        auto agent = std::make_unique<TradeLogAgent>(m_simulation);
-        agent->configure(node);
         return agent;
     }());
 }

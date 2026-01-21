@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "taosim/message/Message.hpp"
+#include <taosim/message/Message.hpp>
 
 //-------------------------------------------------------------------------
 

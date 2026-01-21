@@ -19,7 +19,7 @@
 #include "Simulation.hpp"
 #include "server.hpp"
 #include "util.hpp"
-#include "ClearingManager.hpp"
+#include <taosim/exchange/ClearingManager.hpp>
 
 #include <fmt/format.h>
 #include <gmock/gmock.h>
@@ -38,31 +38,19 @@
 #include <thread>
 #include <utility>
 
-
-
 //-------------------------------------------------------------------------
 
 using namespace taosim;
 using namespace taosim::accounting;
+using namespace taosim::book;
 using namespace taosim::literals;
 
-using namespace testing;
-
-//-------------------------------------------------------------------------
-
-
-
-//-------------------------------------------------------------------------
-
-using namespace taosim::literals;
-using namespace taosim::exchange;
 using namespace testing;
 
 using testing::StrEq;
 using testing::Values;
 
 namespace fs = std::filesystem;
-
 
 //-------------------------------------------------------------------------
 
@@ -132,11 +120,11 @@ std::pair<MarketOrder::Ptr, OrderErrorCode> placeMarketOrder(
         std::forward<Args>(args)..., bookId, currency, std::nullopt, stpFlag, settleFlag);
     const auto orderResult = exchange->clearingManager().handleOrder(MarketOrderDesc{.agentId = agentId, .payload = payload});
     auto marketOrderPtr = exchange->books()[bookId]->placeMarketOrder(
-        payload->direction,
+        OrderClientContext{agentId},
         Timestamp{},
         orderResult.orderSize,
+        payload->direction,
         payload->leverage,
-        OrderClientContext{agentId},
         payload->stpFlag,
         payload->settleFlag);
     return {marketOrderPtr, orderResult.ec};
@@ -160,12 +148,12 @@ std::pair<LimitOrder::Ptr, OrderErrorCode> placeLimitOrder(
         std::forward<Args>(args)..., bookId, currency, std::nullopt, postOnly, timeInForce, std::nullopt, stpFlag, settleFlag);
     const auto orderResult = exchange->clearingManager().handleOrder(LimitOrderDesc{.agentId = agentId, .payload = payload});
     auto limitOrderPtr = exchange->books()[bookId]->placeLimitOrder(
-        payload->direction,
+        OrderClientContext{agentId},
         Timestamp{},
         orderResult.orderSize,
+        payload->direction,
         payload->price,
         payload->leverage,
-        OrderClientContext{agentId},
         payload->stpFlag,
         payload->settleFlag);
     return {limitOrderPtr, orderResult.ec};
@@ -269,7 +257,7 @@ public:
             const auto orders = exchange->accounts()[agentId].activeOrders()[bookId];
             for (Order::Ptr order : orders) {
                 if (auto limitOrder = std::dynamic_pointer_cast<LimitOrder>(order)) {
-                    book->cancelOrderOpt(limitOrder->id());
+                    book->cancelOrder(limitOrder->id());
                 }
             }
         }

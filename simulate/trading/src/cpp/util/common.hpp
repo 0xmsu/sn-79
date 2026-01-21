@@ -5,7 +5,7 @@
 #pragma once
 
 #include "Timestamp.hpp"
-#include "taosim/decimal/decimal.hpp"
+#include <taosim/decimal/decimal.hpp>
 
 #include <boost/signals2.hpp>
 #include <fmt/core.h>

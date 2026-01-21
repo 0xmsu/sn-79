@@ -4,10 +4,10 @@
  */
 #pragma once
 
-#include "Fees.hpp"
+#include <taosim/exchange/Fees.hpp>
 #include "Trade.hpp"
 #include "common.hpp"
-#include "taosim/exchange/FeePolicy.hpp"
+#include <taosim/exchange/FeePolicy.hpp>
 
 #include <boost/circular_buffer.hpp>
 #include <unordered_set>
@@ -25,8 +25,8 @@ namespace taosim::exchange
 
 struct Volumes
 {
-    decimal_t aggressive {};
-    decimal_t passive {};
+    decimal_t aggressive{};
+    decimal_t passive{};
 };
 
 struct FeeMath {
@@ -87,8 +87,9 @@ class DynamicFeePolicy : public FeePolicy
 public:
     explicit DynamicFeePolicy(const DFPolicyDesc& desc);
 
-    Fees calculateFees(const TradeDesc& tradeDesc) const override;
-    Fees getRates(BookId bookId, AgentId agentId) const override;
+    [[nodiscard]] Fees calculateFees(const TradeDesc& tradeDesc) const override;
+    [[nodiscard]] Fees getRates(BookId bookId, AgentId agentId) const override;
+    [[nodiscard]] decimal_t makerTakerRatio(BookId bookId) const;
 
     void updateHistory(Timestamp timestamp, BookId bookId, AgentId agentId, decimal_t volume, 
         std::optional<bool> isAggressive = {}) override;
@@ -98,12 +99,10 @@ public:
     [[nodiscard]] static std::unique_ptr<DynamicFeePolicy> fromXML(
         pugi::xml_node node, Simulation* simulation);
         
-    [[nodiscard]] auto&& historySlots(this auto&& self) noexcept { return self.m_historySlots; }
-    [[nodiscard]] auto&& slotPeriod(this auto&& self) noexcept { return self.m_slotPeriod; }
-    [[nodiscard]] auto&& makerFee(this auto&& self) noexcept { return self.m_makerFee; }
-    [[nodiscard]] auto&& takerFee(this auto&& self) noexcept { return self.m_takerFee; }
+    [[nodiscard]] auto&& lastUpdate(this auto&& self) noexcept { return self.m_lastUpdate; }
+    [[nodiscard]] auto&& totalVolumes(this auto&& self) noexcept { return self.m_totalVolumes; }
+    [[nodiscard]] auto&& totalVolumesPrev(this auto&& self) noexcept { return self.m_totalVolumesPrev; }
     [[nodiscard]] auto&& volumes(this auto&& self) noexcept { return self.m_volumes; }
-    [[nodiscard]] decimal_t mtr(BookId bookId) const;
         
 protected:
     Simulation* m_simulation;

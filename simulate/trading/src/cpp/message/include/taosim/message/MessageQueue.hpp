@@ -4,10 +4,16 @@
  */
 #pragma once
 
-#include "taosim/message/Message.hpp"
+#include <taosim/dsa/PriorityQueue.hpp>
+#include <taosim/message/Message.hpp>
 
 #include <limits>
 #include <queue>
+
+//-------------------------------------------------------------------------
+
+namespace taosim::message
+{
 
 //-------------------------------------------------------------------------
 
@@ -16,6 +22,7 @@ struct PrioritizedMessage
     Message::Ptr msg;
     uint64_t marginCallId;
 
+    PrioritizedMessage() noexcept = default;
     PrioritizedMessage(
         Message::Ptr msg, uint64_t marginCallId = std::numeric_limits<uint64_t>::max()) noexcept
         : msg{msg}, marginCallId{marginCallId}
@@ -27,6 +34,7 @@ struct PrioritizedMessageWithId
     PrioritizedMessage pmsg;
     uint64_t id;
 
+    PrioritizedMessageWithId() noexcept = default;
     PrioritizedMessageWithId(PrioritizedMessage pmsg, uint64_t id) noexcept
         : pmsg{pmsg}, id{id}
     {}
@@ -38,6 +46,7 @@ class MessageQueue
 {
 public:
     MessageQueue() noexcept = default;
+    explicit MessageQueue(std::vector<PrioritizedMessageWithId> messages) noexcept;
 
     [[nodiscard]] Message::Ptr top() const { return m_queue.top().pmsg.msg; }
     [[nodiscard]] bool empty() const { return m_queue.empty(); }
@@ -47,50 +56,28 @@ public:
     void pop() { m_queue.pop(); }
     void clear() { m_queue.clear(); }
 
+    [[nodiscard]] auto&& queue(this auto&& self) noexcept { return self.m_queue; }
+    [[nodiscard]] auto&& idCounter(this auto&& self) noexcept { return self.m_idCounter; }
+
 private:
-    struct PrioritizedMessageWithId
-    {
-        PrioritizedMessage pmsg;
-        uint64_t id;
-
-        PrioritizedMessageWithId(PrioritizedMessage pmsg, uint64_t id) noexcept
-            : pmsg{pmsg}, id{id}
-        {}
-    };
-
     struct CompareQueueMessages
     {
         bool operator()(PrioritizedMessageWithId lhs, PrioritizedMessageWithId rhs);
     };
 
-    using QueueType = std::priority_queue<
-        PrioritizedMessageWithId,
-        std::vector<PrioritizedMessageWithId>,
-        CompareQueueMessages>;
-
-    struct AccessiblePriorityQueue : public QueueType
-    {
-        AccessiblePriorityQueue() noexcept = default;
-        AccessiblePriorityQueue(std::vector<PrioritizedMessageWithId> messages) noexcept
-            : QueueType{CompareQueueMessages{}, std::move(messages)}
-        {}
-
-        [[nodiscard]] const container_type& underlying() const noexcept { return c; }
-
-        void clear() { c.clear(); }
-    };
-
-    MessageQueue(std::vector<PrioritizedMessageWithId> messages) noexcept;
-
     [[nodiscard]] const PrioritizedMessageWithId& prioTop() const { return m_queue.top(); }
 
     void push(PrioritizedMessageWithId pmsgWithId) { m_queue.push(pmsgWithId); }
 
-    AccessiblePriorityQueue m_queue;
+    dsa::PriorityQueue<
+        PrioritizedMessageWithId,
+        std::vector<PrioritizedMessageWithId>,
+        CompareQueueMessages> m_queue;
     uint64_t m_idCounter{};
-
-    friend class Simulation;
-    friend class MultiBookExchangeAgent;
 };
+
+//-------------------------------------------------------------------------
+
+}  // namespace taosim::message
 
 //-------------------------------------------------------------------------

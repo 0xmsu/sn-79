@@ -1,37 +1,23 @@
-add_library(book STATIC
-    Book.cpp
-    BookFactory.hpp
-    BookProcessLogger.cpp
-    BookProcessManager.cpp
-    BookSignals.hpp
-    L2Logger.cpp
-    L3EventLogger.cpp
-    PriceTimeBook.cpp
-    UpdateCounter.cpp
-    FeeLogger.cpp
-    TickContainer.cpp
-)
+file(GLOB book_sources CONFIGURE_DEPENDS "*.cpp")
+add_library(book STATIC ${book_sources})
 add_library(taosim::book ALIAS book)
 
 target_include_directories(book
     PUBLIC
         include
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${src_dir}"
-        "${src_dir}/agent"
-        "${src_dir}/base"
-        "${src_dir}/mp"
-        "${src_dir}/net"
-        "${src_dir}/process"
-        "${src_dir}/serialization"
-        "${src_dir}/util"
+        "${SRC_DIR}/agent"
+        "${SRC_DIR}/base"
+        "${SRC_DIR}/mp"
+        "${SRC_DIR}/net"
+        "${SRC_DIR}/serialization"
+        "${SRC_DIR}/util"
 )
 
 target_link_libraries(book
-    PRIVATE
+    PUBLIC
         taosim::exchange
+        taosim::logging
         taosim::message
         taosim::process
         fmt::fmt
-        pybind11::embed
 )

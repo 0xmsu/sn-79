@@ -11,16 +11,12 @@
 namespace taosim::simulation
 {
 
-//-------------------------------------------------------------------------
-
 enum class SimulationState : uint32_t
 {
     INACTIVE,
     STARTED,
     STOPPED
 };
-
-//-------------------------------------------------------------------------
 
 }  // namespace taosim::simulation
 

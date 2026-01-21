@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 #pragma once
-#include "taosim/accounting/Balance.hpp"
-#include "taosim/accounting/Balances.hpp"
+#include <taosim/accounting/Balance.hpp>
+#include <taosim/accounting/Balances.hpp>
 #include "common.hpp"
 
 #include <set>
@@ -16,7 +16,7 @@ namespace taosim::accounting
 
 //-------------------------------------------------------------------------
 
-class Account : public JsonSerializable, public CheckpointSerializable
+class Account : public JsonSerializable
 {
 public:
     using Holdings = std::vector<Balances>;
@@ -35,8 +35,6 @@ public:
     [[nodiscard]] auto&& activeOrders(this auto&& self) noexcept { return self.m_activeOrders; }
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     friend std::ostream& operator<<(std::ostream& os, const Account& holdings);

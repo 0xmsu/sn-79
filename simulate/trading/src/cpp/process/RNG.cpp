@@ -2,7 +2,12 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "RNG.hpp"
+#include <taosim/process/RNG.hpp>
+
+//-------------------------------------------------------------------------
+
+namespace taosim::process
+{
 
 //-------------------------------------------------------------------------
 
@@ -40,5 +45,9 @@ RNG RNG::fromCheckpoint(const rapidjson::Value& json)
     rng.discard(rng.m_callCount);
     return rng;
 }
+
+//-------------------------------------------------------------------------
+
+}  // namespace taosim::process
 
 //-------------------------------------------------------------------------

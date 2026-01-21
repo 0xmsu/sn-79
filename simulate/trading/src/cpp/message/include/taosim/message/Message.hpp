@@ -4,14 +4,13 @@
  */
 #pragma once
 
-#include "CheckpointSerializable.hpp"
 #include "JsonSerializable.hpp"
-#include "taosim/message/MessagePayload.hpp"
+#include <taosim/message/MessagePayload.hpp>
 #include "common.hpp"
 
 //-------------------------------------------------------------------------
 
-struct Message : public JsonSerializable, public CheckpointSerializable
+struct Message : public JsonSerializable
 {
     using Ptr = std::shared_ptr<Message>;
 
@@ -51,8 +50,6 @@ struct Message : public JsonSerializable, public CheckpointSerializable
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     template<typename... Args>
     requires std::constructible_from<Message, Args...> && requires { typename Message::Ptr; }
@@ -68,6 +65,13 @@ struct Message : public JsonSerializable, public CheckpointSerializable
 
 //-------------------------------------------------------------------------
 
+struct CompareArrival
+{
+    bool operator()(Message::Ptr a, Message::Ptr b) { return a->arrival > b->arrival; }
+};
+
+//-------------------------------------------------------------------------
+
 template<>
 struct fmt::formatter<Message>
 {
@@ -77,21 +81,8 @@ struct fmt::formatter<Message>
     auto format(const Message& msg, FormatContext& ctx) const
     {
         return fmt::format_to(
-            ctx.out(),
-            "{}",
-            taosim::json::json2str([&msg] {
-                rapidjson::Document json;
-                msg.jsonSerialize(json);
-                return json;
-            }()));
+            ctx.out(), "{}", taosim::json::jsonSerializable2str(msg));
     }
-};
-
-//-------------------------------------------------------------------------
-
-struct CompareArrival
-{
-    bool operator()(Message::Ptr a, Message::Ptr b) { return a->arrival > b->arrival; }
 };
 
 //-------------------------------------------------------------------------

@@ -4,8 +4,8 @@
  */
 #pragma once
 
-#include "taosim/message/MessagePayload.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/message/MessagePayload.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -23,7 +23,9 @@ struct convert<EmptyPayload>
 {
     const msgpack::object& operator()(const msgpack::object& o, EmptyPayload& v)
     {
-        if (!o.is_nil()) throw taosim::serialization::MsgPackError{};
+        if (!o.is_nil()) {
+            throw taosim::serialization::MsgPackError{};
+        }
         return o;
     }
 };

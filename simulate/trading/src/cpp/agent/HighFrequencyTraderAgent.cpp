@@ -2,24 +2,22 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "HighFrequencyTraderAgent.hpp"
+#include <taosim/agent/HighFrequencyTraderAgent.hpp>
+
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/MessagePayload.hpp>
+
 #include "DistributionFactory.hpp"
 #include "RayleighDistribution.hpp"
+#include "GBMValuationModel.hpp"
 #include "Simulation.hpp"
 
-#include <boost/accumulators/accumulators.hpp>
-#include <boost/accumulators/statistics/stats.hpp>
-#include <boost/accumulators/statistics/variance.hpp>
-#include <boost/random.hpp>
-#include <boost/random/laplace_distribution.hpp>
-#include <boost/math/distributions/rayleigh.hpp>
-#include <unsupported/Eigen/NonLinearOptimization>
+//-------------------------------------------------------------------------
 
-#include <algorithm>
-#include <regex>
+namespace taosim::agent
+{
 
-
-
+//-------------------------------------------------------------------------
 
 HighFrequencyTraderAgent::HighFrequencyTraderAgent(Simulation *simulation) noexcept
     : Agent{simulation}
@@ -30,7 +28,9 @@ HighFrequencyTraderAgent::HighFrequencyTraderAgent(Simulation *simulation) noexc
 void HighFrequencyTraderAgent::configure(const pugi::xml_node &node)
 {
     Agent::configure(node);
+
     m_rng = &simulation()->rng();
+
     m_wealthFrac = 0.99;
 
     pugi::xml_attribute attr;
@@ -108,16 +108,15 @@ void HighFrequencyTraderAgent::configure(const pugi::xml_node &node)
     // TODO add std
     std::normal_distribution<double> inventoryControlDist(attr.as_double(), 10.0);
     m_psi = inventoryControlDist(*m_rng);
-    m_topLevel = std::vector<TopLevel>(m_bookCount, TopLevel{});
+    m_topLevel = std::vector<TopLevelWithVolumes>(m_bookCount, TopLevelWithVolumes{});
     m_baseFree = std::vector<double>(m_bookCount, 0.);
     m_quoteFree = std::vector<double>(m_bookCount, 0.);
     m_inventory = std::vector<double>(m_bookCount, 0.);
     m_deltaHFT = std::vector<double>(m_bookCount, 0.);
     m_tauHFT = std::vector<Timestamp>(m_bookCount, Timestamp{});
-    m_orderFlag = std::vector<bool>(m_bookCount, false);
 
 
-    m_tradePrice.resize(m_bookCount);
+    m_lastPrice.resize(m_bookCount);
 
     
     attr = node.attribute("opLatencyScaleRay"); 
@@ -137,7 +136,6 @@ void HighFrequencyTraderAgent::configure(const pugi::xml_node &node)
     for (BookId bookId = 0; bookId < m_bookCount; ++bookId) {
         m_orderSizes.push_back(std::abs(orderDist(*m_rng)));
     } 
-
 
     m_noiseRay = node.attribute("noiseRay").as_double();
     m_priceShiftDistribution =  std::make_unique<taosim::stats::RayleighDistribution>(m_noiseRay);
@@ -183,10 +181,10 @@ void HighFrequencyTraderAgent::receiveMessage(Message::Ptr msg)
     else if (msg->type == "ERROR_RESPONSE_PLACE_ORDER_LIMIT") {
         handleLimitOrderPlacementErrorResponse(msg);
     }
-    else if (msg->type == "RESPONSE_PLACE_ORDER_Market") {
+    else if (msg->type == "RESPONSE_PLACE_ORDER_MARKET") {
         handleMarketOrderPlacementResponse(msg);
     }
-    else if (msg->type == "ERROR_RESPONSE_PLACE_ORDER_Market") {
+    else if (msg->type == "ERROR_RESPONSE_PLACE_ORDER_MARKET") {
         handleMarketOrderPlacementErrorResponse(msg);
     }
     else if (msg->type == "RESPONSE_CANCEL_ORDERS") {
@@ -197,7 +195,8 @@ void HighFrequencyTraderAgent::receiveMessage(Message::Ptr msg)
     }
     else if (msg->type == "EVENT_TRADE") {
         handleTrade(msg);
-    }else{
+    }
+    else {
         simulation()->logDebug("{}", msg->type);
     }
 }
@@ -206,13 +205,6 @@ void HighFrequencyTraderAgent::receiveMessage(Message::Ptr msg)
 
 void HighFrequencyTraderAgent::handleSimulationStart()
 {
-    simulation()->dispatchMessage(
-        simulation()->currentTimestamp(),
-        1,
-        name(),
-        m_exchange,
-        "SUBSCRIBE_EVENT_TRADE");
-    
     m_id = simulation()->exchange()->accounts().idBimap().left.at(name());
     for (BookId bookId = 0; bookId < m_bookCount; ++bookId) {
         simulation()->dispatchMessage(
@@ -265,23 +257,22 @@ void HighFrequencyTraderAgent::handleRetrieveL1Response(Message::Ptr msg)
     topLevel.askQty = taosim::util::decimal2double(payload->bestAskVolume);
     
     if (topLevel.bid == 0.0)
-        topLevel.bid = m_tradePrice.at(payload->bookId).price;
+        topLevel.bid = m_lastPrice.at(payload->bookId).price;
     if (topLevel.ask == 0.0) 
-        topLevel.ask = m_tradePrice.at(payload->bookId).price;
+        topLevel.ask = m_lastPrice.at(payload->bookId).price;
 
 
     const double midquote = (topLevel.bid + topLevel.ask) / 2;
+    m_lastPrice.at(payload->bookId) = TimestampedPrice{.timestamp=simulation()->currentTimestamp(), .price=midquote};
     
     m_baseFree[bookId] = m_wealthFrac * 
         taosim::util::decimal2double(simulation()->exchange()->account(name()).at(bookId).base.getFree());
     m_quoteFree[bookId] = m_wealthFrac * 
         taosim::util::decimal2double(simulation()->exchange()->account(name()).at(bookId).quote.getFree());
 
-    if (m_orderFlag.at(bookId)) return;
     double timescaling = 1-(simulation()->currentTimestamp()/ m_delta)/(simulation()->duration() / m_delta);
-    m_pRes = midquote - m_gHFT * m_inventory[bookId] * m_sigmaSqr *timescaling;
+    m_pRes = midquote - m_gHFT * m_inventory[bookId] * m_sigmaSqr * timescaling;
 
-    m_orderFlag.at(bookId) = true;
     placeOrder(bookId, topLevel);
 }
 
@@ -292,11 +283,6 @@ void HighFrequencyTraderAgent::handleLimitOrderPlacementResponse(Message::Ptr ms
     const auto payload = std::dynamic_pointer_cast<PlaceOrderLimitResponsePayload>(msg->payload);
     const BookId bookId = payload->requestPayload->bookId;
 
-    m_orderFlag.at(bookId) = false;
-    static const std::regex pattern("^HIGH_FREQUENCY_TRADER_AGENT_(?:[0-9]|1[0-9]|20)$");
-    if (std::regex_match(name(), pattern)) {
-        recordOrder(payload);
-    }
 
     m_deltaHFT[bookId] = m_delta / (1.0 + std::exp(std::abs(m_inventory[bookId]) - m_psi));
     m_tauHFT[bookId] = std::max(
@@ -318,12 +304,6 @@ void HighFrequencyTraderAgent::handleLimitOrderPlacementResponse(Message::Ptr ms
 
 void HighFrequencyTraderAgent::handleLimitOrderPlacementErrorResponse(Message::Ptr msg)
 {
-    const auto payload =
-        std::dynamic_pointer_cast<PlaceOrderLimitErrorResponsePayload>(msg->payload);
-
-    const BookId bookId = payload->requestPayload->bookId;
-
-    m_orderFlag.at(bookId) = false;
 }
 
 //-------------------------------------------------------------------------
@@ -342,11 +322,6 @@ void HighFrequencyTraderAgent::handleMarketOrderPlacementErrorResponse(Message::
 
 void HighFrequencyTraderAgent::handleCancelOrdersResponse(Message::Ptr msg)
 {
-    const auto payload = std::dynamic_pointer_cast<CancelOrdersResponsePayload>(msg->payload);
-    const BookId bookId = payload->requestPayload->bookId;
-    for (auto& cancel: payload->requestPayload->cancellations){
-        removeOrder(bookId, cancel.id);
-    }
 }
 
 //-------------------------------------------------------------------------
@@ -360,30 +335,19 @@ void HighFrequencyTraderAgent::handleCancelOrdersErrorResponse(Message::Ptr msg)
 void HighFrequencyTraderAgent::handleTrade(Message::Ptr msg)
 {
     const auto payload = std::dynamic_pointer_cast<EventTradePayload>(msg->payload);
-    BookId bookId = payload->bookId;
-    m_orderFlag.at(bookId) = false;
-
-    const double tradePrice = taosim::util::decimal2double(payload->trade.price());
-
-    m_tradePrice.at(payload->bookId) = {
-        .timestamp = msg->arrival,
-        .price = tradePrice
-    };
+    const BookId bookId = payload->bookId;
 
     if (m_id == payload->context.aggressingAgentId) {
         m_inventory[bookId] += payload->trade.direction() == OrderDirection::BUY ? 
             taosim::util::decimal2double(payload->trade.volume()) : 
             taosim::util::decimal2double(-payload->trade.volume());
-        removeOrder(bookId, payload->trade.aggressingOrderID(), taosim::util::decimal2double(payload->trade.volume()));
     }
     if (m_id == payload->context.restingAgentId) {
         m_inventory[bookId] += payload->trade.direction() == OrderDirection::BUY ? 
             taosim::util::decimal2double(-payload->trade.volume()) : 
             taosim::util::decimal2double(payload->trade.volume());
-        removeOrder(bookId, payload->trade.restingOrderID(), taosim::util::decimal2double(payload->trade.volume()));
     }
 }
-
 
 //-------------------------------------------------------------------------
 
@@ -429,7 +393,7 @@ std::optional<PlaceOrderLimitPayload::Ptr> HighFrequencyTraderAgent::makeOrder(B
 
 //-------------------------------------------------------------------------
 
-void HighFrequencyTraderAgent::placeOrder(BookId bookId, TopLevel& topLevel) {
+void HighFrequencyTraderAgent::placeOrder(BookId bookId, const TopLevelWithVolumes& topLevel) {
     
     const double currentInventory = m_inventory[bookId];
     const double actualSpread = topLevel.ask - topLevel.bid;
@@ -470,6 +434,7 @@ void HighFrequencyTraderAgent::placeOrder(BookId bookId, TopLevel& topLevel) {
     double priceOrderAsk = m_pRes + (spread / 2.0) + noiseAsk;
     double limitPriceAsk = std::round(priceOrderAsk / m_priceIncrement) * m_priceIncrement;
     const auto askPayload = makeOrder(bookId, OrderDirection::SELL, orderVolume, limitPriceAsk, wealthAsk);
+    // -----
     double rateProb = std::exp(-std::pow((makerRate - m_maxRate), 2.0)/(2*m_sigmaMargin));
     double inventoryProb = std::clamp(std::abs(currentInventory)/m_psi, m_sigmaMargin, 1- m_sigmaMargin);
     if (std::bernoulli_distribution{skipProb*rateProb*inventoryProb} (*m_rng) && std::abs(currentInventory) > 0.1) {
@@ -492,88 +457,13 @@ void HighFrequencyTraderAgent::placeOrder(BookId bookId, TopLevel& topLevel) {
 
 //-------------------------------------------------------------------------
 
-void HighFrequencyTraderAgent::cancelClosestToBestPrice(BookId bookId, OrderDirection direction, double bestPrice) {
-
-    if (m_recordedOrders.find(bookId) == m_recordedOrders.end()) {
-        return;
-    }
-
-    OrderID closestId = -1;
-    double closestDelta = 999999.;
-    RecordedOrder closestOrder;
-    for (auto it = m_recordedOrders[bookId].rbegin(); it != m_recordedOrders[bookId].rend(); ++it) {
-        const auto& order = *it;
-        if (!order.traded && !order.canceled && order.direction == direction) {
-            double delta = std::abs(order.price - bestPrice);
-            if (closestId == -1 || delta < closestDelta) {
-                closestId = order.orderId;
-                closestDelta = delta;
-                closestOrder = order;
-            }
-        }
-    }
-
-    if (closestId != -1) {
-        // This is unnecessary if we remove this immediately from records
-        closestOrder.canceled = true;
-
-        removeOrder(bookId, closestId);
-        simulation()->dispatchMessage(
-            simulation()->currentTimestamp(),
-            orderPlacementLatency(),
-            name(),
-            m_exchange,
-            "CANCEL_ORDERS",
-            MessagePayload::create<CancelOrdersPayload>(
-                std::vector{taosim::event::Cancellation(closestId)}, bookId)
-        );
-    }
-}
-
-//-------------------------------------------------------------------------
-
-Timestamp HighFrequencyTraderAgent::orderPlacementLatency()  {
+Timestamp HighFrequencyTraderAgent::orderPlacementLatency()
+{
     return static_cast<Timestamp>(std::lerp(m_opl.min, m_opl.max, m_orderPlacementLatencyDistribution->sample(*m_rng)));
 }
 
-
 //-------------------------------------------------------------------------
 
-void HighFrequencyTraderAgent::recordOrder(PlaceOrderLimitResponsePayload::Ptr payload) {
-    BookId bookId = payload->requestPayload->bookId;
-
-    RecordedOrder order;
-    order.orderId = payload->id;
-    order.traded = false;
-    order.canceled = false;
-    order.volume = taosim::util::decimal2double(payload->requestPayload->volume);
-    order.price = taosim::util::decimal2double(payload->requestPayload->price);
-    order.direction = payload->requestPayload->direction;
-
-    m_recordedOrders[bookId].emplace_back(std::move(order));
-}
-
-//-------------------------------------------------------------------------
-
-void HighFrequencyTraderAgent::removeOrder(BookId bookId, OrderID orderId, std::optional<double> amount) {
-    auto it = m_recordedOrders.find(bookId);
-    if (it == m_recordedOrders.end())
-        return;
-
-    auto& orders = it->second;
-    for (auto iter = orders.begin(); iter != orders.end(); ++iter) {
-        if (iter->orderId == orderId) {
-            if (amount.has_value()) {
-                iter->volume -= amount.value();
-                if (iter->volume < m_volumeIncrement) {
-                    orders.erase(iter);
-                }
-            } else {
-                orders.erase(iter);
-            }
-            break;
-        }
-    }
-}
+}  // namespace taosim::agent
 
 //-------------------------------------------------------------------------

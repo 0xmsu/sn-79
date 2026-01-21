@@ -273,7 +273,7 @@ def rebuild_simulator(self : Validator) -> None:
 
 def restart_simulator(self : Validator) -> None:
     """
-    Restarts the C++ simulator process with timeout protection.
+    Restarts the C++ simulator process with timeout protection and checkpoint resume.
     """
     try:
         try:
@@ -291,62 +291,99 @@ def restart_simulator(self : Validator) -> None:
         except json.JSONDecodeError as e:
             bt.logging.warning(f"Failed to parse PM2 JSON: {e}")
             pm2_js = []
+        pm2_processes = {p['name']: p for p in pm2_js}
+        if 'simulator' in pm2_processes:
+            bt.logging.info("STOPPING EXISTING SIMULATOR IN PM2...")
+            try:
+                subprocess.run(
+                    ['pm2', 'delete', 'simulator'],
+                    capture_output=True,
+                    timeout=10.0
+                )
+                time.sleep(1.0)
+            except subprocess.TimeoutExpired:
+                bt.logging.warning("PM2 delete timed out after 10s")
 
-        restart_cmd = None
-        if len(pm2_js) > 0:
-            pm2_processes = {p['name']: p for p in pm2_js}
-            if 'simulator' in pm2_processes:
-                bt.logging.info("FOUND SIMULATOR IN pm2 PROCESSES.")
-                restart_cmd = ["pm2", "restart", "simulator"]
+        killed_count = 0
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = ' '.join(proc.info['cmdline'] or [])
+                if '../build/src/cpp/taosim' in cmdline:
+                    bt.logging.info(
+                        f"FOUND SIMULATOR PROCESS `{proc.info['name']}` "
+                        f"WITH PID {proc.info['pid']}"
+                    )
+                    proc.kill()
+                    proc.wait(timeout=5.0)
+                    killed_count += 1
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired) as e:
+                bt.logging.warning(f"Error killing simulator process: {e}")
         
-        if not restart_cmd:
-            killed_count = 0
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                try:
-                    cmdline = ' '.join(proc.info['cmdline'] or [])
-                    if '../build/src/cpp/taosim' in cmdline:
-                        bt.logging.info(
-                            f"FOUND SIMULATOR PROCESS `{proc.info['name']}` "
-                            f"WITH PID {proc.info['pid']}"
-                        )
-                        proc.kill()
-                        proc.wait(timeout=5.0)
-                        killed_count += 1
-                except (psutil.NoSuchProcess, psutil.TimeoutExpired) as e:
-                    bt.logging.warning(f"Error killing simulator process: {e}")
-            
-            if killed_count > 0:
-                bt.logging.info(f"Killed {killed_count} simulator process(es)")
-                time.sleep(2.0)  # Brief pause after kill
-            
-            restart_cmd = [
-                "pm2", "start", "--no-autorestart", "--name=simulator",
-                f"../build/src/cpp/taosim -f {self.simulator_config_file}"
-            ]
+        if killed_count > 0:
+            bt.logging.info(f"Killed {killed_count} simulator process(es)")
+            time.sleep(2.0)
+
+        resume_cmd = [
+            "pm2", "start", "--no-autorestart", "--name=simulator",
+            "../build/src/cpp/taosim -c latest"
+        ]
         
-        bt.logging.info(f"RESTARTING SIMULATOR: {' '.join(restart_cmd)}")
-        simulator = subprocess.run(
-            restart_cmd, 
+        bt.logging.info(f"ATTEMPTING TO RESUME SIMULATOR FROM CHECKPOINT: {' '.join(resume_cmd)}")
+        resume_result = subprocess.run(
+            resume_cmd, 
             cwd=str((self.repo_path / 'simulate' / 'trading' / 'run').resolve()), 
-            shell=isinstance(restart_cmd, str),
+            shell=isinstance(resume_cmd, str),
             capture_output=True,
             timeout=30.0
         )
-        
-        if simulator.returncode == 0:
-            time.sleep(2.0)  # Give simulator time to start
+
+        checkpoint_success = False
+        if resume_result.returncode == 0:
+            time.sleep(2.0)
             if check_simulator(self):
-                bt.logging.success("SIMULATOR RESTART SUCCESSFUL.")
+                bt.logging.success("SIMULATOR RESUMED FROM CHECKPOINT SUCCESSFULLY.")
+                checkpoint_success = True
             else:
-                self.pagerduty_alert(
-                    "FAILED TO RESTART SIMULATOR! NOT FOUND IN PM2 AFTER RESTART."
-                )
+                bt.logging.warning("Checkpoint resume started but simulator not healthy. Falling back to new simulation.")
+                try:
+                    subprocess.run(['pm2', 'delete', 'simulator'], capture_output=True, timeout=10.0)
+                    time.sleep(1.0)
+                except:
+                    pass
         else:
-            raise Exception(
-                f"FAILED TO RESTART SIMULATOR:\n"
-                f"STDOUT: {simulator.stdout}\n"
-                f"STDERR: {simulator.stderr}"
+            bt.logging.warning(
+                f"Failed to resume from checkpoint (returncode={resume_result.returncode}). "
+                f"Falling back to new simulation.\n"
+                f"STDERR: {resume_result.stderr.decode() if resume_result.stderr else 'N/A'}"
             )
+        if not checkpoint_success:
+            fallback_cmd = [
+                "pm2", "start", "--no-autorestart", "--name=simulator",
+                f"../build/src/cpp/taosim -f {self.simulator_config_file}"
+            ]
+            bt.logging.info(f"STARTING NEW SIMULATION: {' '.join(fallback_cmd)}")
+            simulator = subprocess.run(
+                fallback_cmd, 
+                cwd=str((self.repo_path / 'simulate' / 'trading' / 'run').resolve()), 
+                shell=isinstance(fallback_cmd, str),
+                capture_output=True,
+                timeout=30.0
+            )
+            
+            if simulator.returncode == 0:
+                time.sleep(2.0)
+                if check_simulator(self):
+                    bt.logging.success("NEW SIMULATION STARTED SUCCESSFULLY.")
+                else:
+                    self.pagerduty_alert(
+                        "FAILED TO START SIMULATOR! NOT FOUND IN PM2 AFTER RESTART."
+                    )
+            else:
+                raise Exception(
+                    f"FAILED TO START NEW SIMULATION:\n"
+                    f"STDOUT: {simulator.stdout}\n"
+                    f"STDERR: {simulator.stderr}"
+                )
             
     except subprocess.TimeoutExpired:
         bt.logging.error("Simulator restart command timed out after 30s")

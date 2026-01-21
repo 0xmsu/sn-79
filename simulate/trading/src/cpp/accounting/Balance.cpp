@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/accounting/Balance.hpp"
+#include <taosim/accounting/Balance.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -104,13 +104,6 @@ std::optional<decimal_t> Balance::getReservation(OrderID id) const noexcept
         return it->second;
     }
     return std::nullopt;
-}
-
-//-------------------------------------------------------------------------
-
-const std::map<OrderID, decimal_t>& Balance::getReservations() const noexcept
-{
-    return m_reservations;
 }
 
 //-------------------------------------------------------------------------
@@ -283,13 +276,6 @@ void Balance::jsonSerialize(rapidjson::Document& json, const std::string& key) c
             "roundingDecimals", rapidjson::Value{m_roundingDecimals}, allocator);
     };
     json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void Balance::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-
 }
 
 //-------------------------------------------------------------------------

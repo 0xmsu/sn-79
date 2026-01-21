@@ -66,13 +66,6 @@ void Trade::jsonSerialize(rapidjson::Document& json, const std::string& key) con
 
 //-------------------------------------------------------------------------
 
-void Trade::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-
-}
-
-//-------------------------------------------------------------------------
-
 Trade::Ptr Trade::fromJson(const rapidjson::Value& json)
 {
     return Trade::create(
@@ -108,13 +101,6 @@ void TradeContext::jsonSerialize(rapidjson::Document& json, const std::string& k
             });
     };
     taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void TradeContext::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
 }
 
 //-------------------------------------------------------------------------
@@ -182,13 +168,6 @@ void TradeLogContext::jsonSerialize(rapidjson::Document& json, const std::string
 
 //-------------------------------------------------------------------------
 
-void TradeLogContext::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
-}
-
-//-------------------------------------------------------------------------
-
 TradeLogContext::Ptr TradeLogContext::fromJson(const rapidjson::Value& json)
 {
     return TradeLogContext::create(
@@ -220,18 +199,6 @@ void TradeWithLogContext::jsonSerialize(rapidjson::Document& json, const std::st
         json.SetObject();
         trade->jsonSerialize(json, "trade");
         logContext->jsonSerialize(json, "logContext");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void TradeWithLogContext::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        trade->checkpointSerialize(json, "trade");
-        logContext->checkpointSerialize(json, "logContext");
     };
     taosim::json::serializeHelper(json, key, serialize);
 }

@@ -2,9 +2,8 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
 #include "MultiBookExchangeAgent.hpp"
-#include "Process.hpp"
 #include "Simulation.hpp"
 
 #include <fmt/format.h>
@@ -62,9 +61,9 @@ PYBIND11_EMBEDDED_MODULE(thesimulator, m)
         ;
 
     py::class_<accounting::Balance>(m, "Balance")
-        .def("getFree", &accounting::Balance::getFree)
-        .def("getTotal", &accounting::Balance::getTotal)
-        .def("getReserved", &accounting::Balance::getReserved)
+        .def("getFree", [](const accounting::Balance& self) { return self.getFree(); })
+        .def("getTotal", [](const accounting::Balance& self) { return self.getTotal(); })
+        .def("getReserved", [](const accounting::Balance& self) { return self.getReserved(); })
         ;
 
     py::class_<accounting::Balances>(m, "Balances")

@@ -5,7 +5,7 @@
 #pragma once
 
 #include "json_util.hpp"
-#include "mp.hpp"
+#include <taosim/mp/mp.hpp>
 
 #include <optional>
 

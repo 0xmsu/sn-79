@@ -4,8 +4,8 @@
  */
 #pragma once
 
-#include "taosim/decimal/decimal.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/decimal/decimal.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -42,7 +42,8 @@ template<>
 struct pack<taosim::decimal_t>
 {
     template<typename Stream>
-    msgpack::packer<Stream>& operator()(msgpack::packer<Stream>& o, const taosim::decimal_t& v) const
+    msgpack::packer<Stream>& operator()(
+        msgpack::packer<Stream>& o, const taosim::decimal_t& v) const
     {
         if constexpr (std::same_as<Stream, taosim::serialization::HumanReadableStream>) {
             o.pack(taosim::util::decimal2double(v));
@@ -79,7 +80,8 @@ template<>
 struct pack<taosim::PackedDecimal>
 {
     template<typename Stream>
-    msgpack::packer<Stream>& operator()(msgpack::packer<Stream>& o, const taosim::PackedDecimal& v) const
+    msgpack::packer<Stream>& operator()(
+        msgpack::packer<Stream>& o, const taosim::PackedDecimal& v) const
     {
         o.pack_bin(sizeof(v.data));
         o.pack_bin_body(reinterpret_cast<const char*>(v.data), sizeof(v.data));

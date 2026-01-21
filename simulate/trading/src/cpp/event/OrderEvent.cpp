@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/event/OrderEvent.hpp"
+#include <taosim/event/OrderEvent.hpp>
 
 //-------------------------------------------------------------------------
 

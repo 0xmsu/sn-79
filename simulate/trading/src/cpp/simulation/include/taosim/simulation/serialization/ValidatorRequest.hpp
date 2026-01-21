@@ -4,16 +4,13 @@
  */
 #pragma once
 
-#include "taosim/accounting/serialization/Balance.hpp"
-#include "taosim/accounting/serialization/Balances.hpp"
-#include "taosim/book/serialization/TickContainer.hpp"
-#include "taosim/event/serialization/CancellationEvent.hpp"
-#include "taosim/event/serialization/L3RecordContainer.hpp"
-#include "taosim/event/serialization/OrderEvent.hpp"
-#include "taosim/event/serialization/TradeEvent.hpp"
-#include "taosim/simulation/util.hpp"
-#include "taosim/simulation/serialization/LimitOrder.hpp"
-#include "common.hpp"
+#include <taosim/event/serialization/CancellationEvent.hpp>
+#include <taosim/event/serialization/L3RecordContainer.hpp>
+#include <taosim/event/serialization/OrderEvent.hpp>
+#include <taosim/event/serialization/TradeEvent.hpp>
+#include <taosim/simulation/util.hpp>
+#include <taosim/simulation/serialization/LimitOrder.hpp>
+#include <common.hpp>
 
 #include <boost/algorithm/string.hpp>
 #include <msgpack.hpp>
@@ -83,7 +80,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
         o.pack_map(bookCount);
         for (const auto& [blockIdx, simulation] : views::enumerate(v.mngr->simulations())) {
             const auto exchange = simulation->exchange();
-            for (const auto book : exchange->books()) {
+            for (const auto& book : exchange->books()) {
                 const BookId bookIdCanon = blockIdx * blockInfo.dimension + book->id();
 
                 o.pack(bookIdCanon);
@@ -94,7 +91,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
                 o.pack(bookIdCanon);
 
                 o.pack("mtr"s);
-                o.pack(exchange->clearingManager().feePolicy()->mtr(book->id(), 0));
+                o.pack(exchange->clearingManager().feePolicy()->makerTakerRatio(book->id(), 0));
 
                 o.pack("e"s);
                 o.pack(exchange->L3Record().at(book->id()));
@@ -114,7 +111,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
                     }
                     else {
                         o.pack_array(v.size());
-                        for (const auto order : v) {
+                        for (const auto& order : v) {
                             o.pack_map(8);
 
                             o.pack("y"s);
@@ -124,7 +121,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
                             o.pack(order->m_id);
 
                             o.pack("c"s);
-                            o.pack(book->orderClientContext(order->m_id).clientOrderId);
+                            o.pack(book->orderToClientInfo().at(order->m_id).clientOrderId);
 
                             o.pack("t"s);
                             o.pack(order->m_timestamp);
@@ -215,7 +212,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
                 const auto exchange = simulation->exchange();
                 const auto& account = exchange->accounts().at(agentId);
                 const auto feePolicy = exchange->clearingManager().feePolicy();
-                for (const auto book : exchange->books()) {
+                for (const auto& book : exchange->books()) {
                     const BookId bookIdCanon = blockIdx * blockInfo.dimension + book->id();
 
                     o.pack(bookIdCanon);
@@ -277,7 +274,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
                             if (limitOrder == nullptr) continue;
                             limitOrders.push_back(taosim::simulation::serialization::LimitOrder{
                                 .limitOrder = limitOrder,
-                                .clientOrderId = book->orderClientContext(order->id()).clientOrderId
+                                .clientOrderId = book->orderToClientInfo().at(order->id()).clientOrderId
                             });
                         }
                         return limitOrders;
@@ -362,7 +359,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
             };
             std::vector<Message::Ptr> res;
             for (const auto& [blockIdx, simulation] : views::enumerate(v.mngr->simulations())) {
-                for (const auto msg : simulation->proxy()->messages()) {
+                for (const auto& msg : simulation->proxy()->messages()) {
                     if (!checkGlobalDuplicate(msg)) continue;
                     taosim::simulation::canonize(msg, blockIdx, blockInfo.dimension);
                     res.push_back(msg);
@@ -381,7 +378,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
             });
         const auto remoteResponsesPerAgent = [&] {
             std::map<AgentId, std::vector<Message::Ptr>> res;
-            for (const auto msg : collectiveRemoteResponses) {
+            for (const auto& msg : collectiveRemoteResponses) {
                 if (std::dynamic_pointer_cast<StartSimulationPayload>(msg->payload) != nullptr
                     || std::dynamic_pointer_cast<EmptyPayload>(msg->payload) != nullptr) {
                     for (auto agentId : views::keys(representativeSimulation->exchange()->accounts())) {
@@ -838,7 +835,7 @@ struct pack<taosim::simulation::serialization::ValidatorRequest>
             } else {
                 const auto& msgs = it->second;
                 o.pack_array(msgs.size());
-                for (const auto msg : msgs) {
+                for (const auto& msg : msgs) {
                     packNotice(o, msg);
                 }
             }

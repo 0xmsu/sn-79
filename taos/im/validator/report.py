@@ -18,7 +18,6 @@ import argparse
 from typing import Dict
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from taos.im.neurons.validator import Validator
 from taos.im.protocol.models import TradeInfo, MarketSimulationConfig
 from taos.im.protocol.events import TradeEvent
 
@@ -99,9 +98,8 @@ class ReportingService:
             'placement', 'base_balance', 'base_loan', 'base_collateral', 'quote_balance', 'quote_loan', 'quote_collateral',
             'inventory_value', 'inventory_value_change', 'pnl', 'pnl_change', 'total_realized_pnl',
             'total_daily_volume', 'min_daily_volume', 'total_roundtrip_volume', 'min_roundtrip_volume',
-            'activity_factor', 'activity_factor_realized',
-            'sharpe', 'sharpe_penalty', 'sharpe_unrealized_score', 
-            'sharpe_realized', 'sharpe_realized_penalty', 'sharpe_realized_score', 'sharpe_score', 
+            'activity_factor',
+            'kappa', 'kappa_penalty', 'kappa_score', 
             'unnormalized_score', 'score',
             'miner_gauge_name'
         ])
@@ -223,9 +221,19 @@ class ReportingService:
         self.self_volume_sums = deserialize_to_nested_dict(data['self_volume_sums'])
         self.roundtrip_volume_sums = deserialize_to_nested_dict(data['roundtrip_volume_sums'])
         self.inventory_history = data['inventory_history']
-        self.total_realized_pnl = data['total_realized_pnl']
-        self.realized_pnl_by_book = data['realized_pnl_by_book']
-        for key in ['activity_factors', 'activity_factors_realized', 'sharpe_values', 
+
+        self.total_realized_pnl = {
+            int(uid): pnl for uid, pnl in data['total_realized_pnl'].items()
+        }
+        self.realized_pnl_by_book = {
+            int(uid): {
+                int(book_id): pnl 
+                for book_id, pnl in books.items()
+            }
+            for uid, books in data['realized_pnl_by_book'].items()
+        }
+
+        for key in ['activity_factors', 'kappa_values', 
                     'unnormalized_scores', 'scores', 'miner_stats', 'initial_balances', 
                     'initial_balances_published', 'simulation_timestamp', 'step', 
                     'step_rates', 'fundamental_price', 'shared_state_rewarding', 
@@ -273,7 +281,7 @@ def publish_validator_gauges(self: ReportingService):
     last update, active status) and system resource usage (CPU, RAM, disk).
     
     Args:
-        self (Validator): The intelligent markets simulation validator instance
+        self (ReportingService): The intelligent markets simulation validator instance
         
     Returns:
         None
@@ -302,7 +310,7 @@ def publish_info(self: ReportingService) -> None:
     Publishes static simulation and validator information metrics
 
     Args:
-        self (taos.im.neurons.validator.Validator): The intelligent markets simulation validator.
+        self (ReportingService): The intelligent markets simulation validator.
     Returns:
         None
     """
@@ -501,12 +509,7 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
                 len(validator_data['activity_factors'][agentId])
             )
 
-            activity_factor_realized = (
-                sum(validator_data['activity_factors_realized'][agentId].values()) /
-                len(validator_data['activity_factors_realized'][agentId])
-            )
-
-            sharpe_values = validator_data['sharpe_values'][agentId] if agentId in validator_data['sharpe_values'] else None
+            kappa_values = validator_data['kappa_values'][agentId] if agentId in validator_data['kappa_values'] else None
 
             miner_metrics[agentId] = {
                 'total_base_balance': total_base_balance,
@@ -533,16 +536,10 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
                 'average_roundtrip_volume': average_roundtrip_volume,
                 'min_roundtrip_volume': min_roundtrip_volume,
                 'activity_factor': activity_factor,
-                'activity_factor_realized': activity_factor_realized,
-                'sharpe': sharpe_values['median'] if sharpe_values else None,
-                'sharpe_penalty': sharpe_values.get('penalty') if sharpe_values else None,
-                'activity_weighted_normalized_median': sharpe_values.get('activity_weighted_normalized_median') if sharpe_values else None,
-                'sharpe_unrealized_score': sharpe_values.get('score_unrealized') if sharpe_values else None,
-                'sharpe_realized': sharpe_values.get('median_realized') if sharpe_values else None,
-                'sharpe_realized_penalty': sharpe_values.get('penalty_realized') if sharpe_values else None,
-                'activity_weighted_normalized_median_realized': sharpe_values.get('activity_weighted_normalized_median_realized') if sharpe_values else None,
-                'sharpe_realized_score': sharpe_values.get('score_realized') if sharpe_values else None,
-                'sharpe_score': sharpe_values.get('score') if sharpe_values else None,
+                'kappa': kappa_values['median'] if kappa_values else None,
+                'kappa_penalty': kappa_values.get('penalty') if kappa_values else None,
+                'activity_weighted_normalized_median': kappa_values.get('activity_weighted_normalized_median') if kappa_values else None,
+                'kappa_score': kappa_values.get('score') if kappa_values else None,
                 'unnormalized_score': validator_data['unnormalized_scores'][agentId],
                 'score': scores[agentId].item(),
                 'placement': placements[agentId].item(),
@@ -553,7 +550,7 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
             'daily_volumes': daily_volumes,
             'daily_roundtrip_volumes': daily_roundtrip_volumes,
             'total_inventory_history': total_inventory_history,
-            'total_realized_pnl': total_realized_pnl,  # ADD THIS LINE
+            'total_realized_pnl': total_realized_pnl,
             'realized_pnl_by_book': realized_pnl_by_book,
             'pnl': pnl,
             'scores': scores.tolist(),
@@ -570,7 +567,7 @@ async def report(self: ReportingService) -> None:
     Calculates and publishes metrics related to simulation state, validator and agent performance.
 
     Args:
-        self (taos.im.neurons.validator.Validator): The intelligent markets simulation validator.
+        self (ReportingService): The intelligent markets simulation validator.
     Returns:
         None
     """
@@ -743,8 +740,7 @@ async def report(self: ReportingService) -> None:
             'total_realized_pnl': self.total_realized_pnl,
             'realized_pnl_by_book': self.realized_pnl_by_book,
             'activity_factors': self.activity_factors,
-            'activity_factors_realized': self.activity_factors_realized,
-            'sharpe_values': self.sharpe_values,
+            'kappa_values': self.kappa_values,
             'unnormalized_scores': self.unnormalized_scores,
             'scores': self.scores,
             'book_count': self.simulation.book_count,
@@ -781,23 +777,23 @@ async def report(self: ReportingService) -> None:
         bt.logging.debug(f"Collecting agent book metrics...")
         start = time.time()
 
-        bt.logging.debug(f"Pre-extracting inventory/sharpe data...")
+        bt.logging.debug(f"Pre-extracting inventory/kappa data...")
         extract_start = time.time()
 
         start_inventories = {}
         last_inventories = {}
-        sharpe_data = {}
+        kappa_data = {}
         for agentId in self.last_state.accounts.keys():
             if agentId < 0:
                 continue
             if agentId not in self.inventory_history or not self.inventory_history[agentId]:
                 continue
-            if len(self.inventory_history[agentId]) < 2:  # Need at least 2 points
+            if len(self.inventory_history[agentId]) < 2:
                 continue
             inv_values = list(self.inventory_history[agentId].values())
             start_inventories[agentId] = [i for i in inv_values if len(i) > 0][0]
             last_inventories[agentId] = inv_values[-1]
-            sharpe_data[agentId] = self.sharpe_values[agentId]
+            kappa_data[agentId] = self.kappa_values[agentId]
         bt.logging.debug(f"Pre-extraction complete ({time.time()-extract_start:.4f}s)")
 
         for agentId, accounts in self.last_state.accounts.items():
@@ -819,7 +815,7 @@ async def report(self: ReportingService) -> None:
 
             start_inv = start_inventories[agentId]
             last_inv = last_inventories[agentId]
-            sharpes = sharpe_data[agentId]
+            kappas = kappa_data[agentId]
 
             for bookId, account in accounts.items():
                 updates.append((agent_gauges, account['bb']['t'], wallet_addr, netuid, bookId, agentId, "base_balance_total"))
@@ -849,28 +845,24 @@ async def report(self: ReportingService) -> None:
                 updates.append((agent_gauges, daily_volumes[agentId][bookId]['self'], wallet_addr, netuid, bookId, agentId, "daily_self_volume"))
                 updates.append((agent_gauges, daily_roundtrip_volumes[agentId][bookId], wallet_addr, netuid, bookId, agentId, "daily_roundtrip_volume"))
                 updates.append((agent_gauges, self.activity_factors[agentId][bookId], wallet_addr, netuid, bookId, agentId, "activity_factor"))
-                updates.append((agent_gauges, self.activity_factors_realized[agentId][bookId], wallet_addr, netuid, bookId, agentId, "activity_factor_realized"))
-                if sharpes:
-                    updates.append((agent_gauges, sharpes['books'][bookId], wallet_addr, netuid, bookId, agentId, "sharpe"))
-                    if 'books_weighted' in sharpes:
-                        updates.append((agent_gauges, sharpes['books_weighted'][bookId], wallet_addr, netuid, bookId, agentId, "weighted_sharpe"))
-                    if sharpes['books_realized'][bookId] is not None:
-                        updates.append((agent_gauges, sharpes['books_realized'][bookId], wallet_addr, netuid, bookId, agentId, "sharpe_realized"))
+                if kappas:
+                    if kappas['books'][bookId] is not None:
+                        updates.append((agent_gauges, kappas['books'][bookId], wallet_addr, netuid, bookId, agentId, "kappa"))
                     else:
                         try:
-                            agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "sharpe_realized")
+                            agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "kappa")
                         except KeyError:
                             pass
-                    if 'books_weighted_realized' in sharpes and sharpes['books_weighted_realized'][bookId] is not None:
-                        updates.append((agent_gauges, sharpes['books_weighted_realized'][bookId], wallet_addr, netuid, bookId, agentId, "weighted_sharpe_realized"))
+                    if 'books_weighted' in kappas and kappas['books_weighted'][bookId] is not None:
+                        updates.append((agent_gauges, kappas['books_weighted'][bookId], wallet_addr, netuid, bookId, agentId, "weighted_kappa"))
                     else:
                         try:
-                            agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "weighted_sharpe_realized")
+                            agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "weighted_kappa")
                         except KeyError:
                             pass
                 else:
                     try:
-                        agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "sharpe")
+                        agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "kappa")
                     except KeyError:
                         pass       
         bt.logging.debug(f"Agent book metrics collected ({time.time()-start:.4f}s).")
@@ -948,32 +940,20 @@ async def report(self: ReportingService) -> None:
             updates.append((miner_gauges, m['min_roundtrip_volume'], wallet_addr, netuid, agentId, "min_roundtrip_volume"))
 
             updates.append((miner_gauges, m['activity_factor'], wallet_addr, netuid, agentId, "activity_factor"))
-            updates.append((miner_gauges, m['activity_factor_realized'], wallet_addr, netuid, agentId, "activity_factor_realized"))
 
-            if m['sharpe'] is not None:
-                updates.append((miner_gauges, m['sharpe'], wallet_addr, netuid, agentId, "sharpe"))
+            if m['kappa'] is not None:
+                updates.append((miner_gauges, m['kappa'], wallet_addr, netuid, agentId, "kappa"))
                 if m['activity_weighted_normalized_median'] is not None:
-                    updates.append((miner_gauges, m['activity_weighted_normalized_median'], wallet_addr, netuid, agentId, "activity_weighted_normalized_median_sharpe"))
-                if m['sharpe_penalty'] is not None:
-                    updates.append((miner_gauges, m['sharpe_penalty'], wallet_addr, netuid, agentId, "sharpe_penalty"))
-                if m['sharpe_unrealized_score'] is not None:
-                    updates.append((miner_gauges, m['sharpe_unrealized_score'], wallet_addr, netuid, agentId, "sharpe_unrealized_score"))
+                    updates.append((miner_gauges, m['activity_weighted_normalized_median'], wallet_addr, netuid, agentId, "activity_weighted_normalized_median_kappa"))
+                if m['kappa_penalty'] is not None:
+                    updates.append((miner_gauges, m['kappa_penalty'], wallet_addr, netuid, agentId, "kappa_penalty"))
+                if m['kappa_score'] is not None:
+                    updates.append((miner_gauges, m['kappa_score'], wallet_addr, netuid, agentId, "kappa_score"))
             else:
                 try:
-                    miner_gauges.remove(wallet_addr, netuid, agentId, "sharpe")
+                    miner_gauges.remove(wallet_addr, netuid, agentId, "kappa")
                 except KeyError:
                     pass
-            if m['sharpe_realized'] is not None:
-                updates.append((miner_gauges, m['sharpe_realized'], wallet_addr, netuid, agentId, "sharpe_realized"))
-                if m['activity_weighted_normalized_median_realized'] is not None:
-                    updates.append((miner_gauges, m['activity_weighted_normalized_median_realized'], wallet_addr, netuid, agentId, "activity_weighted_normalized_median_sharpe_realized"))
-                if m['sharpe_realized_penalty'] is not None:
-                    updates.append((miner_gauges, m['sharpe_realized_penalty'], wallet_addr, netuid, agentId, "sharpe_penalty_realized"))
-                if m['sharpe_realized_score'] is not None:
-                    updates.append((miner_gauges, m['sharpe_realized_score'], wallet_addr, netuid, agentId, "sharpe_realized_score"))
-            
-            if m['sharpe_score'] is not None:
-                updates.append((miner_gauges, m['sharpe_score'], wallet_addr, netuid, agentId, "sharpe_score"))
 
             updates.append((miner_gauges, m['unnormalized_score'], wallet_addr, netuid, agentId, "unnormalized_score"))
             updates.append((miner_gauges, m['score'], wallet_addr, netuid, agentId, "score"))
@@ -1018,14 +998,9 @@ async def report(self: ReportingService) -> None:
                 total_roundtrip_volume=m['total_roundtrip_volume'],
                 min_roundtrip_volume=m['min_roundtrip_volume'], 
                 activity_factor=m['activity_factor'],
-                activity_factor_realized=m['activity_factor_realized'],
-                sharpe=m['sharpe'],
-                sharpe_penalty=m['sharpe_penalty'],
-                sharpe_unrealized_score=m['sharpe_unrealized_score'],
-                sharpe_realized=m['sharpe_realized'],
-                sharpe_realized_penalty=m['sharpe_realized_penalty'],
-                sharpe_realized_score=m['sharpe_realized_score'],
-                sharpe_score=m['sharpe_score'],
+                kappa=m['kappa'],
+                kappa_penalty=m['kappa_penalty'],
+                kappa_score=m['kappa_score'],
                 unnormalized_score=m['unnormalized_score'],
                 score=m['score'],
                 miner_gauge_name='miners'

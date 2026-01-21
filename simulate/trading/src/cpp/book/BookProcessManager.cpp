@@ -2,19 +2,24 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "BookProcessManager.hpp"
+#include <taosim/book/BookProcessManager.hpp>
 
+#include <taosim/exchange/ExchangeConfig.hpp>
 #include "Simulation.hpp"
-#include "taosim/exchange/ExchangeConfig.hpp"
 
 #include <rapidcsv.h>
+
+//-------------------------------------------------------------------------
+
+namespace taosim::book
+{
 
 //-------------------------------------------------------------------------
 
 BookProcessManager::BookProcessManager(
     BookProcessManager::ProcessContainer container,
     BookProcessManager::LoggerContainer loggers,
-    std::unique_ptr<ProcessFactory> processFactory,
+    std::unique_ptr<taosim::process::ProcessFactory> processFactory,
     decltype(taosim::simulation::SimulationSignals::time)& timeSignal)
     : m_container{std::move(container)},
       m_loggers{std::move(loggers)},
@@ -62,35 +67,6 @@ void BookProcessManager::updateProcesses(Timespan timespan)
 
 //-------------------------------------------------------------------------
 
-void BookProcessManager::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        for (const auto& [name, bookId2Process] : m_container) {
-            rapidjson::Document subJson{rapidjson::kObjectType, &allocator};
-            taosim::json::serializeHelper(
-                subJson,
-                "processes",
-                [&](rapidjson::Document& json) {
-                    json.SetArray();
-                    auto& allocator = json.GetAllocator();
-                    for (const auto& process : bookId2Process) {
-                        rapidjson::Document processJson{&allocator};
-                        process->checkpointSerialize(processJson);
-                        json.PushBack(processJson, allocator);
-                    }
-                });
-            m_loggers.at(name)->checkpointSerialize(subJson, "logger");
-            json.AddMember(rapidjson::Value{name.c_str(), allocator}, subJson, allocator);
-        }
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 std::unique_ptr<BookProcessManager> BookProcessManager::fromXML(
     pugi::xml_node node, Simulation* simulation, taosim::exchange::ExchangeConfig* exchangeConfig)
 {
@@ -107,7 +83,8 @@ std::unique_ptr<BookProcessManager> BookProcessManager::fromXML(
         simulation->blockIdx() * bookCount + bookCount - 1
     };
 
-    auto processFactory = std::make_unique<ProcessFactory>(simulation, exchangeConfig);
+    auto processFactory =
+        std::make_unique<taosim::process::ProcessFactory>(simulation, exchangeConfig);
 
     ProcessContainer container;
     LoggerContainer loggers;
@@ -141,8 +118,8 @@ std::unique_ptr<BookProcessManager> BookProcessManager::fromXML(
         loggers[name] = std::make_unique<BookProcessLogger>(
             simulation->logDir() / processLogFileName,
             container.at(name)
-                | views::transform([](const auto& p) { return p->value(); })
-                | ranges::to<std::vector>,
+            | views::transform([](const auto& p) { return p->value(); })
+            | ranges::to<std::vector>,
             simulation);
     }
 
@@ -155,29 +132,6 @@ std::unique_ptr<BookProcessManager> BookProcessManager::fromXML(
 
 //-------------------------------------------------------------------------
 
-std::unique_ptr<BookProcessManager> BookProcessManager::fromCheckpoint(
-    const rapidjson::Value& json, Simulation* simulation, taosim::exchange::ExchangeConfig* exchangeConfig)
-{
-    auto processFactory = std::make_unique<ProcessFactory>(simulation, exchangeConfig);
-
-    BookProcessManager::ProcessContainer container;
-    BookProcessManager::LoggerContainer loggers;
-    for (const auto& member : json.GetObject()) {
-        const char* name = member.name.GetString();
-        const rapidjson::Value& value = member.value;
-        auto& processes = container[name];
-        const auto& processesJson = value["processes"].GetArray();
-        for (const auto& [bookId, processJson] : views::enumerate(processesJson)) {
-            processes[bookId] = processFactory->createFromCheckpoint(processJson);
-        }
-        loggers[name] = BookProcessLogger::fromCheckpoint(value["logger"], simulation);
-    }
-
-    return std::make_unique<BookProcessManager>(
-        std::move(container),
-        std::move(loggers),
-        std::move(processFactory),
-        simulation->signals().time);
-}
+}  // namespace taosim::book
 
 //-------------------------------------------------------------------------

@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/accounting/FreeInfo.hpp"
+#include <taosim/accounting/FreeInfo.hpp>
 
 //-------------------------------------------------------------------------
 

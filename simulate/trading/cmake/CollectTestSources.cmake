@@ -1,4 +1,7 @@
-macro(collect_test_sources)
+function(collect_test_sources)
     file(GLOB local_test_sources CONFIGURE_DEPENDS "*.cpp")
-    set(test_sources ${test_sources} ${local_test_sources} PARENT_SCOPE)
-endmacro()
+    set(TEST_SOURCES
+        "${TEST_SOURCES};${local_test_sources}"
+        CACHE INTERNAL
+        "List of all collected test compilation units")
+endfunction()

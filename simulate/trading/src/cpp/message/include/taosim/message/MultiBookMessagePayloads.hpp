@@ -4,9 +4,9 @@
  */
 #pragma once
 
-#include "taosim/serialization/msgpack_util.hpp"
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/MessagePayload.hpp"
+#include <taosim/serialization/msgpack/common.hpp>
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/MessagePayload.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -21,8 +21,6 @@ struct BookStateMessagePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -44,8 +42,6 @@ struct DistributedAgentResponsePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);

@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "taosim/decimal/serialization/decimal.hpp"
+#include <taosim/decimal/serialization/decimal.hpp>
 #include "CheckpointSerializable.hpp"
 #include "JsonSerializable.hpp"
 #include "common.hpp"
@@ -90,7 +90,7 @@ struct fmt::formatter<OrderErrorCode>
 
 //-------------------------------------------------------------------------
 
-struct BasicOrder : public JsonSerializable, public CheckpointSerializable
+struct BasicOrder : public JsonSerializable
 {
     BasicOrder() noexcept = default;
 
@@ -114,8 +114,6 @@ struct BasicOrder : public JsonSerializable, public CheckpointSerializable
     void setLeverage(taosim::decimal_t newLeverage);
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     OrderID m_id;
@@ -155,8 +153,6 @@ struct Order : public BasicOrder
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     OrderDirection m_direction;
     STPFlag m_stpFlag{STPFlag::CO};
@@ -195,8 +191,6 @@ struct MarketOrder : public Order
     void L3Serialize(rapidjson::Document& json, const std::string& key = {}) const;
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -245,8 +239,6 @@ struct LimitOrder : public Order
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json, int priceDecimals, int volumeDecimals);
 
@@ -272,7 +264,7 @@ struct LimitOrder : public Order
 
 //-------------------------------------------------------------------------
 
-struct OrderClientContext : public CheckpointSerializable
+struct OrderClientContext
 {
     AgentId agentId;
     std::optional<ClientOrderID> clientOrderId;
@@ -282,9 +274,6 @@ struct OrderClientContext : public CheckpointSerializable
     OrderClientContext(AgentId agentId, std::optional<ClientOrderID> clientOrderId = {}) noexcept
         : agentId{agentId}, clientOrderId{clientOrderId}
     {}
-
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static OrderClientContext fromJson(const rapidjson::Value& json);
 

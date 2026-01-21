@@ -3,11 +3,8 @@ add_library(util STATIC
     ClosePosition.cpp
     GBMValuationModel.hpp
     Order.cpp
-    OrderFactory.cpp
-    SubscriptionRegistry.hpp
     Timestamp.hpp
     Trade.cpp
-    TradeFactory.cpp
     common.hpp
     util.cpp
     Flags.hpp
@@ -17,14 +14,15 @@ add_library(taosim::util ALIAS util)
 
 target_include_directories(util
     PUBLIC
+        include
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${src_dir}/accounting"
-        "${src_dir}/agent"
-        "${src_dir}/base"
-        "${src_dir}/exchange"
-        "${src_dir}/mp"
-        "${src_dir}/serialization"
-        "${src_dir}/simulation/include"
+        "${SRC_DIR}/accounting"
+        "${SRC_DIR}/agent"
+        "${SRC_DIR}/base"
+        "${SRC_DIR}/exchange"
+        "${SRC_DIR}/mp"
+        "${SRC_DIR}/serialization"
+        "${SRC_DIR}/simulation/include"
 )
 
 target_link_libraries(util

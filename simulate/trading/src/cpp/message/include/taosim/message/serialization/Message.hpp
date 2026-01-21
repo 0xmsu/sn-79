@@ -4,12 +4,14 @@
  */
 #pragma once
 
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/Message.hpp"
-#include "taosim/message/MessagePayload.hpp"
-#include "taosim/message/PayloadFactory.hpp"
-#include "taosim/message/serialization/DistributedAgentResponsePayload.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/Message.hpp>
+#include <taosim/message/MessagePayload.hpp>
+#include <taosim/message/PayloadFactory.hpp>
+#include <taosim/message/serialization/DistributedAgentResponsePayload.hpp>
+#include <taosim/message/serialization/helpers.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
+#include <taosim/serialization/msgpack/utils.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -31,6 +33,32 @@ struct convert<Message>
             throw taosim::serialization::MsgPackError{};
         }
 
+        const auto type = taosim::serialization::msgpackFindMap<std::string_view>(o, "type");
+        if (!type) {
+            throw taosim::serialization::MsgPackError{};
+        }
+        v.type = *type;
+
+        for (const auto& [k, val] : o.via.map) {
+            auto key = k.as<std::string_view>();
+
+            if (key == "occurrence") {
+                v.occurrence = val.as<Timestamp>();
+            }
+            else if (key == "arrival") {
+                v.arrival = val.as<Timestamp>();
+            }
+            else if (key == "source") {
+                v.source = val.as<std::string>();
+            }
+            else if (key == "target") {
+                v.targets = val.as<std::vector<std::string>>();
+            }
+            else if (key == "payload") {
+                v.payload = PayloadFactory::createFromMessagePack(val, *type);
+            }
+        }
+
         return o;
     }
 };
@@ -41,27 +69,25 @@ struct pack<Message>
     template<typename Stream>
     msgpack::packer<Stream>& operator()(msgpack::packer<Stream>& o, const Message& v) const
     {
-        using namespace std::string_literals;
-
         o.pack_map(6);
 
-        o.pack("timestamp"s);
+        o.pack("occurrence");
         o.pack(v.occurrence);
     
-        o.pack("delay"s);
-        o.pack(v.arrival - v.occurrence);
+        o.pack("arrival");
+        o.pack(v.arrival);
 
-        o.pack("source"s);
+        o.pack("source");
         o.pack(v.source);
 
-        o.pack("target"s);
-        o.pack(fmt::format("{}", fmt::join(v.targets, std::string{1, Message::s_targetDelim})));
+        o.pack("target");
+        o.pack(v.targets);
 
-        o.pack("type"s);
+        o.pack("type");
         o.pack(v.type);
 
-        o.pack("payload"s);
-        o.pack(v.payload);
+        o.pack("payload");
+        taosim::message::serialization::packMessagePayload(o, v.payload);
 
         return o;
     }

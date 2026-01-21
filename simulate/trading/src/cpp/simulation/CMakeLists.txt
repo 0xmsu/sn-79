@@ -5,31 +5,36 @@ add_library(taosim::simulation ALIAS simulation)
 target_include_directories(simulation
     PUBLIC
         include
-        "${src_dir}"
-        "${src_dir}/accounting"
-        "${src_dir}/accounting/include"
-        "${src_dir}/agent"
-        "${src_dir}/base"
-        "${src_dir}/book"
-        "${src_dir}/book/include"
-        "${src_dir}/decimal"
-        "${src_dir}/exchange"
-        "${src_dir}/exchange/include"
-        "${src_dir}/mp"
-        "${src_dir}/net"
-        "${src_dir}/process"
-        "${src_dir}/util"
+        "${SRC_DIR}"
+        "${SRC_DIR}/accounting"
+        "${SRC_DIR}/accounting/include"
+        "${SRC_DIR}/agent"
+        "${SRC_DIR}/base"
+        "${SRC_DIR}/book"
+        "${SRC_DIR}/book/include"
+        "${SRC_DIR}/decimal"
+        "${SRC_DIR}/exchange"
+        "${SRC_DIR}/exchange/include"
+        "${SRC_DIR}/mp"
+        "${SRC_DIR}/net"
+        "${SRC_DIR}/util"
 )
 
 target_link_libraries(simulation
-    PRIVATE
+    PUBLIC
+        taosim::checkpoint
         taosim::decimal
+        taosim::dsa
         taosim::event
+        taosim::filesystem
         taosim::ipc
         taosim::message
         taosim::net
+        taosim::process
         taosim::replay
         taosim::serialization
+        taosim::util
+        taosim::xml
         Boost::boost
         pybind11::embed
 )

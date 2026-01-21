@@ -4,8 +4,8 @@
  */
 #pragma once
 
-#include "taosim/event/Cancellation.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/event/Cancellation.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -29,6 +29,7 @@ struct convert<taosim::event::Cancellation>
 
         for (const auto& [k, val] : o.via.map) {
             auto key = k.as<std::string_view>();
+
             if (key == "orderId") {
                 v.id = val.as<OrderID>();
             }
@@ -52,13 +53,13 @@ struct pack<taosim::event::Cancellation>
 
         o.pack_map(3);
 
-        o.pack("event"s);
-        o.pack("cancel"s);
+        o.pack("event");
+        o.pack("cancel");
 
-        o.pack("orderId"s);
+        o.pack("orderId");
         o.pack(v.id);
 
-        o.pack("volume"s);
+        o.pack("volume");
         o.pack(v.volume);
 
         return o;

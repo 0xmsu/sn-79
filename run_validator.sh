@@ -12,7 +12,7 @@ TIMEOUT=3.0
 SIMULATION_CONFIG=simulation_0
 PRESERVE_SIMULATOR=0
 USE_TMUX=1
-while getopts e:p:w:h:u:l:d:o:t:c:s:x: flag
+while getopts e:p:w:h:u:l:d:o:t:g:s:x:c: flag
 do
     case "${flag}" in
         e) ENDPOINT=${OPTARG};;
@@ -24,10 +24,10 @@ do
         d) PD_KEY=${OPTARG};;
         o) PROM_PORT=${OPTARG};;
         t) TIMEOUT=${OPTARG};;
-        c) SIMULATION_CONFIG=${OPTARG};;
+        g) SIMULATION_CONFIG=${OPTARG};;
         s) PRESERVE_SIMULATOR=${OPTARG};;
         x) USE_TMUX=${OPTARG};;
-        # c) CHECKPOINT=${OPTARG};;
+        c) CHECKPOINT=${OPTARG};;
     esac
 done
 echo "ENDPOINT: $ENDPOINT"
@@ -35,13 +35,13 @@ echo "WALLET_PATH: $WALLET_PATH"
 echo "WALLET_NAME: $WALLET_NAME"
 echo "HOTKEY_NAME: $HOTKEY_NAME"
 echo "NETUID: $NETUID"
-echo "CHECKPOINT: $CHECKPOINT"
 echo "PAGERDUTY KEY: $PD_KEY"
 echo "PROMETHEUS PORT: $PROM_PORT"
 echo "TIMEOUT: $TIMEOUT"
 echo "SIMULATION_CONFIG: $SIMULATION_CONFIG"
 echo "PRESERVE_SIMULATOR: $PRESERVE_SIMULATOR"
 echo "USE_TMUX: $USE_TMUX"
+echo "CHECKPOINT: $CHECKPOINT"
 
 if [ $PRESERVE_SIMULATOR = 0 ]; then
     pm2 delete simulator validator
@@ -93,11 +93,11 @@ pm2 start --name=validator "python validator.py --netuid $NETUID --subtensor.cha
 if [ $PRESERVE_SIMULATOR = 0 ]; then
     echo "Starting Simulator"
     cd ../../../simulate/trading/run
-    # if [ $CHECKPOINT = 0 ]; then
+    if [ $CHECKPOINT = 0 ]; then
         pm2 start --no-autorestart --name=simulator "../build/src/cpp/taosim -f config/$SIMULATION_CONFIG.xml"
-    # else
-        # pm2 start --no-autorestart --name=simulator "../build/src/cpp/taosim -c $CHECKPOINT"
-    # fi
+    else
+        pm2 start --no-autorestart --name=simulator "../build/src/cpp/taosim -c $CHECKPOINT"
+    fi
     pm2 save
     pm2 startup
     

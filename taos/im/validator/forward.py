@@ -18,6 +18,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import os
 import time
 import bittensor as bt
 import uvloop
@@ -202,40 +203,64 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
 
             receive_start = time.time()
             self.request_queue.send(b'query')
+            bt.logging.info(f"Sent query request, waiting for notification...")
 
             max_wait = self.config.neuron.global_query_timeout + 10
-            check_count = 0
-            data_size = 0
-            time.sleep(self.config.neuron.timeout)
             
-            while time.time() - receive_start < max_wait:
-                check_count += 1
-                data_size = struct.unpack_from('Q', self.response_mem, 0)[0]            
-                if data_size > 0:
-                    elapsed = time.time() - receive_start
-                    bt.logging.info(f"Received Query Response after {check_count} checks ({elapsed:.4f}s)")
-                    read_start = time.time()
-                    result_bytes = bytes(self.response_mem[8:8+data_size])
-                    if len(result_bytes) != data_size:
-                        bt.logging.warning(f"Incomplete read: got {len(result_bytes)}, expected {data_size}")
-                        time.sleep(0.001)
-                        continue
+            try:
+                loop = asyncio.get_event_loop()
+                future = asyncio.Future()
+                
+                def pipe_readable():
+                    """Callback when pipe becomes readable"""
+                    loop.remove_reader(self.query_notify_read)
                     try:
-                        result = pickle.loads(result_bytes)
-                        bt.logging.info(f"Read query response data ({time.time()-read_start:.4f}s)")
-                        break
-                    except (pickle.UnpicklingError, UnicodeDecodeError) as e:
-                        bt.logging.warning(f"Corrupt data on attempt {check_count}: {e}")
-                        self.response_mem.seek(0)
-                        self.response_mem.write(struct.pack('Q', 0))
-                        time.sleep(0.01)
-                        continue            
-                time.sleep(0.001)
-            else:
-                self.pagerduty_alert(f"Query service response timeout after {max_wait}s")
+                        data = os.read(self.query_notify_read, 1)
+                        future.set_result(data)
+                    except Exception as e:
+                        future.set_exception(e)
+                loop.add_reader(self.query_notify_read, pipe_readable)
+                try:
+                    notify_result = await asyncio.wait_for(future, timeout=max_wait)
+                except asyncio.TimeoutError:
+                    loop.remove_reader(self.query_notify_read)
+                    raise
+                pipe_wait_time = time.time() - receive_start
+                if notify_result == b'1':
+                    bt.logging.info(f"Received query completion notification ({pipe_wait_time:.4f}s)")
+                elif notify_result == b'R':
+                    bt.logging.debug("Ignoring stray ready signal")
+                    return await forward(self, synapse)
+                else:
+                    bt.logging.warning(f"Unexpected notification: {notify_result}")
+                    return responses
+            except asyncio.TimeoutError:
+                self.pagerduty_alert(f"Query service notification timeout after {max_wait}s")
                 return responses
+            except Exception as e:
+                self.pagerduty_alert(f"Error waiting for notification: {e}")
+                return responses
+            
+            read_start = time.time()
+            self.response_mem.seek(0)
+            size_bytes = self.response_mem.read(8)
+            data_size = struct.unpack('Q', size_bytes)[0]
+            
             if data_size == 0:
-                self.pagerduty_alert(f"Query service response timeout - size still 0")
+                self.pagerduty_alert("Query service signaled ready but response size is 0")
+                return responses
+            
+            result_bytes = self.response_mem.read(data_size)
+            
+            if len(result_bytes) != data_size:
+                self.pagerduty_alert(f"Incomplete read: got {len(result_bytes)}, expected {data_size}")
+                return responses
+            
+            try:
+                result = pickle.loads(result_bytes)
+                bt.logging.info(f"Read query response data ({time.time()-read_start:.4f}s)")
+            except (pickle.UnpicklingError, UnicodeDecodeError) as e:
+                self.pagerduty_alert(f"Failed to unpickle query response: {e}")
                 return responses
 
         except posix_ipc.BusyError:

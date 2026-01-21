@@ -4,13 +4,12 @@
  */
 #pragma once
 
-#include "CheckpointSerializable.hpp"
-#include "Fees.hpp"
+#include <taosim/exchange/Fees.hpp>
 #include "JsonSerializable.hpp"
 #include "Order.hpp"
 #include "Timestamp.hpp"
 #include "common.hpp"
-#include "mp.hpp"
+#include <taosim/mp/mp.hpp>
 #include "util.hpp"
 
 #include <memory>
@@ -23,7 +22,7 @@ using TradeID = uint32_t;
 
 //-------------------------------------------------------------------------
 
-struct Trade : public JsonSerializable, public CheckpointSerializable
+struct Trade : public JsonSerializable
 {
     using Ptr = std::shared_ptr<Trade>;
 
@@ -52,8 +51,6 @@ struct Trade : public JsonSerializable, public CheckpointSerializable
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     template<typename... Args>
     requires std::constructible_from<Trade, Args...> && taosim::mp::IsPointer<typename Trade::Ptr>
@@ -65,8 +62,8 @@ struct Trade : public JsonSerializable, public CheckpointSerializable
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
     TradeID m_id;
-    OrderDirection m_direction;
     Timestamp m_timestamp;
+    OrderDirection m_direction;
     OrderID m_aggressingOrderID;
     OrderID m_restingOrderID;
     taosim::decimal_t m_volume;
@@ -74,8 +71,8 @@ struct Trade : public JsonSerializable, public CheckpointSerializable
 
     MSGPACK_DEFINE_MAP(
         MSGPACK_NVP("tradeId", m_id),
-        MSGPACK_NVP("timestamp", m_timestamp),
         MSGPACK_NVP("direction", m_direction),
+        MSGPACK_NVP("timestamp", m_timestamp),
         MSGPACK_NVP("aggressingOrderId", m_aggressingOrderID),
         MSGPACK_NVP("restingOrderId", m_restingOrderID),
         MSGPACK_NVP("volume", m_volume),
@@ -84,7 +81,7 @@ struct Trade : public JsonSerializable, public CheckpointSerializable
 
 //-------------------------------------------------------------------------
 
-struct TradeContext : public JsonSerializable, public CheckpointSerializable
+struct TradeContext : public JsonSerializable
 {
     BookId bookId;
     AgentId aggressingAgentId;
@@ -106,8 +103,6 @@ struct TradeContext : public JsonSerializable, public CheckpointSerializable
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static TradeContext fromJson(const rapidjson::Value& json);
 
@@ -116,7 +111,7 @@ struct TradeContext : public JsonSerializable, public CheckpointSerializable
 
 //-------------------------------------------------------------------------
 
-struct TradeLogContext : public JsonSerializable, public CheckpointSerializable
+struct TradeLogContext : public JsonSerializable
 {
     using Ptr = std::shared_ptr<TradeLogContext>;
 
@@ -142,8 +137,6 @@ struct TradeLogContext : public JsonSerializable, public CheckpointSerializable
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     template<typename... Args>
     requires std::constructible_from<TradeLogContext, Args...>
@@ -160,7 +153,7 @@ struct TradeLogContext : public JsonSerializable, public CheckpointSerializable
 
 //-------------------------------------------------------------------------
 
-struct TradeWithLogContext : public JsonSerializable, public CheckpointSerializable
+struct TradeWithLogContext : public JsonSerializable
 {
     using Ptr = std::shared_ptr<TradeWithLogContext>;
 
@@ -176,8 +169,6 @@ struct TradeWithLogContext : public JsonSerializable, public CheckpointSerializa
     void L3Serialize(rapidjson::Document& json, const std::string& key = {}) const;
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     template<typename... Args>

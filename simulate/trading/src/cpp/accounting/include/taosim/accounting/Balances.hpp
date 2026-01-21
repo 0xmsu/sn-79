@@ -10,7 +10,7 @@
 #include "Loan.hpp"
 #include "Order.hpp"
 #include "common.hpp"
-#include "taosim/accounting/common.hpp"
+#include <taosim/accounting/common.hpp>
 #include "Balance.hpp"
 #include "Collateral.hpp"
 
@@ -36,7 +36,7 @@ struct ReservationAmounts
 
 //-------------------------------------------------------------------------
 
-class Balances : public JsonSerializable, public CheckpointSerializable
+class Balances : public JsonSerializable
 {
 public:
     Balance base{};
@@ -78,8 +78,6 @@ public:
     [[nodiscard]] auto&& loans(this auto&& self) noexcept { return self.m_loans; }
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Balances fromJson(const rapidjson::Value& json);

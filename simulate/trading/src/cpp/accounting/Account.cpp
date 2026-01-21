@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/accounting/Account.hpp"
+#include <taosim/accounting/Account.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -50,44 +50,6 @@ void Account::jsonSerialize(rapidjson::Document& json, const std::string& key) c
                     for (const auto order : activeOrders) {
                         rapidjson::Document orderJson{&allocator};
                         order->jsonSerialize(orderJson);
-                        orderArrayJson.PushBack(orderJson, allocator);
-                    }
-                    json.PushBack(orderArrayJson, allocator);
-                }
-            });
-    };
-    json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void Account::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        json::serializeHelper(
-            json,
-            "holdings",
-            [this](rapidjson::Document& json) {
-                json.SetArray();
-                auto& allocator = json.GetAllocator();
-                for (const auto& balances : *this) {
-                    rapidjson::Document balancesJson{&allocator};
-                    balances.checkpointSerialize(balancesJson);
-                    json.PushBack(balancesJson, allocator);
-                }
-            });
-        json::serializeHelper(
-            json,
-            "activeOrders",
-            [this](rapidjson::Document& json) {
-                json.SetArray();
-                auto& allocator = json.GetAllocator();
-                for (const auto& activeOrders : m_activeOrders) {
-                    rapidjson::Document orderArrayJson{rapidjson::kArrayType, &allocator};
-                    for (const auto order : activeOrders) {
-                        rapidjson::Document orderJson{&allocator};
-                        order->checkpointSerialize(orderJson);
                         orderArrayJson.PushBack(orderJson, allocator);
                     }
                     json.PushBack(orderArrayJson, allocator);

@@ -2,30 +2,17 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "RandomTraderAgent.hpp"
+#include <taosim/agent/RandomTraderAgent.hpp>
 
-#include "taosim/event/Cancellation.hpp"
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/MessagePayload.hpp"
-#include "Simulation.hpp"
-
-#include <boost/accumulators/accumulators.hpp>
-#include <boost/accumulators/statistics/stats.hpp>
-#include <boost/accumulators/statistics/variance.hpp>
-#include <boost/random.hpp>
-#include <boost/random/laplace_distribution.hpp>
-#include <unsupported/Eigen/NonLinearOptimization>
-
-#include <algorithm>
+#include <taosim/event/Cancellation.hpp>
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/MessagePayload.hpp>
+#include <Simulation.hpp>
 
 //-------------------------------------------------------------------------
 
 namespace taosim::agent
 {
-
-//-------------------------------------------------------------------------
-
-namespace br = boost::random;
 
 //-------------------------------------------------------------------------
 
@@ -135,35 +122,19 @@ void RandomTraderAgent::handleTradeSubscriptionResponse()
 
 void RandomTraderAgent::handleRetrieveResponse(Message::Ptr msg)
 {
-    // const auto payload = std::dynamic_pointer_cast<RetrieveL2ResponsePayload>(msg->payload);
     const auto payload = std::dynamic_pointer_cast<RetrieveL1ResponsePayload>(msg->payload);
     BookId bookId = payload->bookId;
-    // std::vector<BookLevel> bids = payload->bids;
-    // std::vector<BookLevel> asks = payload->asks;
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    double quantityBid = std::uniform_real_distribution<double>{m_quantityMin,m_quantityMax} (gen);
-    double quantityAsk = std::uniform_real_distribution<double>{m_quantityMin,m_quantityMax} (gen);
-    // std::vector<double> weights = {0.4, 0.25, 0.15, 0.1, 0.1};
-    // std::vector<int> indices = {0, 1, 2, 3, 4};
+    double quantityBid = std::uniform_real_distribution<double>{m_quantityMin, m_quantityMax}(gen);
+    double quantityAsk = std::uniform_real_distribution<double>{m_quantityMin, m_quantityMax}(gen);
 
-    // Discrete distribution with given weights
-    // std::discrete_distribution<> dist(weights.begin(), weights.end());
-    // Draw one index
-    // int draw = dist(gen);
     OrderDirection direction; 
     double bestAsk = util::decimal2double(payload->bestAskPrice);
     double bestBid = util::decimal2double(payload->bestBidPrice);
-    double limitBidPrice = std::uniform_real_distribution<double>{bestBid,bestAsk} (gen);
-    double limitAskPrice = std::uniform_real_distribution<double>{limitBidPrice, bestAsk} (gen);
-    // if (std::bernoulli_distribution{0.5} (gen)) {
-        //  direction = OrderDirection::SELL;
-        //  limitPrice = asks.at(draw).price;
-    // } else {
-        // direction = OrderDirection::BUY;
-        // limitPrice = bids.at(draw).price;
-    // }
+    double limitBidPrice = std::uniform_real_distribution<double>{bestBid,bestAsk}(gen);
+    double limitAskPrice = std::uniform_real_distribution<double>{limitBidPrice, bestAsk}(gen);
 
     // add later for testing
     double leverage = 0.0;

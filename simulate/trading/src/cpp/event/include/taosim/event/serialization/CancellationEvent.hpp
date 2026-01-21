@@ -4,8 +4,8 @@
  */
 #pragma once
 
-#include "taosim/event/CancellationEvent.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/event/CancellationEvent.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -28,6 +28,20 @@ struct convert<taosim::event::CancellationEvent>
             throw taosim::serialization::MsgPackError{};
         }
 
+        for (const auto& [k, val] : o.via.map) {
+            auto key = k.as<std::string_view>();
+
+            if (key == "cancellation") {
+                v.cancellation = val.as<taosim::event::Cancellation>();
+            }
+            else if (key == "timestamp") {
+                v.timestamp = val.as<Timestamp>();
+            }
+            else if (key == "price") {
+                v.price = val.as<taosim::decimal_t>();
+            }
+        }
+
         return o;
     }
 };
@@ -39,24 +53,42 @@ struct pack<taosim::event::CancellationEvent>
     msgpack::packer<Stream>& operator()(
         msgpack::packer<Stream>& o, const taosim::event::CancellationEvent& v) const
     {
-        using namespace std::string_literals;
-
-        o.pack_map(5);
+        if constexpr (std::same_as<Stream, taosim::serialization::HumanReadableStream>) {
+            o.pack_map(5);
     
-        o.pack("y"s);
-        o.pack("c"s);
+            o.pack("y");
+            o.pack("c");
 
-        o.pack("i"s);
-        o.pack(v.cancellation.id);
+            o.pack("i");
+            o.pack(v.cancellation.id);
 
-        o.pack("t"s);
-        o.pack(v.timestamp);
+            o.pack("t");
+            o.pack(v.timestamp);
 
-        o.pack("p"s);
-        o.pack(v.price);
+            o.pack("p");
+            o.pack(v.price);
 
-        o.pack("q"s);
-        o.pack(v.cancellation.volume);
+            o.pack("q");
+            o.pack(v.cancellation.volume);
+        }
+        else if constexpr (std::same_as<Stream, taosim::serialization::BinaryStream>) {
+            o.pack_map(4);
+
+            o.pack("event");
+            o.pack("cancel");
+
+            o.pack("cancellation");
+            o.pack(v.cancellation);
+
+            o.pack("timestamp");
+            o.pack(v.timestamp);
+
+            o.pack("price");
+            o.pack(v.price);
+        }
+        else {
+            static_assert(false, "Unrecognized Stream type");
+        }
 
         return o;
     }

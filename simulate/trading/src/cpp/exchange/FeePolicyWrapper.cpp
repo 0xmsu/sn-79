@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/exchange/FeePolicyWrapper.hpp"
+#include <taosim/exchange/FeePolicyWrapper.hpp>
 
 #include <mutex>
 
@@ -82,12 +82,12 @@ decimal_t FeePolicyWrapper::agentVolume(BookId bookId, AgentId agentId) const no
 
 //-------------------------------------------------------------------------
 
-decimal_t FeePolicyWrapper::mtr(BookId bookId, AgentId agentId) const noexcept
+decimal_t FeePolicyWrapper::makerTakerRatio(BookId bookId, AgentId agentId) const noexcept
 {
     if (isTiered()) return {};
 
     const auto* dynamic = dynamic_cast<DynamicFeePolicy*>(m_feePolicy.get());
-    return dynamic->mtr(bookId);
+    return dynamic->makerTakerRatio(bookId);
 }
 
 //-------------------------------------------------------------------------

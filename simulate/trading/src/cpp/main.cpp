@@ -2,18 +2,17 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/replay/ReplayDesc.hpp"
-#include "taosim/replay/helpers.hpp"
-#include "taosim/simulation/SimulationManager.hpp"
-#include "common.hpp"
+#include <taosim/checkpoint/helpers.hpp>
+#include <taosim/replay/ReplayDesc.hpp>
+#include <taosim/replay/helpers.hpp>
+#include <taosim/simulation/SimulationManager.hpp>
+
+#include <fmt/format.h>
 
 #include <CLI/CLI.hpp>
 #ifdef OVERRIDE_NEW_DELETE
 #include <mimalloc-new-delete.h>
 #endif
-#include <pybind11/embed.h>
-
-namespace py = pybind11;
 
 //-------------------------------------------------------------------------
 
@@ -21,46 +20,58 @@ int main(int argc, char* argv[])
 {
     CLI::App app{"ExchangeSimulator v2.0"};
 
-    py::scoped_interpreter guard{};
+    auto initGroup = app.add_option_group("Init");
 
-    CLI::Option_group* initGroup = app.add_option_group("Init");
+    fs::path configPath;
+    auto optConfigPath = initGroup->add_option(
+        "-f,--config-file", configPath, "Simulation config file")
+        ->check(CLI::ExistingFile)
+        ->transform([](auto&& p) { return fs::absolute(p); });
 
-    fs::path config;
-    initGroup->add_option("-f,--config-file", config, "Simulation config file")
-        ->check(CLI::ExistingFile);
+    fs::path baseDir;
+    app.add_option("-d,--dir", baseDir, "Base directory in which to preserve the run artifacts")
+        ->needs(optConfigPath)
+        ->default_val(fs::current_path() / "logs")
+        ->transform([](auto&& p) { return fs::absolute(p); });
 
-    fs::path checkpoint;
-    initGroup->add_option("-c,--checkpoint-file", checkpoint, "Checkpoint file")
-        ->check(CLI::ExistingFile);
+    taosim::checkpoint::CheckpointToken ckptToken;
+    initGroup->add_option(
+        "-c,--load-checkpoint",
+        ckptToken,
+        fmt::format(
+            "Checkpoint directory"
+            " OR run directory containing checkpoint directories under '{}'"
+            " OR special token (one of [{}], assumes run directories in 'logs/')",
+            taosim::checkpoint::CheckpointManager::s_storeDirName,
+            fmt::join(taosim::checkpoint::s_specialTokens, ", ")))
+        ->transform(&taosim::checkpoint::postProcessToken);
+
+    fs::path exchangeConfigPath;
+    initGroup->add_option("-e,--exchange-mode", exchangeConfigPath, "Run in exchange mode")
+        ->transform([](auto&& p) { return fs::absolute(p); });
 
     taosim::replay::ReplayDesc replayDesc;
 
-    auto optReplayDir = initGroup->add_option(
+    auto optReplayPath = initGroup->add_option(
         "-r,--replay-dir", replayDesc.dir, "Log directory to use in a replay context")
         ->check(CLI::ExistingDirectory)
         ->transform(&taosim::replay::helpers::cleanReplayPath);
 
     app.add_option("--book-id", replayDesc.bookId, "Book to replay")
-        ->needs(optReplayDir);
+        ->needs(optReplayPath);
 
     app.add_option(
         "--replaced-agents",
         replayDesc.replacedAgents,
         "Comma-separated list of agent base names which to replace during replay")
         ->delimiter(',')
-        ->needs(optReplayDir);
+        ->needs(optReplayPath);
 
     app.add_flag(
         "--adjust-limit-prices",
         replayDesc.adjustLimitPrices,
         "Adjust limit prices of passive agents using historical mid price data")
-        ->needs(optReplayDir);
-
-    app.add_flag(
-        "--rm,--remove-existing-dir",
-        replayDesc.removeExistingDir,
-        "Remove potentially existing replay directory (DOESN'T DO ANYTHING CURRENTLY)")
-        ->needs(optReplayDir);
+        ->needs(optReplayPath);
 
     initGroup->require_option(1);
 
@@ -68,20 +79,21 @@ int main(int argc, char* argv[])
 
     fmt::println("{}", app.get_description());
 
-    if (!checkpoint.empty()) {
-        throw std::runtime_error{"Loading from checkpoint currently unsupported!"};
+    if (!configPath.empty()) {
+        auto mngr = taosim::simulation::SimulationManager::fromConfig(configPath, baseDir);
+        mngr->runSimulations();
     }
-    if (!replayDesc.dir.empty()) {
+    else if (!ckptToken.empty()) {
+        auto mngr = taosim::simulation::SimulationManager::fromCheckpoint(ckptToken);
+        mngr->runSimulations();
+    }
+    else if (!replayDesc.dir.empty()) {
         auto mngr = taosim::simulation::SimulationManager::fromReplay(replayDesc);
         if (replayDesc.bookId) {
             mngr->runReplay();
         } else {
             mngr->runReplayAdvanced();
         }
-    }
-    else {
-        auto mngr = taosim::simulation::SimulationManager::fromConfig(config);
-        mngr->runSimulations();
     }
 
     fmt::println(" - all simulations finished, exiting");

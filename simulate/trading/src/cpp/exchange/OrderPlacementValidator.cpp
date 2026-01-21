@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "OrderPlacementValidator.hpp"
+#include <taosim/exchange/OrderPlacementValidator.hpp>
 
 #include "MultiBookExchangeAgent.hpp"
 #include "Simulation.hpp"
@@ -25,7 +25,7 @@ OrderPlacementValidator::OrderPlacementValidator(
 OrderPlacementValidator::ExpectedResult
     OrderPlacementValidator::validateMarketOrderPlacement(
         const accounting::Account& account,
-        Book::Ptr book,
+        taosim::book::Book::Ptr book,
         PlaceOrderMarketPayload::Ptr payload,
         FeePolicyWrapper& feePolicy,
         decimal_t maxLeverage,
@@ -81,7 +81,7 @@ OrderPlacementValidator::ExpectedResult
             for (auto it = book->sellQueue().cbegin(); it != book->sellQueue().cend(); ++it) {
                 const auto& level = *it;
                 for (const auto tick : level) {
-                    if (book->orderClientContext(tick->id()).agentId == agentId){    // STP
+                    if (book->orderToClientInfo().at(tick->id()).agentId == agentId){    // STP
                         if (payload->stpFlag == STPFlag::CO || payload->stpFlag == STPFlag::CN || payload->stpFlag == STPFlag::CB)
                             continue;
                     }
@@ -116,7 +116,7 @@ OrderPlacementValidator::ExpectedResult
             for (auto it = book->sellQueue().cbegin(); it != book->sellQueue().cend(); ++it) {
                 const auto& level = *it;
                 for (const auto tick : level) {
-                    if (book->orderClientContext(tick->id()).agentId == agentId){    // STP
+                    if (book->orderToClientInfo().at(tick->id()).agentId == agentId){    // STP
                         if (payload->stpFlag == STPFlag::CO || payload->stpFlag == STPFlag::CN || payload->stpFlag == STPFlag::CB)
                             continue;
                     }
@@ -195,7 +195,7 @@ OrderPlacementValidator::ExpectedResult
             for (auto it = book->buyQueue().crbegin(); it != book->buyQueue().crend(); ++it) {
                 const auto& level = *it;
                 for (const auto tick : level) {
-                    if (book->orderClientContext(tick->id()).agentId == agentId){    // STP
+                    if (book->orderToClientInfo().at(tick->id()).agentId == agentId){    // STP
                         if (payload->stpFlag == STPFlag::CO || payload->stpFlag == STPFlag::CN || payload->stpFlag == STPFlag::CB)
                             continue;
                     }
@@ -272,7 +272,7 @@ OrderPlacementValidator::ExpectedResult
 OrderPlacementValidator::ExpectedResult
     OrderPlacementValidator::validateLimitOrderPlacement(
         const accounting::Account& account,
-        Book::Ptr book,
+        taosim::book::Book::Ptr book,
         PlaceOrderLimitPayload::Ptr payload,
         FeePolicyWrapper& feePolicy,
         decimal_t maxLeverage,
@@ -345,7 +345,7 @@ OrderPlacementValidator::ExpectedResult
                 const auto& level = *it;
                 if (payload->price < level.price()) break;
                 for (const auto tick : level) {
-                    if (book->orderClientContext(tick->id()).agentId == agentId){    // STP
+                    if (book->orderToClientInfo().at(tick->id()).agentId == agentId){    // STP
                         if (payload->stpFlag == STPFlag::CO || payload->stpFlag == STPFlag::CN || payload->stpFlag == STPFlag::CB)
                             continue;
                     }
@@ -393,7 +393,7 @@ OrderPlacementValidator::ExpectedResult
                 const auto& level = *it;
                 if (payload->price < level.price()) break;
                 for (const auto tick : level) {
-                    if (book->orderClientContext(tick->id()).agentId == agentId){    // STP
+                    if (book->orderToClientInfo().at(tick->id()).agentId == agentId){    // STP
                         if (payload->stpFlag == STPFlag::CO || payload->stpFlag == STPFlag::CN || payload->stpFlag == STPFlag::CB)
                             continue;
                     }
@@ -477,7 +477,7 @@ OrderPlacementValidator::ExpectedResult
                 const auto& level = *it;
                 if (level.price() < payload->price) break;
                 for (const auto tick : level) {
-                    if(book->orderClientContext(tick->id()).agentId == agentId){    // STP
+                    if(book->orderToClientInfo().at(tick->id()).agentId == agentId){    // STP
                         if (payload->stpFlag == STPFlag::CO || payload->stpFlag == STPFlag::CN || payload->stpFlag == STPFlag::CB)
                             continue;
                     }
@@ -500,7 +500,7 @@ OrderPlacementValidator::ExpectedResult
                 const auto& level = *it;
                 if (level.price() < payload->price) break;
                 for (const auto tick : level) {
-                    if(book->orderClientContext(tick->id()).agentId == agentId){    // STP
+                    if(book->orderToClientInfo().at(tick->id()).agentId == agentId){    // STP
                         if (payload->stpFlag == STPFlag::CO || payload->stpFlag == STPFlag::CN || payload->stpFlag == STPFlag::CB)
                             continue;
                     }
@@ -573,7 +573,7 @@ OrderPlacementValidator::ExpectedResult
 //-------------------------------------------------------------------------
 
 bool OrderPlacementValidator::checkTimeInForce(
-    Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
+    taosim::book::Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
 {
     switch (payload->timeInForce) {
         case TimeInForce::IOC:
@@ -588,7 +588,7 @@ bool OrderPlacementValidator::checkTimeInForce(
 //-------------------------------------------------------------------------
 
 bool OrderPlacementValidator::checkIOC(
-    Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
+    taosim::book::Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
 {
     if (payload->postOnly) [[unlikely]] {
         return false;
@@ -806,7 +806,7 @@ bool OrderPlacementValidator::checkIOC(
 //-------------------------------------------------------------------------
 
 bool OrderPlacementValidator::checkFOK(
-    Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
+    taosim::book::Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
 {
     if (payload->postOnly) [[unlikely]] {
         return false;
@@ -1097,7 +1097,7 @@ bool OrderPlacementValidator::checkFOK(
 //-------------------------------------------------------------------------
 
 bool OrderPlacementValidator::checkPostOnly(
-    Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
+    taosim::book::Book::Ptr book, PlaceOrderLimitPayload::Ptr payload, AgentId agentId, decimal_t takerFeeRate) const noexcept
 {
     if (payload->timeInForce == TimeInForce::IOC || payload->timeInForce == TimeInForce::FOK) [[unlikely]] {
         return false;

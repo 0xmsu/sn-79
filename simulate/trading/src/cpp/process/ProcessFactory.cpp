@@ -2,21 +2,28 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "ProcessFactory.hpp"
+#include <taosim/process/ProcessFactory.hpp>
 
-#include "GBM.hpp"
-#include "FundamentalPrice.hpp"
-#include "JumpDiffusion.hpp"
-#include "FuturesSignal.hpp"
-#include "MagneticField.hpp"
-#include "Simulation.hpp"
-#include "taosim/exchange/ExchangeConfig.hpp"
+#include <taosim/exchange/ExchangeConfig.hpp>
+#include <taosim/process/GBM.hpp>
+#include <taosim/process/FundamentalPrice.hpp>
+#include <taosim/process/FuturesSignal.hpp>
+#include <taosim/process/JumpDiffusion.hpp>
+#include <taosim/process/MagneticField.hpp>
+#include <Simulation.hpp>
+
+//-------------------------------------------------------------------------
+
+namespace taosim::process
+{
 
 //-------------------------------------------------------------------------
 
 ProcessFactory::ProcessFactory(
-    taosim::simulation::ISimulation* simulation, taosim::exchange::ExchangeConfig* exchangeConfig) noexcept
-    : m_simulation{simulation}, m_exchangeConfig{exchangeConfig}
+    taosim::simulation::ISimulation* simulation,
+    taosim::exchange::ExchangeConfig* exchangeConfig) noexcept
+    : m_simulation{simulation},
+      m_exchangeConfig{exchangeConfig}
 {}
 
 //-------------------------------------------------------------------------
@@ -33,7 +40,8 @@ std::unique_ptr<Process> ProcessFactory::createFromXML(pugi::xml_node node, uint
             m_simulation,
             node,
             seedShift,
-            taosim::util::decimal2double(m_exchangeConfig->initialPrice));
+            taosim::util::decimal2double(m_exchangeConfig->initialPrice)
+        );
     }
     else if (name == "JumpDiffusion") {
         return JumpDiffusion::fromXML(node, seedShift);
@@ -43,9 +51,10 @@ std::unique_ptr<Process> ProcessFactory::createFromXML(pugi::xml_node node, uint
             m_simulation, 
             node, 
             seedShift, 
-            taosim::util::decimal2double(m_exchangeConfig->initialPrice));
+            taosim::util::decimal2double(m_exchangeConfig->initialPrice)
+        );
     } else if (name == "MagneticField") {
-        return MagneticField::fromXML(m_simulation,node, seedShift, m_simulation->logDir() /   fmt::format("MagneticField-{}.csv", seedShift));
+        return MagneticField::fromXML(node, m_simulation, seedShift);
     }
 
     throw std::invalid_argument(fmt::format(
@@ -54,19 +63,6 @@ std::unique_ptr<Process> ProcessFactory::createFromXML(pugi::xml_node node, uint
 
 //-------------------------------------------------------------------------
 
-std::unique_ptr<Process> ProcessFactory::createFromCheckpoint(const rapidjson::Value& json)
-{
-    std::string_view name = json["name"].GetString();
-
-    if (name == "GBM") {
-        return GBM::fromCheckpoint(json);
-    } else if (name == "FundamentalPrice") {
-        return FundamentalPrice::fromCheckpoint(
-            m_simulation, json, taosim::util::decimal2double(m_exchangeConfig->initialPrice));
-    }
-
-    throw std::invalid_argument(fmt::format(
-        "{}: Unknown Process type {}", std::source_location::current().function_name(), name));
-}
+}  // namespace taosim::process
 
 //-------------------------------------------------------------------------

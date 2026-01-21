@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/message/MultiBookMessagePayloads.hpp"
+#include <taosim/message/MultiBookMessagePayloads.hpp>
 
-#include "taosim/message/PayloadFactory.hpp"
+#include <taosim/message/PayloadFactory.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -24,14 +24,6 @@ void BookStateMessagePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void BookStateMessagePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
-}
-
-//-------------------------------------------------------------------------
-
 BookStateMessagePayload::Ptr BookStateMessagePayload::fromJson(const rapidjson::Value& json)
 {
     return MessagePayload::create<BookStateMessagePayload>(json);
@@ -47,20 +39,6 @@ void DistributedAgentResponsePayload::jsonSerialize(
         auto& allocator = json.GetAllocator();
         json.AddMember("agentId", rapidjson::Value{agentId}, allocator);
         payload->jsonSerialize(json, "payload");
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void DistributedAgentResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("agentId", rapidjson::Value{agentId}, allocator);
-        payload->checkpointSerialize(json, "payload");
     };
     taosim::json::serializeHelper(json, key, serialize);
 }

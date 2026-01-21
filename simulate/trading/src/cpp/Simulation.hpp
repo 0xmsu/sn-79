@@ -5,18 +5,17 @@
 #pragma once
 
 #include "Agent.hpp"
-#include "taosim/simulation/SimulationConfig.hpp"
 #include "IConfigurable.hpp"
 #include "IMessageable.hpp"
 #include "LocalAgentManager.hpp"
-#include "taosim/message/Message.hpp"
-#include "taosim/message/MessageQueue.hpp"
-#include "Recoverable.hpp"
-#include "taosim/simulation/SimulationSignals.hpp"
-#include "taosim/simulation/SimulationState.hpp"
-#include "common.hpp"
-#include "taosim/simulation/ISimulation.hpp"
-#include "taosim/replay/ReplayDesc.hpp"
+#include <taosim/message/Message.hpp>
+#include <taosim/message/MessageQueue.hpp>
+#include <taosim/simulation/SimulationConfig.hpp>
+#include <taosim/simulation/SimulationSignals.hpp>
+#include <taosim/simulation/SimulationState.hpp>
+#include <taosim/simulation/ISimulation.hpp>
+#include <taosim/replay/ReplayDesc.hpp>
+#include <common.hpp>
 
 #include <fmt/core.h>
 
@@ -51,7 +50,7 @@ public:
         MessagePayload::Ptr payload = MessagePayload::create<EmptyPayload>()) const;
 
     template<typename... PrioArgs>
-    requires std::constructible_from<PrioritizedMessage, Message::Ptr, PrioArgs...>
+    requires std::constructible_from<taosim::message::PrioritizedMessage, Message::Ptr, PrioArgs...>
     void dispatchMessageWithPriority(
         Timestamp occurrence,
         Timestamp delay,
@@ -77,10 +76,10 @@ public:
     void queueMessage(Message::Ptr msg) const;
 
     template<typename... Args>
-    requires std::constructible_from<PrioritizedMessage, Args...>
+    requires std::constructible_from<taosim::message::PrioritizedMessage, Args...>
     void queueMessageWithPriority(Args&&... args) const
     {
-        m_messageQueue.push(PrioritizedMessage(std::forward<Args>(args)...));
+        m_messageQueue.push(taosim::message::PrioritizedMessage(std::forward<Args>(args)...));
     }
 
     template<typename Fn>
@@ -101,7 +100,7 @@ public:
     void simulate();
 
     [[nodiscard]] taosim::accounting::Account& account(const LocalAgentId& id) const noexcept;
-    [[nodiscard]] std::span<const std::unique_ptr<Agent>> agents() const noexcept;
+    [[nodiscard]] auto&& agents(this auto&& self) noexcept { return self.m_localAgentManager->agents(); }
     [[nodiscard]] Timestamp currentTimestamp() const noexcept;
     [[nodiscard]] Timestamp duration() const noexcept;
     [[nodiscard]] MultiBookExchangeAgent* exchange() const noexcept { return m_exchange; }
@@ -117,6 +116,9 @@ public:
     [[nodiscard]] bool replayMode() const noexcept { return m_replayMode; }
     [[nodiscard]] const auto& replayDesc() const noexcept { return m_replayDesc; }
     [[nodiscard]] auto&& timestampToMidPrice(this auto&& self) noexcept { return self.m_timestampToMidPrice; }
+    [[nodiscard]] std::string_view id() const noexcept { return m_id; }
+    [[nodiscard]] std::string_view configSv() const noexcept { return m_config; }
+    [[nodiscard]] auto&& state(this auto&& self) noexcept { return self.m_state; }
 
     [[nodiscard]] bool shouldAdjustLimitPrice(Message::Ptr msg) const noexcept
     {
@@ -160,11 +162,9 @@ public:
     void setError(bool flag) noexcept { m_error = flag; }
     [[nodiscard]] bool error() const noexcept { return m_error; }
 
-    void saveCheckpoint();
     void step();
 
     [[nodiscard]] static std::unique_ptr<Simulation> fromXML(pugi::xml_node node);
-    [[nodiscard]] static std::unique_ptr<Simulation> fromCheckpoint(const fs::path& path);
 
 private:
     void configureAgents(pugi::xml_node node);
@@ -180,7 +180,7 @@ private:
         m_signals.time({.begin = oldTime + 1, .end = newTime});
     }
 
-    mutable MessageQueue m_messageQueue;
+    mutable taosim::message::MessageQueue m_messageQueue;
     taosim::simulation::SimulationState m_state{taosim::simulation::SimulationState::INACTIVE};
     struct { Timestamp start, duration, step, current; } m_time;
     mutable taosim::simulation::SimulationSignals m_signals;

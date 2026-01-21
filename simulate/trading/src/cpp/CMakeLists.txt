@@ -2,10 +2,14 @@
 add_subdirectory(agent)
 add_subdirectory(book)
 add_subdirectory(base)
+add_subdirectory(checkpoint)
 add_subdirectory(decimal)
+add_subdirectory(dsa)
 add_subdirectory(event)
 add_subdirectory(exchange)
+add_subdirectory(filesystem)
 add_subdirectory(ipc)
+add_subdirectory(logging)
 add_subdirectory(message)
 add_subdirectory(mp)
 add_subdirectory(net)
@@ -15,6 +19,7 @@ add_subdirectory(serialization)
 add_subdirectory(simulation)
 add_subdirectory(stats)
 add_subdirectory(util)
+add_subdirectory(xml)
 
 #-------------------------------------------------------------------------
 
@@ -32,7 +37,6 @@ target_include_directories(simulator
         exchange
         mp
         net
-        process
         serialization
         stats
         util
@@ -45,24 +49,28 @@ target_link_libraries(simulator
         taosim::agent
         taosim::book
         taosim::base
+        taosim::checkpoint
         taosim::decimal
         taosim::event
         taosim::exchange
+        taosim::filesystem
         taosim::ipc
+        taosim::logging
         taosim::message
         taosim::mp
         taosim::net
+        taosim::process
         taosim::replay
         taosim::serialization
         taosim::simulation
         taosim::stats
         taosim::util
+        taosim::xml
         Boost::boost
         CLI11::CLI11
         bdl
         date::date date::date-tz
         fmt::fmt
-        pugixml::static pugixml::pugixml
         pybind11::embed
 )
 

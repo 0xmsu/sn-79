@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/message/MessagePayload.hpp"
+#include <taosim/message/MessagePayload.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -14,14 +14,6 @@ void ErrorResponsePayload::jsonSerialize(rapidjson::Document& json, const std::s
         json.AddMember("message", rapidjson::Value{message.c_str(), allocator}, allocator);
     };
     taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void ErrorResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
 }
 
 //-------------------------------------------------------------------------
@@ -46,14 +38,6 @@ void SuccessResponsePayload::jsonSerialize(
 
 //-------------------------------------------------------------------------
 
-void SuccessResponsePayload::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
-}
-
-//-------------------------------------------------------------------------
-
 SuccessResponsePayload::Ptr SuccessResponsePayload::fromJson(const rapidjson::Value& json)
 {
     return MessagePayload::create<SuccessResponsePayload>(json["message"].GetString());
@@ -71,13 +55,6 @@ void EmptyPayload::jsonSerialize(rapidjson::Document& json, const std::string& k
 
 //-------------------------------------------------------------------------
 
-void EmptyPayload::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
-}
-
-//-------------------------------------------------------------------------
-
 void GenericPayload::jsonSerialize(rapidjson::Document& json, const std::string& key) const
 {
     auto serialize = [this](rapidjson::Document& json) {
@@ -91,13 +68,6 @@ void GenericPayload::jsonSerialize(rapidjson::Document& json, const std::string&
         }
     };
     taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void GenericPayload::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    jsonSerialize(json, key);
 }
 
 //-------------------------------------------------------------------------

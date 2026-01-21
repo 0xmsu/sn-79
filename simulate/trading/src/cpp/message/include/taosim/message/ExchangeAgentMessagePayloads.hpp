@@ -4,11 +4,11 @@
  */
 #pragma once
 
-#include "taosim/book/Book.hpp"
-#include "taosim/decimal/serialization/decimal.hpp"
+#include <taosim/book/Book.hpp>
+#include <taosim/decimal/serialization/decimal.hpp>
 #include "Cancellation.hpp"
 #include "ClosePosition.hpp"
-#include "taosim/message/MessagePayload.hpp"
+#include <taosim/message/MessagePayload.hpp>
 #include "Order.hpp"
 #include "Trade.hpp"
 #include "common.hpp"
@@ -38,8 +38,6 @@ struct StartSimulationPayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -105,8 +103,6 @@ struct PlaceOrderMarketPayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -139,8 +135,6 @@ struct PlaceOrderMarketResponsePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -165,8 +159,6 @@ struct PlaceOrderMarketErrorResponsePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -251,8 +243,6 @@ struct PlaceOrderLimitPayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -288,8 +278,6 @@ struct PlaceOrderLimitResponsePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -314,8 +302,6 @@ struct PlaceOrderLimitErrorResponsePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -339,8 +325,6 @@ struct RetrieveOrdersPayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -363,8 +347,6 @@ struct RetrieveOrdersResponsePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -394,8 +376,6 @@ struct CancelOrdersPayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -420,8 +400,6 @@ struct CancelOrdersResponsePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -450,8 +428,6 @@ struct CancelOrdersErrorResponsePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -479,8 +455,6 @@ struct ClosePositionsPayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -505,8 +479,6 @@ struct ClosePositionsResponsePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -535,8 +507,6 @@ struct ClosePositionsErrorResponsePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -559,8 +529,6 @@ struct RetrieveL2Payload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -599,8 +567,6 @@ struct RetrieveL2ResponsePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -620,8 +586,6 @@ struct RetrieveL1Payload : public MessagePayload
     RetrieveL1Payload(BookId bookId) noexcept : bookId{bookId} {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -671,8 +635,6 @@ struct RetrieveL1ResponsePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -701,8 +663,6 @@ struct SubscribeEventTradeByOrderPayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -723,8 +683,6 @@ struct EventOrderMarketPayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -744,8 +702,6 @@ struct EventOrderLimitPayload : public MessagePayload
     EventOrderLimitPayload(const LimitOrder& order) noexcept : order{order} {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -776,8 +732,6 @@ struct EventTradePayload : public MessagePayload
 
     virtual void jsonSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
 
@@ -799,8 +753,6 @@ struct ResetAgentsPayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -825,8 +777,6 @@ struct ResetAgentsResponsePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);
@@ -854,8 +804,6 @@ struct ResetAgentsErrorResponsePayload : public MessagePayload
     {}
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     [[nodiscard]] static Ptr fromJson(const rapidjson::Value& json);

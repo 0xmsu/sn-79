@@ -4,10 +4,10 @@
  */
 #pragma once
 
-#include "taosim/event/CancellationEvent.hpp"
-#include "taosim/event/EventRecord.hpp"
-#include "taosim/event/OrderEvent.hpp"
-#include "taosim/event/TradeEvent.hpp"
+#include <taosim/event/CancellationEvent.hpp>
+#include <taosim/event/EventRecord.hpp>
+#include <taosim/event/OrderEvent.hpp>
+#include <taosim/event/TradeEvent.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -28,10 +28,7 @@ public:
 
     auto&& at(this auto&& self, BookId bookId) { return self.m_underlying.at(bookId); }
 
-    [[nodiscard]] decltype(auto) underlying(this auto&& self) noexcept
-    {
-        return std::forward_like<decltype(self)>(self.m_underlying);
-    }
+    [[nodiscard]] auto&& underlying(this auto&& self) noexcept { return self.m_underlying; }
 
     void clear() noexcept;
 

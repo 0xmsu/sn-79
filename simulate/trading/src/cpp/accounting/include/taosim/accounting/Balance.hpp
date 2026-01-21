@@ -4,7 +4,6 @@
  */
 #pragma once
 
-#include "CheckpointSerializable.hpp"
 #include "FreeInfo.hpp"
 #include "JsonSerializable.hpp"
 #include "Loan.hpp"
@@ -18,9 +17,11 @@ namespace taosim::accounting
 
 //-------------------------------------------------------------------------
 
-class Balance : public JsonSerializable, public CheckpointSerializable
+class Balance : public JsonSerializable
 {
 public:
+    using Reservations = std::map<OrderID, decimal_t>;
+
     explicit Balance(
         decimal_t total = {},
         const std::string& symbol = {},
@@ -32,17 +33,17 @@ public:
     Balance(Balance&& other) noexcept;
     Balance& operator=(Balance&& other) noexcept;
 
-    [[nodiscard]] decimal_t getInitial() const noexcept { return m_initial; }
-    [[nodiscard]] decimal_t getFree() const noexcept { return m_free; }
-    [[nodiscard]] decimal_t getReserved() const noexcept { return m_reserved; }
-    [[nodiscard]] decimal_t getTotal() const noexcept { return m_total; }
-    [[nodiscard]] std::optional<decimal_t> getReservation(OrderID id) const noexcept;
-    [[nodiscard]] const std::map<OrderID, decimal_t>& getReservations() const noexcept;
-    [[nodiscard]] const std::string& getSymbol() const noexcept { return m_symbol; }
-    [[nodiscard]] uint32_t getRoundingDecimals() const noexcept { return m_roundingDecimals; }
+    [[nodiscard]] auto&& getInitial(this auto&& self) noexcept { return self.m_initial; }
+    [[nodiscard]] auto&& getFree(this auto&& self) noexcept { return self.m_free; }
+    [[nodiscard]] auto&& getReserved(this auto&& self) noexcept { return self.m_reserved; }
+    [[nodiscard]] auto&& getTotal(this auto&& self) noexcept { return self.m_total; }
+    [[nodiscard]] auto&& getReservations(this auto&& self) noexcept { return self.m_reservations; }
+    [[nodiscard]] auto&& getSymbol(this auto&& self) noexcept { return self.m_symbol; }
+    [[nodiscard]] auto&& getRoundingDecimals(this auto&& self) noexcept { return self.m_roundingDecimals; }
 
     [[nodiscard]] FreeInfo canFree(OrderID id, std::optional<decimal_t> amount = {}) const noexcept;
     [[nodiscard]] bool canReserve(decimal_t amount) const noexcept;
+    [[nodiscard]] std::optional<decimal_t> getReservation(OrderID id) const noexcept;
 
     void deposit(decimal_t amount, BookId bookId);
     decimal_t makeReservation(OrderID id, decimal_t amount, BookId bookId);
@@ -51,8 +52,6 @@ public:
     void voidReservation(OrderID id, BookId bookId, std::optional<decimal_t> amount = {});
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
     friend std::ostream& operator<<(std::ostream& os, const Balance& bal) noexcept;
@@ -71,7 +70,7 @@ private:
     decimal_t m_free{};
     decimal_t m_reserved{};
     decimal_t m_total{};
-    std::map<OrderID, decimal_t> m_reservations;
+    Reservations m_reservations;
     std::string m_symbol;
     uint32_t m_roundingDecimals;
 };

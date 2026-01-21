@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/simulation/SimulationConfig.hpp"
+#include <taosim/simulation/SimulationConfig.hpp>
 
 //-------------------------------------------------------------------------
 

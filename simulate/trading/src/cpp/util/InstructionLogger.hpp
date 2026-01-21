@@ -6,7 +6,7 @@
 
 #include "common.hpp"
 #include "JsonSerializable.hpp"
-#include "taosim/serialization/L3Serializable.hpp"
+#include <taosim/serialization/L3Serializable.hpp>
 
 //-------------------------------------------------------------------------
 

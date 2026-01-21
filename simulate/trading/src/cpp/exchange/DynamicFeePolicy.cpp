@@ -4,8 +4,8 @@
  */
 #include "Simulation.hpp"
 
+#include <taosim/exchange/DynamicFeePolicy.hpp>
 #include "common.hpp"
-#include "taosim/exchange/DynamicFeePolicy.hpp"
 
 //-------------------------------------------------------------------------
 
@@ -44,19 +44,31 @@ Fees DynamicFeePolicy::getRates(BookId bookId, AgentId agentId) const
 
 //-------------------------------------------------------------------------
 
+decimal_t DynamicFeePolicy::makerTakerRatio(BookId bookId) const
+{
+    auto it = m_totalVolumesPrev.find(bookId);
+    if (it != m_totalVolumesPrev.end()){
+        if (m_volumes.at(bookId).size() < m_historySlots)
+            return m_feeMath.targetMTR;
+        if (it->second.aggressive + it->second.passive == 0_dec){
+            return m_feeMath.targetMTR;
+        }
+        return it->second.passive / (it->second.passive + it->second.aggressive);
+    }
+    return m_feeMath.targetMTR;
+} 
+
+//-------------------------------------------------------------------------
+
 Fees DynamicFeePolicy::dynamicRates(BookId bookId, AgentId agentId) const noexcept
 {
-    decimal_t x = mtr(bookId);
+    decimal_t x = makerTakerRatio(bookId);
 
-    if (x == 0_dec) 
-        return {
-            .maker = 0_dec,
-            .taker = 0_dec
-        };
+    if (x == 0_dec) return {};
 
     return {
-            .maker = m_feeMath.calculate(x),
-            .taker = -m_feeMath.calculate(x)
+        .maker = m_feeMath.calculate(x),
+        .taker = -m_feeMath.calculate(x)
     };
 }
 
@@ -148,22 +160,6 @@ void DynamicFeePolicy::resetHistory() noexcept
 
 void DynamicFeePolicy::resetHistory(const std::unordered_set<AgentId>& agentIds) noexcept
 {}
-
-//-------------------------------------------------------------------------
-
-decimal_t DynamicFeePolicy::mtr(BookId bookId) const
-{
-    auto it = m_totalVolumesPrev.find(bookId);
-    if (it != m_totalVolumesPrev.end()){
-        if (m_volumes.at(bookId).size() < m_historySlots)
-            return m_feeMath.targetMTR;
-        if (it->second.aggressive + it->second.passive == 0_dec){
-            return m_feeMath.targetMTR;
-        }
-        return it->second.passive / (it->second.passive + it->second.aggressive);
-    }
-    return m_feeMath.targetMTR;
-} 
 
 //-------------------------------------------------------------------------
 

@@ -6,7 +6,7 @@
 
 #include "Collateral.hpp"
 #include "Order.hpp"
-#include "taosim/accounting/common.hpp"
+#include <taosim/accounting/common.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -18,11 +18,10 @@ namespace taosim::accounting
 struct LoanDesc
 {
     decimal_t amount{};
-    OrderDirection direction;
+    OrderDirection direction{};
     decimal_t leverage{};
     Collateral collateral;
-    decimal_t price;
-    decimal_t marginCallPrice;
+    decimal_t marginCallPrice{};
 };
 
 //-------------------------------------------------------------------------

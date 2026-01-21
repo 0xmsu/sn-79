@@ -2,27 +2,21 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "FuturesTraderAgent.hpp"
+#include <taosim/agent/FuturesTraderAgent.hpp>
 
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/MessagePayload.hpp"
+#include <taosim/process/FuturesSignal.hpp>
 #include "DistributionFactory.hpp"
 #include "RayleighDistribution.hpp"
 #include "Simulation.hpp"
-#include "FuturesSignal.hpp"
 
 #include <boost/algorithm/string/regex.hpp>
-#include <boost/bimap.hpp>
-
-#include <boost/accumulators/accumulators.hpp>
-#include <boost/accumulators/statistics/stats.hpp>
-#include <boost/random.hpp>
 
 #include <algorithm>
 
 //-------------------------------------------------------------------------
 
-namespace br = boost::random;
+namespace taosim::agent
+{
 
 //-------------------------------------------------------------------------
 
@@ -95,8 +89,6 @@ void FuturesTraderAgent::configure(const pugi::xml_node& node)
     m_priceIncrement = 1 / std::pow(10, simulation()->exchange()->config().parameters().priceIncrementDecimals);
     m_volumeIncrement = 1 / std::pow(10, simulation()->exchange()->config().parameters().volumeIncrementDecimals);
 
-    m_debug = node.attribute("debug").as_bool();
-
     m_marketFeedLatencyDistribution = std::normal_distribution<double>{
         [&] {
             static constexpr const char* name = "MFLmean";
@@ -142,7 +134,7 @@ void FuturesTraderAgent::configure(const pugi::xml_node& node)
     attr = node.attribute("opLatencyScaleRay"); 
     const double scale = (attr.empty() || attr.as_double() == 0.0) ? 0.235 : attr.as_double();
     const double percentile = 1-std::exp(-1/(2*scale*scale));
-    m_orderPlacementLatencyDistribution =  std::make_unique<taosim::stats::RayleighDistribution>(scale, percentile); 
+    m_orderPlacementLatencyDistribution = std::make_unique<taosim::stats::RayleighDistribution>(scale, percentile); 
 
     m_baseName = [&] {
         std::string res = name();
@@ -188,7 +180,8 @@ void FuturesTraderAgent::receiveMessage(Message::Ptr msg)
     }
     else if (msg->type == "EVENT_TRADE") {
         handleTrade(msg);
-    } else if (msg->type == "WAKEUP") {
+    }
+    else if (msg->type == "WAKEUP") {
         handleWakeup(msg);
     }
 }
@@ -445,20 +438,29 @@ void FuturesTraderAgent::placeSell(BookId bookId, double volume)
 
 //-------------------------------------------------------------------------
 
-Timestamp FuturesTraderAgent::orderPlacementLatency() {
-    return static_cast<Timestamp>(std::lerp(m_opl.min, m_opl.max, m_orderPlacementLatencyDistribution->sample(*m_rng)));
+Timestamp FuturesTraderAgent::orderPlacementLatency()
+{
+    return static_cast<Timestamp>(
+        std::lerp(m_opl.min, m_opl.max, m_orderPlacementLatencyDistribution->sample(*m_rng)));
 }
+
 //-------------------------------------------------------------------------
-Timestamp FuturesTraderAgent::marketFeedLatency() {
+
+Timestamp FuturesTraderAgent::marketFeedLatency()
+{
     return static_cast<Timestamp>(std::min(std::abs(m_marketFeedLatencyDistribution(*m_rng)),
-            +m_marketFeedLatencyDistribution.mean() + 3 * m_marketFeedLatencyDistribution.stddev()));
+            m_marketFeedLatencyDistribution.mean() + 3 * m_marketFeedLatencyDistribution.stddev()));
 }
+
 //-------------------------------------------------------------------------
-Timestamp FuturesTraderAgent::decisionMakingDelay() {
+
+Timestamp FuturesTraderAgent::decisionMakingDelay()
+{
     return static_cast<Timestamp>(std::min(std::abs(m_decisionMakingDelayDistribution(*m_rng)),
-             m_decisionMakingDelayDistribution.mean()
+            m_decisionMakingDelayDistribution.mean()
             + 3.0 * m_decisionMakingDelayDistribution.stddev()));
 }
+
 //-------------------------------------------------------------------------
 
 double FuturesTraderAgent::getProcessValue(BookId bookId, const std::string& name)
@@ -466,12 +468,21 @@ double FuturesTraderAgent::getProcessValue(BookId bookId, const std::string& nam
     return simulation()->exchange()->process(name, bookId)->value();
 }
 
+//-------------------------------------------------------------------------
+
+FuturesTraderAgent::FuturesDetails FuturesTraderAgent::getProcessDetails(
+    BookId bookId, const std::string& name)
+{
+    const auto externalProcess =
+        dynamic_cast<process::FuturesSignal*>(simulation()->exchange()->process(name, bookId));    
+    return {
+        .logReturn = externalProcess->state().logReturn,
+        .volumeFactor = externalProcess->state().volumeFactor
+    };
+}
 
 //-------------------------------------------------------------------------
-FuturesTraderAgent::FuturesDetails FuturesTraderAgent::getProcessDetails(BookId bookId, const std::string& name)
-{
-    const auto externalProcess = dynamic_cast<FuturesSignal*>(simulation()->exchange()->process(name,bookId));
-    return {.logReturn = externalProcess->logReturn(), .volumeFactor = externalProcess->volumeFactor()};
-}
+
+}  // namespace taosim::agent
 
 //-------------------------------------------------------------------------

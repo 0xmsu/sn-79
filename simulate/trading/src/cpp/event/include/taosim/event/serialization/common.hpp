@@ -4,8 +4,12 @@
  */
 #pragma once
 
-#include "taosim/event/L3RecordContainer.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/event/L3RecordContainer.hpp>
+#include <taosim/event/serialization/CancellationEvent.hpp>
+#include <taosim/event/serialization/OrderEvent.hpp>
+#include <taosim/event/serialization/TradeEvent.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
+#include <taosim/serialization/msgpack/utils.hpp>
 
 //-------------------------------------------------------------------------
 
@@ -24,18 +28,15 @@ struct convert<taosim::event::L3Record::Entry>
     const msgpack::object& operator()(
         const msgpack::object& o, taosim::event::L3Record::Entry& v) const
     {
-        using namespace std::literals::string_view_literals;
-
-        static constexpr auto ctx = std::source_location::current().function_name();
-
         if (o.type != msgpack::type::MAP) {
             throw taosim::serialization::MsgPackError{};
         }
-        const auto eventTypePtr = taosim::serialization::msgpackFind(o, "event"sv);
-        if (eventTypePtr == nullptr) {
-            throw std::runtime_error{fmt::format("{}: Missing field 'event'", ctx)};
+
+        const auto eventType = taosim::serialization::msgpackFindMap<std::string_view>(o, "event");
+        if (!eventType) {
+            throw taosim::serialization::MsgPackError{};
         }
-        std::string_view eventType{eventTypePtr->via.str.ptr, eventTypePtr->via.str.size};
+
         if (eventType == "cancel") {
             v = o.as<taosim::event::CancellationEvent>();
         }
@@ -46,8 +47,10 @@ struct convert<taosim::event::L3Record::Entry>
             v = o.as<taosim::event::TradeEvent>();
         }
         else {
-            throw std::runtime_error{fmt::format("{}: Invalid event type '{}'", ctx, eventType)};
+            throw taosim::serialization::MsgPackError{};
         }
+
+        return o;
     }
 };
 

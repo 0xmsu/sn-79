@@ -2,11 +2,16 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "UpdateCounter.hpp"
+#include <taosim/book/UpdateCounter.hpp>
 
 #include <fmt/format.h>
 
 #include <source_location>
+
+//-------------------------------------------------------------------------
+
+namespace taosim::book
+{
 
 //-------------------------------------------------------------------------
 
@@ -21,5 +26,9 @@ UpdateCounter UpdateCounter::fromXML(pugi::xml_node node)
 {
     return UpdateCounter{node.attribute("updatePeriod").as_ullong()};
 }
+
+//-------------------------------------------------------------------------
+
+}  // namespace taosim::book
 
 //-------------------------------------------------------------------------

@@ -20,7 +20,7 @@
 #include "Simulation.hpp"
 #include "server.hpp"
 #include "util.hpp"
-#include "ClearingManager.hpp"
+#include <taosim/exchange/ClearingManager.hpp>
 
 #include <fmt/format.h>
 #include <gmock/gmock.h>
@@ -107,11 +107,11 @@ std::pair<MarketOrder::Ptr, OrderErrorCode> placeMarketOrder(
         MessagePayload::create<PlaceOrderMarketPayload>(std::forward<Args>(args)..., bookId);
     const auto orderResult = exchange->clearingManager().handleOrder(MarketOrderDesc{.agentId = agentId, .payload = payload});
     auto marketOrderPtr = exchange->books()[bookId]->placeMarketOrder(
-        payload->direction,
+        OrderClientContext{agentId},
         Timestamp{},
         orderResult.orderSize,
-        payload->leverage,
-        OrderClientContext{agentId});
+        payload->direction,
+        payload->leverage);
     return {marketOrderPtr, orderResult.ec};
 }
 
@@ -124,12 +124,12 @@ std::pair<LimitOrder::Ptr, OrderErrorCode> placeLimitOrder(
         MessagePayload::create<PlaceOrderLimitPayload>(std::forward<Args>(args)..., bookId);
     const auto orderResult = exchange->clearingManager().handleOrder(LimitOrderDesc{.agentId = agentId, .payload = payload});
     auto limitOrderPtr = exchange->books()[bookId]->placeLimitOrder(
-        payload->direction,
+        OrderClientContext{agentId},
         Timestamp{},
         orderResult.orderSize,
+        payload->direction,
         payload->price,
-        payload->leverage,
-        OrderClientContext{agentId});
+        payload->leverage);
     return {limitOrderPtr, orderResult.ec};
 }
 

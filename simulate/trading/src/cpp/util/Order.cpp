@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "Order.hpp"
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
 
 #include "util.hpp"
 
@@ -85,13 +85,6 @@ void BasicOrder::jsonSerialize(rapidjson::Document& json, const std::string& key
 
 //-------------------------------------------------------------------------
 
-void BasicOrder::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-
-}
-
-//-------------------------------------------------------------------------
-
 BasicOrder::BasicOrder(
     OrderID id,
     Timestamp timestamp,
@@ -153,38 +146,6 @@ void Order::jsonSerialize(rapidjson::Document& json, const std::string& key) con
 
 //-------------------------------------------------------------------------
 
-void Order::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        BasicOrder::checkpointSerialize(json);
-        auto& allocator = json.GetAllocator();
-        json.AddMember(
-            "direction", rapidjson::Value{std::to_underlying(m_direction)}, allocator);
-        json.AddMember(
-            "stpFlag",
-            rapidjson::Value{magic_enum::enum_name(m_stpFlag).data(), allocator},
-            allocator);
-        std::visit(
-            [&](auto&& flag) {
-                using T = std::remove_cvref_t<decltype(flag)>;
-                if constexpr (std::same_as<T, SettleType>) {
-                    json.AddMember(
-                        "settleFlag",
-                        rapidjson::Value{magic_enum::enum_name(flag).data(), allocator},
-                        allocator);
-                } else if constexpr (std::same_as<T, OrderID>) {
-                    json.AddMember("settleFlag", rapidjson::Value{flag}, allocator);
-                } else {
-                    static_assert(false, "Non-exhaustive visitor");
-                }
-            },
-            m_settleFlag);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
 MarketOrder::MarketOrder(
     OrderID orderId,
     Timestamp timestamp,
@@ -240,18 +201,6 @@ void MarketOrder::jsonSerialize(rapidjson::Document& json, const std::string& ke
 {
     auto serialize = [this](rapidjson::Document& json) {
         Order::jsonSerialize(json);
-        auto& allocator = json.GetAllocator();
-        json.AddMember("price", rapidjson::Value{}.SetNull(), allocator);
-    };
-    taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void MarketOrder::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        Order::checkpointSerialize(json);
         auto& allocator = json.GetAllocator();
         json.AddMember("price", rapidjson::Value{}.SetNull(), allocator);
     };
@@ -375,15 +324,8 @@ void LimitOrder::jsonSerialize(rapidjson::Document &json, const std::string &key
 
 //-------------------------------------------------------------------------
 
-void LimitOrder::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-
-}
-
-//-------------------------------------------------------------------------
-
 LimitOrder::Ptr LimitOrder::fromJson(
-    const rapidjson::Value& json, int priceDecimals, int volumeDecimals)
+    const rapidjson::Value& json, [[maybe_unused]] int priceDecimals, int volumeDecimals)
 {
     return Ptr{new LimitOrder(
         json["orderId"].GetUint64(),
@@ -397,20 +339,6 @@ LimitOrder::Ptr LimitOrder::fromJson(
             ? SettleFlag(magic_enum::enum_cast<SettleType>(json["settleFlag"].GetInt()).value())
             : SettleFlag(static_cast<OrderID>(json["settleFlag"].GetUint()))
     )};
-}
-
-//-------------------------------------------------------------------------
-
-void OrderClientContext::checkpointSerialize(
-    rapidjson::Document& json, const std::string& key) const
-{
-    auto serialize = [this](rapidjson::Document& json) {
-        json.SetObject();
-        auto& allocator = json.GetAllocator();
-        json.AddMember("agentId", rapidjson::Value{agentId}, allocator);
-        taosim::json::setOptionalMember(json, "clientOrderId", clientOrderId);
-    };
-    return taosim::json::serializeHelper(json, key, serialize);
 }
 
 //-------------------------------------------------------------------------
@@ -482,7 +410,6 @@ void OrderWithLogContext::L3Serialize(rapidjson::Document& json, const std::stri
 {
     auto serialize = [this](rapidjson::Document& json) {
         json.SetObject();
-        auto& allocator = json.GetAllocator();
         if (const auto o = std::dynamic_pointer_cast<MarketOrder>(order)) {
             o->L3Serialize(json, "o");
         } else if (const auto o = std::dynamic_pointer_cast<LimitOrder>(order)) {
@@ -499,7 +426,6 @@ void OrderWithLogContext::jsonSerialize(rapidjson::Document& json, const std::st
 {
     auto serialize = [this](rapidjson::Document& json) {
         json.SetObject();
-        auto& allocator = json.GetAllocator();
         order->jsonSerialize(json, "order");
         logContext->jsonSerialize(json, "logContext");
     };

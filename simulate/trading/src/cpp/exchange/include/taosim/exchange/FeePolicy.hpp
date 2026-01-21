@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "Fees.hpp"
+#include <taosim/exchange/Fees.hpp>
 #include "Trade.hpp"
 #include "common.hpp"
 

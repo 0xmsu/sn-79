@@ -4,10 +4,10 @@
  */
 #pragma once
 
-#include "Fees.hpp"
+#include <taosim/exchange/Fees.hpp>
 #include "Trade.hpp"
 #include "common.hpp"
-#include "taosim/exchange/FeePolicy.hpp"
+#include <taosim/exchange/FeePolicy.hpp>
 
 #include <unordered_set>
 
@@ -44,23 +44,23 @@ class TieredFeePolicy : public FeePolicy
 public:
     explicit TieredFeePolicy(const TFPolicyDesc& desc);
 
-    Fees calculateFees(const TradeDesc& tradeDesc) const override;
-    
+    [[nodiscard]] auto&& agentTiers(this auto&& self) noexcept { return self.m_agentTiers; }
+    [[nodiscard]] auto&& agentVolumes(this auto&& self) noexcept { return self.m_agentVolumes; }
+
+    [[nodiscard]] Fees getRates(BookId bookId, AgentId agentId) const override;
+    [[nodiscard]] Fees calculateFees(const TradeDesc& tradeDesc) const override;
+    [[nodiscard]] int historySlots() const noexcept { return m_historySlots; }
+    [[nodiscard]] Timestamp slotPeriod() const noexcept { return m_slotPeriod; }
+    [[nodiscard]] std::span<const Tier> tiers() const noexcept { return m_tiers; }
+
     void updateAgentsTiers() noexcept;
     void updateHistory(Timestamp timestamp, BookId bookId, AgentId agentId, decimal_t volume,
         std::optional<bool> isAggressive = {}) override;
     void resetHistory() noexcept override;
     void resetHistory(const std::unordered_set<AgentId>& agentIds) noexcept override;
-    Fees getRates(BookId bookId, AgentId agentId) const override;
     
     [[nodiscard]] static std::unique_ptr<TieredFeePolicy> fromXML(
         pugi::xml_node node, Simulation* simulation);
-        
-    [[nodiscard]] auto&& historySlots(this auto&& self) noexcept { return self.m_historySlots; }
-    [[nodiscard]] auto&& slotPeriod(this auto&& self) noexcept { return self.m_slotPeriod; }
-    [[nodiscard]] auto&& tiers(this auto&& self) noexcept { return self.m_tiers; }
-    [[nodiscard]] auto&& agentTiers(this auto&& self) noexcept { return self.m_agentTiers; }
-    [[nodiscard]] auto&& agentVolumes(this auto&& self) noexcept { return self.m_agentVolumes; }
         
 protected:
     using TierIdx = int32_t;

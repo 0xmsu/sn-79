@@ -116,7 +116,7 @@ decimal_t getDecimal(const rapidjson::Value& json)
     else if (json.IsUint64()) [[unlikely]] {
         return decimal_t{[&] {
             const uint64_t packed = json.GetUint64();
-            BloombergLP::bdldfp::Decimal64 res;
+            BloombergLP::bdldfp::Decimal64 res{};
             BloombergLP::bdldfp::DecimalConvertUtil::decimalFromDPD(
                 &res, reinterpret_cast<const uint8_t*>(&packed));
             return res;

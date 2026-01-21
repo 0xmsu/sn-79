@@ -36,12 +36,13 @@ if __name__ != "__mp_main__":
     import mmap
     import msgpack
     import atexit
-    import multiprocessing
     import subprocess
     import struct
-    import heapq    
+    import heapq
     import aiofiles
     import aiofiles.os
+    import select
+    import gc
     from datetime import datetime, timedelta
     from ypyjson import YpyObject
 
@@ -157,12 +158,19 @@ if __name__ != "__mp_main__":
                 '--compression.engine', self.config.compression.engine,
                 '--compression.parallel_workers', str(self.config.compression.parallel_workers),
                 '--cpu-cores', ','.join(map(str, core_allocation['query'])),
+                '--notify-fd', str(self.query_notify_write)
             ]
             env = os.environ.copy()
             env['PYTHONUNBUFFERED'] = '1'
 
-            self.query_process = subprocess.Popen(cmd, stderr=sys.stderr, env=env)
+            self.query_process = subprocess.Popen(
+                cmd,
+                stderr=sys.stderr,
+                env=env,
+                pass_fds=(self.query_notify_write,)
+            )
             bt.logging.info(f"Query service PID: {self.query_process.pid}")
+            os.close(self.query_notify_write)
 
             # Wait for IPC resources to be created with retry
             queue_name = f"/validator_query_{self.config.wallet.hotkey}"
@@ -180,18 +188,33 @@ if __name__ != "__mp_main__":
                     self.response_mem = mmap.mmap(self.response_shm.fd, self.response_shm.size)
 
                     bt.logging.info(f"Query service ready (request_shm: {self.request_shm.size / 1024 / 1024:.0f}MB, response_shm: {self.response_shm.size / 1024 / 1024:.0f}MB)")
-                    return
-
+                    break
                 except posix_ipc.ExistentialError:
                     if attempt == 0:
                         bt.logging.debug("IPC resources not ready yet, waiting...")
                     time.sleep(1)
-
                     # Check if process died
                     if self.query_process.poll() is not None:
                         raise RuntimeError(f"Query service died with exit code {self.query_process.returncode}")
+            else:
+                raise RuntimeError("Timeout waiting for query service IPC resources")
 
-            raise RuntimeError("Timeout waiting for query service IPC resources")
+            # Wait for pipe ready signal
+            bt.logging.info("Waiting for query service ready signal...")
+            for attempt in range(100):
+                if self.query_process.poll() is not None:
+                    raise RuntimeError(f"Query service died with exit code {self.query_process.returncode}")
+                readable, _, _ = select.select([self.query_notify_read], [], [], 0.1)
+                if readable:
+                    ready_signal = os.read(self.query_notify_read, 1)
+                    if ready_signal == b'R':
+                        bt.logging.success("Query service ready!")
+                        return
+                    elif ready_signal != b'':
+                        bt.logging.warning(f"Unexpected ready signal: {ready_signal}")
+                        return
+
+            raise RuntimeError("Query service did not send ready signal within 10s")
 
         def _start_reporting_service(self):
             bt.logging.info(f"Starting reporting service from: ../validator/report.py")
@@ -242,13 +265,13 @@ if __name__ != "__mp_main__":
                         raise RuntimeError(f"Reporting service died with exit code {self.reporting_process.returncode}")
 
             raise RuntimeError("Timeout waiting for reporting service IPC resources")
-        
+
         def _start_seed_service(self):
             """
             Launches the seed service subprocess.
             """
             bt.logging.info("Starting seed service from: ../validator/seed.py")
-            
+
             cmd = [
                 sys.executable,
                 '-u',
@@ -260,14 +283,14 @@ if __name__ != "__mp_main__":
                 '--seed.external.sampling_seconds', str(self.config.simulation.seeding.external.sampling_seconds),
                 '--logging.level', 'INFO' if not (self.config.logging.debug or self.config.logging.trace) else 'DEBUG',
             ]
-            
+
             env = os.environ.copy()
             env['PYTHONUNBUFFERED'] = '1'
-            
+
             self.seed_process = subprocess.Popen(
                 cmd,
                 stdout=sys.stdout,
-                stderr=sys.stderr, 
+                stderr=sys.stderr,
                 env=env
             )
             bt.logging.info(f"Seed service PID: {self.seed_process.pid}")
@@ -276,11 +299,11 @@ if __name__ != "__mp_main__":
                 raise RuntimeError(f"Seed service died with exit code {self.seed_process.returncode}")
             if hasattr(self, 'simulation') and self.simulation.logDir:
                 self._notify_seed_log_dir_change(self.simulation.logDir)
-            
+
         def _notify_seed_log_dir_change(self, new_log_dir: str) -> None:
             """
             Notify seed service of log directory change via file + signal.
-            
+
             Args:
                 new_log_dir: New log directory path
             """
@@ -298,7 +321,7 @@ if __name__ != "__mp_main__":
                     return
                 self.seed_process.send_signal(signal.SIGUSR1)
                 bt.logging.info(f"Notified seed service of log directory change: {new_log_dir}")
-                
+
             except ProcessLookupError:
                 bt.logging.warning("Seed process not found when trying to notify log dir change")
             except Exception as ex:
@@ -317,10 +340,10 @@ if __name__ != "__mp_main__":
                 None
             """
             last_restart_time = 0
-            restart_cooldown = 60.0 
+            restart_cooldown = 60.0
             check_timeout = 30.0
             restart_timeout = 120.0
-            
+
             while True:
                 try:
                     time.sleep(300)
@@ -334,8 +357,8 @@ if __name__ != "__mp_main__":
                                 is_healthy = future.result(timeout=check_timeout)
                             except concurrent.futures.TimeoutError:
                                 bt.logging.error(f"Simulator health check timed out after {check_timeout}s")
-                                is_healthy = False                        
-                        check_elapsed = time.time() - check_start                        
+                                is_healthy = False
+                        check_elapsed = time.time() - check_start
                         if not is_healthy:
                             time_since_restart = time.time() - last_restart_time
                             if time_since_restart < restart_cooldown:
@@ -370,34 +393,14 @@ if __name__ != "__mp_main__":
                                 last_restart_time = time.time()
                         else:
                             bt.logging.info(f"Simulator online! (check took {check_elapsed:.1f}s)")
-                            
+
                     except Exception as check_ex:
                         bt.logging.error(f"Simulator health check failed: {check_ex}")
                         bt.logging.error(traceback.format_exc())
-                        
+
                 except Exception as ex:
                     bt.logging.error(f"Failure in simulator monitor : {traceback.format_exc()}")
                     time.sleep(10)
-
-        def seed(self) -> None:
-            """
-            Generates simulator seed data with improved error handling and non-blocking restarts.
-
-            Returns:
-                None
-            """
-            from taos.im.validator.seed import seed
-            while True:
-                try:
-                    seed(self)
-                except Exception as ex:
-                    bt.logging.error(f"Seed process crashed: {ex}")
-                    bt.logging.error(traceback.format_exc())
-                    self.pagerduty_alert(
-                        f"Seed process crashed, restarting in 5s: {ex}",
-                        details={"trace": traceback.format_exc()}
-                    )
-                    time.sleep(5)
 
         def update_repo(self, end=False) -> bool:
             """
@@ -585,19 +588,24 @@ if __name__ != "__mp_main__":
             self.last_response = None
             self.msgpack_error_counter = 0
             self.simulation_timestamp = 0
-            self.reward_weights = {"sharpe" : self.config.scoring.sharpe.unrealized_weight, "sharpe_realized": self.config.scoring.sharpe.realized_weight}
             self.start_time = None
             self.start_timestamp = None
             self.last_state_time = None
             self.step_rates = []
+            self._last_defrag_hour = -1
+            self._last_prune_timestamp = 0
 
             self.main_loop = asyncio.new_event_loop()
             self._main_loop_ready = Event()
             core_allocation = get_core_allocation()
             ipc_cores = core_allocation['ipc']
-            mid = len(ipc_cores) // 2
-            query_cores = ipc_cores[:mid]
-            reporting_cores = ipc_cores[mid:]
+            if len(ipc_cores) >= 2:
+                mid = len(ipc_cores) // 2
+                query_cores = ipc_cores[:mid]
+                reporting_cores = ipc_cores[mid:]
+            else:
+                query_cores = ipc_cores
+                reporting_cores = ipc_cores
             self.query_ipc_executor = ThreadPoolExecutor(
                 max_workers=4,
                 thread_name_prefix='query_ipc',
@@ -642,6 +650,7 @@ if __name__ != "__mp_main__":
                 'longs': deque(),
                 'shorts': deque()
             }))
+            self.inventory_history = {uid : {} for uid in range(self.subnet_info.max_uids)}
             self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             self.roundtrip_volume_sums = defaultdict(lambda: defaultdict(float))
@@ -658,11 +667,16 @@ if __name__ != "__mp_main__":
 
             self.miner_stats = {uid : {'requests' : 0, 'timeouts' : 0, 'failures' : 0, 'rejections' : 0, 'call_time' : []} for uid in range(self.subnet_info.max_uids)}
             self.query_process = None
+            self.query_notify_read, self.query_notify_write = os.pipe()
+            import fcntl
+            flags = fcntl.fcntl(self.query_notify_read, fcntl.F_GETFL)
+            fcntl.fcntl(self.query_notify_read, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            bt.logging.info(f"Created notification pipe: read_fd={self.query_notify_read}, write_fd={self.query_notify_write}")
             self._start_query_service()
             self.report_process = None
-            self._start_reporting_service()            
+            self._start_reporting_service()
             self.seed_process = None
-            self._start_seed_service() 
+            self._start_seed_service()
 
         def __enter__(self):
             """
@@ -785,7 +799,7 @@ if __name__ != "__mp_main__":
                             bt.logging.debug(f"Still waiting for {wait_process}... ({elapsed:.1f}s)")
                 total_wait = time.time() - start_wait
                 bt.logging.debug(f"Waited {total_wait:.1f}s for {wait_process}")
-                
+
         async def _write_ipc_nonblocking(self, mem, queue, data_bytes, operation="IPC", executor=None):
             """
             Write to shared memory in executor thread.
@@ -793,7 +807,7 @@ if __name__ != "__mp_main__":
             if executor is None:
                 executor = self.query_ipc_executor
             write_timeout = 10.0
-            
+
             def write_worker():
                 try:
                     mem.seek(0)
@@ -803,7 +817,7 @@ if __name__ != "__mp_main__":
                 except Exception as e:
                     self.pagerduty_alert(f"{operation} write failed: {e}")
                     return False
-            
+
             try:
                 result = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
@@ -872,19 +886,19 @@ if __name__ != "__mp_main__":
             volume_decimals = self.simulation.volumeDecimals
 
             bt.logging.info("Shifting timestamps for simulation restart...")
-            
+
             old_simulation_timestamp = self.simulation_timestamp  # End time of old simulation
             new_simulation_timestamp = timestamp  # Start time of new simulation (0)
-            
-            sharpe_lookback_period = (
-                self.config.scoring.sharpe.lookback * 
+
+            lookback_period = (
+                self.config.scoring.kappa.lookback *
                 self.simulation.publish_interval
             )
             volume_assessment_period = self.config.scoring.activity.trade_volume_assessment_period
-            
-            new_sharpe_threshold = new_simulation_timestamp - sharpe_lookback_period
+
+            new_threshold = new_simulation_timestamp - lookback_period
             new_volume_threshold = new_simulation_timestamp - volume_assessment_period
-            
+
             pruned_total = defaultdict(lambda: defaultdict(float))
             pruned_maker = defaultdict(lambda: defaultdict(float))
             pruned_taker = defaultdict(lambda: defaultdict(float))
@@ -917,10 +931,10 @@ if __name__ != "__mp_main__":
                                                 pruned_taker[uid][bookId] += volume
                                             elif role == 'self':
                                                 pruned_self[uid][bookId] += volume
-                                    
+
                                     if shifted_times:
                                         shifted_trade_volumes[uid][bookId][role] = shifted_times
-            
+
             self.trade_volumes = {
                 uid: {
                     bookId: {
@@ -931,7 +945,7 @@ if __name__ != "__mp_main__":
                 }
                 for uid in range(self.subnet_info.max_uids)
             }
-            
+
             bt.logging.info("Adjusting volume sums for pruned data...")
             for uid in pruned_total:
                 for bookId in pruned_total[uid]:
@@ -940,7 +954,7 @@ if __name__ != "__mp_main__":
                         self.volume_sums[uid][bookId] - pruned_total[uid][bookId]
                     )
                     self.volume_sums[uid][bookId] = round(self.volume_sums[uid][bookId], volume_decimals)
-            
+
             for uid in pruned_maker:
                 for bookId in pruned_maker[uid]:
                     self.maker_volume_sums[uid][bookId] = max(
@@ -948,7 +962,7 @@ if __name__ != "__mp_main__":
                         self.maker_volume_sums[uid][bookId] - pruned_maker[uid][bookId]
                     )
                     self.maker_volume_sums[uid][bookId] = round(self.maker_volume_sums[uid][bookId], volume_decimals)
-            
+
             for uid in pruned_taker:
                 for bookId in pruned_taker[uid]:
                     self.taker_volume_sums[uid][bookId] = max(
@@ -956,7 +970,7 @@ if __name__ != "__mp_main__":
                         self.taker_volume_sums[uid][bookId] - pruned_taker[uid][bookId]
                     )
                     self.taker_volume_sums[uid][bookId] = round(self.taker_volume_sums[uid][bookId], volume_decimals)
-            
+
             for uid in pruned_self:
                 for bookId in pruned_self[uid]:
                     self.self_volume_sums[uid][bookId] = max(
@@ -973,40 +987,40 @@ if __name__ != "__mp_main__":
                 if uid in self.inventory_history and self.inventory_history[uid]:
                     hist = self.inventory_history[uid]
                     # Keep only last N observations before shifting
-                    if len(hist) > self.config.scoring.sharpe.lookback:
-                        timestamps_to_keep = sorted(hist.keys())[-self.config.scoring.sharpe.lookback:]
+                    if len(hist) > self.config.scoring.kappa.lookback:
+                        timestamps_to_keep = sorted(hist.keys())[-self.config.scoring.kappa.lookback:]
                         hist = {ts: hist[ts] for ts in timestamps_to_keep}
-                    
+
                     shifted_inventory[uid] = {}
                     for prev_time, values in hist.items():
                         # Shift ALL timestamps to be relative to new start (negative)
                         time_from_old_end = old_simulation_timestamp - prev_time
                         new_time = new_simulation_timestamp - time_from_old_end
-                        
+
                         # Prune AFTER shifting, check against NEW threshold
-                        if new_time >= new_sharpe_threshold:
+                        if new_time >= new_threshold:
                             shifted_inventory[uid][new_time] = values
-            
+
             self.inventory_history = {
                 uid: shifted_inventory.get(uid, {})
                 for uid in range(self.subnet_info.max_uids)
             }
-            
+
             bt.logging.info("Shifting realized P&L history timestamps...")
             shifted_pnl_history = {}
             for uid in range(self.subnet_info.max_uids):
                 if uid in self.realized_pnl_history and self.realized_pnl_history[uid]:
                     hist = self.realized_pnl_history[uid]
-                    if len(hist) > self.config.scoring.sharpe.lookback:
-                        timestamps_to_keep = sorted(hist.keys())[-self.config.scoring.sharpe.lookback:]
+                    if len(hist) > self.config.scoring.kappa.lookback:
+                        timestamps_to_keep = sorted(hist.keys())[-self.config.scoring.kappa.lookback:]
                         hist = {ts: hist[ts] for ts in timestamps_to_keep}
-                    
+
                     shifted_pnl_history[uid] = {}
                     for prev_time, books in hist.items():
                         time_from_old_end = old_simulation_timestamp - prev_time
                         new_time = new_simulation_timestamp - time_from_old_end
 
-                        if new_time >= new_sharpe_threshold:
+                        if new_time >= new_threshold:
                             shifted_pnl_history[uid][new_time] = books
 
             self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
@@ -1016,7 +1030,7 @@ if __name__ != "__mp_main__":
                         self.realized_pnl_history[uid][ts][book_id] = pnl
 
             bt.logging.info(f"Shifted realized P&L history: {len(shifted_pnl_history)} UIDs with data")
-            
+
             bt.logging.info("Shifting round-trip volume timestamps...")
             shifted_rt_volumes = {}
             for uid in range(self.subnet_info.max_uids):
@@ -1028,12 +1042,12 @@ if __name__ != "__mp_main__":
                             for prev_time, volume in self.roundtrip_volumes[uid][bookId].items():
                                 time_from_old_end = old_simulation_timestamp - prev_time
                                 new_time = new_simulation_timestamp - time_from_old_end
-                                
+
                                 if new_time >= new_volume_threshold:
                                     shifted_times[new_time] = volume
                                 else:
                                     pruned_roundtrip[uid][bookId] += volume
-                            
+
                             if shifted_times:
                                 shifted_rt_volumes[uid][bookId] = shifted_times
 
@@ -1113,21 +1127,19 @@ if __name__ != "__mp_main__":
             asyncio.run_coroutine_threadsafe(self._save_state_sync(), self.main_loop).result()
             self.update_repo(end=True)
 
-        def _construct_save_data(self):
-            """
-            Builds the simulation-state and validator-state dictionaries
-            required for serialization.
+        def _build_simulation_state(self):
+            """Build simulation state dictionary.
             
-            Args:
-                sync (bool): If True, skip async yielding (for use from sync contexts).
-                            If False, yield periodically for responsiveness (default).
-
+            Constructs a dictionary containing all simulation-level state that needs
+            to be persisted, including timing information, balances, recent trades,
+            and pending notices.
+            
             Returns:
-                tuple(dict, dict, float): (simulation_state_data, validator_state_data, prep_time)
+                dict: Simulation state containing start_time, start_timestamp, step_rates,
+                    initial_balances, recent_trades, recent_miner_trades, pending_notices,
+                    and simulation.logDir.
             """
-            start = time.time()
-            bt.logging.debug("Preparing state for saving...")
-            simulation_state_data = {
+            return {
                 "start_time": self.start_time,
                 "start_timestamp": self.start_timestamp,
                 "step_rates": list(self.step_rates),
@@ -1147,105 +1159,374 @@ if __name__ != "__mp_main__":
                 "simulation.logDir": self.simulation.logDir,
             }
 
-            bt.logging.debug("Creating snapshots...")
-            snapshot_start = time.time()
-            inventory_snapshot = {}
-            uid_count = 0
+        def _snapshot_inventory_history(self):
+            """Snapshot inventory_history to eliminate nested defaultdict references.
+            
+            Creates a clean snapshot of the inventory_history structure by converting
+            nested defaultdicts to regular dicts for all UIDs up to max_uids.
+            
+            Returns:
+                dict: Nested dictionary mapping uid -> timestamp -> book_id -> inventory.
+            """
+            result = {}
             for uid in range(self.subnet_info.max_uids):
-                uid_count += 1
                 if uid in self.inventory_history:
-                    inventory_snapshot[uid] = {}
+                    result[uid] = {}
                     for ts, books in self.inventory_history[uid].items():
-                        inventory_snapshot[uid][ts] = dict(books)
+                        result[uid][ts] = dict(books)
+            return result
 
-            realized_pnl_snapshot = {}
-            uid_count = 0
+        def _snapshot_realized_pnl_history(self):
+            """Snapshot realized_pnl_history to eliminate nested defaultdict references.
+            
+            Creates a clean snapshot of the realized PnL history structure by converting
+            nested defaultdicts to regular dicts for all UIDs up to max_uids.
+            
+            Returns:
+                dict: Nested dictionary mapping uid -> timestamp -> book_id -> pnl.
+            """
+            result = {}
             for uid in range(self.subnet_info.max_uids):
-                uid_count += 1
                 if uid in self.realized_pnl_history:
-                    realized_pnl_snapshot[uid] = {}
+                    result[uid] = {}
                     for ts, books in self.realized_pnl_history[uid].items():
-                        realized_pnl_snapshot[uid][ts] = dict(books)
+                        result[uid][ts] = dict(books)
+            return result
 
-            def snapshot_2_level(source_dict, name):
-                """Thread-safe snapshot for 2-level dicts with optional yielding."""
-                result = {}
-                uid_count = 0                
-                for uid in range(self.subnet_info.max_uids):
-                    uid_count += 1
-                    
-                    if uid in source_dict:
-                        result[uid] = dict(source_dict[uid])                
-                return result
+        def _snapshot_2_level_dict(self, source_dict):
+            """Snapshot a 2-level dict structure to eliminate defaultdict references.
             
-            volume_sums_snapshot = snapshot_2_level(self.volume_sums, "volume_sums")
-            maker_volume_sums_snapshot = snapshot_2_level(self.maker_volume_sums, "maker_volume_sums")
-            taker_volume_sums_snapshot = snapshot_2_level(self.taker_volume_sums, "taker_volume_sums")
-            self_volume_sums_snapshot = snapshot_2_level(self.self_volume_sums, "self_volume_sums")
-            roundtrip_volume_sums_snapshot = snapshot_2_level(self.roundtrip_volume_sums, "roundtrip_volume_sums")
-
-            trade_volumes_snapshot = {}
-            uid_count = 0
+            Utility method for converting 2-level nested defaultdict structures to
+            regular dicts for all UIDs up to max_uids.
+            
+            Args:
+                source_dict (dict): Source dictionary with structure uid -> book_id -> value.
+                
+            Returns:
+                dict: Snapshot with regular dict objects replacing defaultdicts.
+            """
+            result = {}
             for uid in range(self.subnet_info.max_uids):
-                uid_count += 1
-                if uid not in self.trade_volumes:                    
-                    continue                
-                trade_volumes_snapshot[uid] = {}
+                if uid in source_dict:
+                    result[uid] = dict(source_dict[uid])
+            return result
+
+        def _snapshot_volume_sums(self):
+            """Snapshot all volume sum dictionaries.
+            
+            Creates snapshots of all volume-related tracking dictionaries including
+            total volumes, maker/taker volumes, self-trade volumes, and roundtrip volumes.
+            
+            Returns:
+                dict: Dictionary containing snapshots of volume_sums, maker_volume_sums,
+                    taker_volume_sums, self_volume_sums, and roundtrip_volume_sums.
+            """
+            return {
+                'volume_sums': self._snapshot_2_level_dict(self.volume_sums),
+                'maker_volume_sums': self._snapshot_2_level_dict(self.maker_volume_sums),
+                'taker_volume_sums': self._snapshot_2_level_dict(self.taker_volume_sums),
+                'self_volume_sums': self._snapshot_2_level_dict(self.self_volume_sums),
+                'roundtrip_volume_sums': self._snapshot_2_level_dict(self.roundtrip_volume_sums),
+            }
+
+        def _snapshot_trade_volumes(self):
+            """Snapshot trade_volumes with full 3-level structure preservation.
+            
+            Creates a clean snapshot of the trade_volumes structure which tracks volumes
+            by UID, book ID, role (maker/taker), and timestamp.
+            
+            Returns:
+                dict: Nested dictionary mapping uid -> book_id -> role -> timestamp -> volume.
+            """
+            result = {}
+            for uid in range(self.subnet_info.max_uids):
+                if uid not in self.trade_volumes:
+                    continue
+                result[uid] = {}
                 for book_id, roles in self.trade_volumes[uid].items():
-                    trade_volumes_snapshot[uid][book_id] = {}
+                    result[uid][book_id] = {}
                     for role, volumes in roles.items():
-                        trade_volumes_snapshot[uid][book_id][role] = dict(volumes)
+                        result[uid][book_id][role] = dict(volumes)
+            return result
 
-            roundtrip_volumes_snapshot = {}
-            uid_count = 0
+        def _snapshot_roundtrip_volumes(self):
+            """Snapshot roundtrip_volumes with full 3-level structure preservation.
             
+            Creates a clean snapshot of the roundtrip_volumes structure which tracks
+            roundtrip trading volumes by UID, book ID, and timestamp.
+            
+            Returns:
+                dict: Nested dictionary mapping uid -> book_id -> timestamp -> volume.
+            """
+            result = {}
             for uid in range(self.subnet_info.max_uids):
-                uid_count += 1
                 if uid not in self.roundtrip_volumes:
                     continue
-                roundtrip_volumes_snapshot[uid] = {}
+                result[uid] = {}
                 for book_id, volumes in self.roundtrip_volumes[uid].items():
-                    roundtrip_volumes_snapshot[uid][book_id] = dict(volumes)
+                    result[uid][book_id] = dict(volumes)
+            return result
 
-            open_positions_snapshot = {}
-            uid_count = 0
+        def _snapshot_open_positions(self):
+            """Snapshot open_positions with explicit long/short list copies.
+            
+            Creates a clean snapshot of the open_positions structure which tracks
+            currently open long and short positions by UID and book ID.
+            
+            Returns:
+                dict: Nested dictionary mapping uid -> book_id -> {'longs': list, 'shorts': list}.
+            """
+            result = {}
             for uid in range(self.subnet_info.max_uids):
-                uid_count += 1
                 if uid not in self.open_positions:
                     continue
-                open_positions_snapshot[uid] = {}
+                result[uid] = {}
                 for book_id, pos in self.open_positions[uid].items():
-                    open_positions_snapshot[uid][book_id] = {
+                    result[uid][book_id] = {
                         'longs': list(pos.get('longs', [])),
                         'shorts': list(pos.get('shorts', []))
                     }
-            
-            bt.logging.debug(f"Created snapshots ({time.time()-snapshot_start:.4f}s)")
+            return result
 
-            validator_state_data = {
+        def _build_validator_state(
+            self,
+            inventory_snapshot,
+            realized_pnl_snapshot,
+            volume_sums_snapshots,
+            trade_volumes_snapshot,
+            roundtrip_volumes_snapshot,
+            open_positions_snapshot
+        ):
+            """Assemble validator state dict from all snapshots.
+            
+            This method is shared by both sync and async construction paths
+            to ensure consistency and maintainability.
+            
+            Args:
+                inventory_snapshot (dict): Snapshot of inventory_history.
+                realized_pnl_snapshot (dict): Snapshot of realized_pnl_history.
+                volume_sums_snapshots (dict): Dictionary containing all volume sum snapshots.
+                trade_volumes_snapshot (dict): Snapshot of trade_volumes.
+                roundtrip_volumes_snapshot (dict): Snapshot of roundtrip_volumes.
+                open_positions_snapshot (dict): Snapshot of open_positions.
+                
+            Returns:
+                dict: Complete validator state containing step, simulation_timestamp, hotkeys,
+                    scores, activity_factors, and all snapshot data.
+            """
+            return {
                 "step": self.step,
                 "simulation_timestamp": self.simulation_timestamp,
                 "hotkeys": self.hotkeys,
                 "scores": [score.item() for score in self.scores],
                 "activity_factors": self.activity_factors,
-                "activity_factors_realized": self.activity_factors_realized,
                 "inventory_history": inventory_snapshot,
-                "sharpe_values": self.sharpe_values,
+                "kappa_values": self.kappa_values,
                 "realized_pnl_history": realized_pnl_snapshot,
                 "open_positions": open_positions_snapshot,
                 "unnormalized_scores": self.unnormalized_scores,
                 "deregistered_uids": self.deregistered_uids,
                 "trade_volumes": trade_volumes_snapshot,
                 "roundtrip_volumes": roundtrip_volumes_snapshot,
-                "volume_sums": volume_sums_snapshot,
-                "maker_volume_sums": maker_volume_sums_snapshot,
-                "taker_volume_sums": taker_volume_sums_snapshot,
-                "self_volume_sums": self_volume_sums_snapshot,
-                "roundtrip_volume_sums": roundtrip_volume_sums_snapshot
+                "volume_sums": volume_sums_snapshots['volume_sums'],
+                "maker_volume_sums": volume_sums_snapshots['maker_volume_sums'],
+                "taker_volume_sums": volume_sums_snapshots['taker_volume_sums'],
+                "self_volume_sums": volume_sums_snapshots['self_volume_sums'],
+                "roundtrip_volume_sums": volume_sums_snapshots['roundtrip_volume_sums'],
             }
+
+        def _construct_save_data_sync(self):
+            """Synchronously build all state data for saving.
+            
+            Constructs both simulation and validator state by calling each step method
+            directly in sequence. This is the synchronous alternative to the async
+            construction path.
+            
+            Returns:
+                tuple: Three-element tuple containing:
+                    - simulation_state_data (dict): Simulation state dictionary.
+                    - validator_state_data (dict): Validator state dictionary.
+                    - prep_time (float): Total time spent preparing the data in seconds.
+            """
+            start = time.time()
+            bt.logging.debug("Preparing state for saving (sync)...")
+
+            simulation_state_data = self._build_simulation_state()
+
+            bt.logging.debug("Creating snapshots...")
+            snapshot_start = time.time()
+
+            inventory_snapshot = self._snapshot_inventory_history()
+            realized_pnl_snapshot = self._snapshot_realized_pnl_history()
+            volume_sums_snapshots = self._snapshot_volume_sums()
+            trade_volumes_snapshot = self._snapshot_trade_volumes()
+            roundtrip_volumes_snapshot = self._snapshot_roundtrip_volumes()
+            open_positions_snapshot = self._snapshot_open_positions()
+
+            bt.logging.debug(f"Created snapshots ({time.time()-snapshot_start:.4f}s)")
+
+            validator_state_data = self._build_validator_state(
+                inventory_snapshot,
+                realized_pnl_snapshot,
+                volume_sums_snapshots,
+                trade_volumes_snapshot,
+                roundtrip_volumes_snapshot,
+                open_positions_snapshot
+            )
+
             prep_time = time.time() - start
-            bt.logging.info(f"Prepared save data ({prep_time:.4f}s)")
+            bt.logging.info(f"Prepared save data sync ({prep_time:.4f}s)")
             return simulation_state_data, validator_state_data, prep_time
+
+        async def _construct_save_data_async(self):
+            """Asynchronously build all state data for saving.
+            
+            Constructs both simulation and validator state by running each step method
+            in an executor thread pool and yielding control between steps. This allows
+            other async operations to continue while state preparation is in progress.
+            
+            Returns:
+                tuple: Three-element tuple containing:
+                    - simulation_state_data (dict): Simulation state dictionary.
+                    - validator_state_data (dict): Validator state dictionary.
+                    - prep_time (float): Total time spent preparing the data in seconds.
+            """
+            start = time.time()
+            bt.logging.debug("Preparing state for saving (async)...")
+            loop = asyncio.get_event_loop()
+
+            simulation_state_data = await loop.run_in_executor(
+                self.save_state_executor,
+                self._build_simulation_state
+            )
+            await asyncio.sleep(0)
+
+            bt.logging.debug("Creating snapshots...")
+            snapshot_start = time.time()
+
+            inventory_snapshot = await loop.run_in_executor(
+                self.save_state_executor,
+                self._snapshot_inventory_history
+            )
+            await asyncio.sleep(0)
+
+            realized_pnl_snapshot = await loop.run_in_executor(
+                self.save_state_executor,
+                self._snapshot_realized_pnl_history
+            )
+            await asyncio.sleep(0)
+
+            volume_sums_snapshots = await loop.run_in_executor(
+                self.save_state_executor,
+                self._snapshot_volume_sums
+            )
+            await asyncio.sleep(0)
+
+            trade_volumes_snapshot = await loop.run_in_executor(
+                self.save_state_executor,
+                self._snapshot_trade_volumes
+            )
+            await asyncio.sleep(0)
+
+            roundtrip_volumes_snapshot = await loop.run_in_executor(
+                self.save_state_executor,
+                self._snapshot_roundtrip_volumes
+            )
+            await asyncio.sleep(0)
+
+            open_positions_snapshot = await loop.run_in_executor(
+                self.save_state_executor,
+                self._snapshot_open_positions
+            )
+            await asyncio.sleep(0)
+
+            bt.logging.debug(f"Created snapshots ({time.time()-snapshot_start:.4f}s)")
+
+            validator_state_data = self._build_validator_state(
+                inventory_snapshot,
+                realized_pnl_snapshot,
+                volume_sums_snapshots,
+                trade_volumes_snapshot,
+                roundtrip_volumes_snapshot,
+                open_positions_snapshot
+            )
+
+            prep_time = time.time() - start
+            bt.logging.info(f"Prepared save data async ({prep_time:.4f}s)")
+            return simulation_state_data, validator_state_data, prep_time
+
+        def _defragment_histories(self):
+            """Rebuild history dicts to eliminate memory fragmentation.
+            
+            Reconstructs all major history and volume tracking dictionaries to reduce
+            memory fragmentation that accumulates over time from repeated insertions
+            and deletions. This helps maintain consistent memory usage patterns.
+            
+            The following structures are defragmented:
+                - inventory_history
+                - realized_pnl_history
+                - trade_volumes
+                - roundtrip_volumes
+                - volume_sums (all variants)
+            
+            Side Effects:
+                Triggers garbage collection after rebuilding all structures.
+            """
+            start = time.time()
+            bt.logging.info("Defragmenting history structures...")
+
+            # Rebuild inventory_history
+            new_inv = {}
+            for uid, hist in self.inventory_history.items():
+                if hist:
+                    new_inv[uid] = {ts: dict(books) for ts, books in hist.items()}
+            self.inventory_history = new_inv
+
+            # Rebuild realized_pnl_history
+            new_pnl = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+            for uid, timestamps in self.realized_pnl_history.items():
+                for ts, books in timestamps.items():
+                    for book_id, pnl in books.items():
+                        new_pnl[uid][ts][book_id] = pnl
+            self.realized_pnl_history = new_pnl
+
+            # Rebuild trade_volumes
+            new_volumes = {}
+            for uid, books in self.trade_volumes.items():
+                new_volumes[uid] = {}
+                for book_id, roles in books.items():
+                    new_volumes[uid][book_id] = {
+                        role: dict(volumes) for role, volumes in roles.items()
+                    }
+            self.trade_volumes = new_volumes
+
+            # Rebuild roundtrip_volumes
+            new_rt = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+            for uid, books in self.roundtrip_volumes.items():
+                for book_id, volumes in books.items():
+                    for ts, vol in volumes.items():
+                        new_rt[uid][book_id][ts] = vol
+            self.roundtrip_volumes = new_rt
+
+            # Rebuild volume sums (convert defaultdict to regular dict then back)
+            self.volume_sums = defaultdict(lambda: defaultdict(float), {
+                uid: dict(books) for uid, books in self.volume_sums.items()
+            })
+            self.maker_volume_sums = defaultdict(lambda: defaultdict(float), {
+                uid: dict(books) for uid, books in self.maker_volume_sums.items()
+            })
+            self.taker_volume_sums = defaultdict(lambda: defaultdict(float), {
+                uid: dict(books) for uid, books in self.taker_volume_sums.items()
+            })
+            self.self_volume_sums = defaultdict(lambda: defaultdict(float), {
+                uid: dict(books) for uid, books in self.self_volume_sums.items()
+            })
+            self.roundtrip_volume_sums = defaultdict(lambda: defaultdict(float), {
+                uid: dict(books) for uid, books in self.roundtrip_volume_sums.items()
+            })
+            
+            gc.collect()
+            bt.logging.info(f"Defragmentation complete ({time.time()-start:.4f}s)")
 
         async def _save_state(self) -> bool:
             """
@@ -1266,17 +1547,40 @@ if __name__ != "__mp_main__":
 
                 save_step = self.step
                 save_timestamp = self.simulation_timestamp
+
+                # Defragment at the start of each simulation hour
+                simulation_hour = save_timestamp // 3600_000_000_000
+                last_defrag_hour = getattr(self, '_last_defrag_hour', -1)
+
+                if simulation_hour != last_defrag_hour:
+                    bt.logging.info(f"Simulation hour {simulation_hour} - triggering defragmentation")
+                    async with self._reward_lock:
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            self.save_state_executor,
+                            self._defragment_histories
+                        )
+                    self._last_defrag_hour = simulation_hour
+
                 async with self._reward_lock:
-                    loop = asyncio.get_event_loop()
-                    simulation_state_data, validator_state_data, prep_time = await loop.run_in_executor(
-                        self.save_state_executor,
-                        self._construct_save_data
+                    total_inv_entries = sum(len(hist) for hist in self.inventory_history.values())
+                    total_pnl_entries = sum(len(hist) for hist in self.realized_pnl_history.values())
+                    total_vol_entries = sum(
+                        sum(len(roles.get('total', {})) for roles in books.values())
+                        for books in self.trade_volumes.values()
                     )
+
+                    bt.logging.info(
+                        f"Save prep: {total_inv_entries} inventory entries, "
+                        f"{total_pnl_entries} P&L entries, {total_vol_entries} volume entries"
+                    )
+
+                    simulation_state_data, validator_state_data, prep_time = await self._construct_save_data_async()
 
                 async def async_save_worker():
                     """Non-blocking async file I/O."""
                     io_start = time.time()
-                    
+
                     try:
                         loop = asyncio.get_event_loop()
                         sim_bytes = await loop.run_in_executor(
@@ -1287,21 +1591,28 @@ if __name__ != "__mp_main__":
                             self.save_state_executor,
                             lambda: msgpack.packb(validator_state_data, use_bin_type=True)
                         )
+
+                        sim_mb = len(sim_bytes) / 1024 / 1024
+                        val_mb = len(val_bytes) / 1024 / 1024
+                        bt.logging.info(f"Serialized: sim={sim_mb:.2f}MB, val={val_mb:.2f}MB")
+
                         sim_start = time.time()
                         async with aiofiles.open(self.simulation_state_file, 'wb') as f:
                             await f.write(sim_bytes)
                         sim_time = time.time() - sim_start
-                        
+
                         val_start = time.time()
                         async with aiofiles.open(self.validator_state_file, 'wb') as f:
                             await f.write(val_bytes)
                         val_time = time.time() - val_start
-                        
+
                         return {
                             'success': True,
                             'simulation_save_time': sim_time,
                             'validator_save_time': val_time,
-                            'io_time': time.time() - io_start
+                            'io_time': time.time() - io_start,
+                            'sim_size_mb': sim_mb,
+                            'val_size_mb': val_mb
                         }
                     except Exception as ex:
                         return {
@@ -1314,8 +1625,8 @@ if __name__ != "__mp_main__":
                 total_time = time.time() - total_start
                 if result['success']:
                     bt.logging.success(
-                        f"State saved: simulation ({result['simulation_save_time']:.4f}s), "
-                        f"validator ({result['validator_save_time']:.4f}s), "
+                        f"State saved: simulation ({result['simulation_save_time']:.4f}s, {result['sim_size_mb']:.2f}MB), "
+                        f"validator ({result['validator_save_time']:.4f}s, {result['val_size_mb']:.2f}MB), "
                         f"total ({total_time:.4f}s, prep={prep_time:.4f}s, io={result['io_time']:.4f}s)"
                     )
 
@@ -1335,7 +1646,7 @@ if __name__ != "__mp_main__":
                             state_path = Path(state_file)
                             try:
                                 backups = sorted(
-                                    [f for f in state_path.parent.glob(f"{state_path.name}.*") 
+                                    [f for f in state_path.parent.glob(f"{state_path.name}.*")
                                     if f.suffix.lstrip('.').isdigit()],
                                     key=lambda x: int(x.suffix.lstrip('.')),
                                     reverse=True
@@ -1353,7 +1664,6 @@ if __name__ != "__mp_main__":
                         f"Failed to save state for step {save_step}: {result['error']}",
                         details={"trace": result.get('traceback')}
                     )
-                    
                 return result['success']
 
             except Exception as ex:
@@ -1382,7 +1692,7 @@ if __name__ != "__mp_main__":
                 return
             if self.shared_state_saving:
                 bt.logging.warning(f"Skipping save at step {self.step} — previous save still running.")
-                return            
+                return
             if self.querying:
                 bt.logging.warning(f"Skipping save at step {self.step} — query in progress")
                 return
@@ -1390,29 +1700,38 @@ if __name__ != "__mp_main__":
             bt.logging.debug(f"[SAVE] Main loop ID: {id(self.main_loop)}, Current loop ID: {id(asyncio.get_event_loop())}")
             self.main_loop.call_soon_threadsafe(lambda: self.main_loop.create_task(self._save_state()))
 
-        async def _save_state_sync(self):  # ← Add async
-            """Async version for calling from async contexts."""
+        async def _save_state_sync(self):
+            """Save validator state synchronously from an async context.
+            
+            The method performs the following steps:
+                1. Constructs simulation and validator state data synchronously
+                2. Writes both state files to disk via save_state_worker
+                3. Sends PagerDuty alert if save operation fails
+            
+            Raises:
+                Exception: If state construction or save operation fails. Exceptions
+                    are caught, logged, and trigger PagerDuty alerts.
+                    
+            Side Effects:
+                - Writes simulation_state_file and validator_state_file to disk
+                - Sends PagerDuty alerts on failure
+                - Logs save operation status and timing
+            """
             try:
                 bt.logging.info("Saving state (sync)...")
-                
-                # Just await directly!
-                simulation_state_data, validator_state_data, prep_time = self._construct_save_data()
-                
+                simulation_state_data, validator_state_data, prep_time = self._construct_save_data_sync()
                 result = save_state_worker(
                     simulation_state_data,
                     validator_state_data,
                     self.simulation_state_file,
                     self.validator_state_file
                 )
-                
                 if result['success']:
                     bt.logging.success(f"State saved directly!")
                 else:
                     self.pagerduty_alert(f"Direct save failed: {result['error']}")
-                    
             except Exception as ex:
                 self.pagerduty_alert(f"Error in direct save: {ex}", details={"trace": traceback.format_exc()})
-
         def load_state(self) -> None:
             """
             Loads validator and simulation state from msgpack or legacy PyTorch files.
@@ -1420,7 +1739,7 @@ if __name__ != "__mp_main__":
             Behavior:
                 - Converts `.pt` state files to msgpack if detected.
                 - Loads simulation variables (balances, trades, notices, timestamps).
-                - Loads validator data (scores, activity, Sharpe values, volumes).
+                - Loads validator data (scores, activity, Kappa values, volumes).
                 - Reconstructs missing fields or reshapes data when schema versions differ.
                 - Reinitializes state when `neuron.reset=True` or files are absent.
 
@@ -1449,32 +1768,121 @@ if __name__ != "__mp_main__":
 
             if not self.config.neuron.reset and os.path.exists(self.simulation_state_file):
                 bt.logging.info(f"Loading simulation state variables from {self.simulation_state_file}...")
-                with open(self.simulation_state_file, 'rb') as file:
-                    byte_data = file.read()
-                simulation_state = msgpack.unpackb(byte_data, use_list=True, strict_map_key=False)
-                self.start_time = simulation_state["start_time"]
-                self.start_timestamp = simulation_state["start_timestamp"]
-                self.step_rates = simulation_state["step_rates"]
-                self.pending_notices = simulation_state["pending_notices"]
-                self.initial_balances = simulation_state["initial_balances"] if 'initial_balances' in simulation_state else {uid : {bookId : {'BASE' : None, 'QUOTE' : None, 'WEALTH' : None} for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                for uid, initial_balances in self.initial_balances.items():
-                    if not 'WEALTH' in initial_balances[0]:
-                        self.initial_balances[uid] = {bookId : initial_balance | {'WEALTH' : self.simulation.miner_wealth} for bookId, initial_balance in initial_balances.items()}
-                self.recent_trades = {book_id : [TradeInfo.model_construct(**t) for t in book_trades] for book_id, book_trades in simulation_state["recent_trades"].items()}
-                self.recent_miner_trades = {uid : {book_id : [[TradeEvent.model_construct(**t), r] for t, r in trades] for book_id, trades in uid_miner_trades.items()} for uid, uid_miner_trades in simulation_state["recent_miner_trades"].items()}  if "recent_miner_trades" in simulation_state else {uid : {bookId : [] for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                self.simulation.logDir = simulation_state["simulation.logDir"]
-                bt.logging.success(f"Loaded simulation state.")
-            else:
-                # If no state exists or the neuron.reset flag is set, re-initialize the simulation state
-                if self.config.neuron.reset and os.path.exists(self.simulation_state_file):
-                    bt.logging.warning(f"`neuron.reset is True, ignoring previous state info at {self.simulation_state_file}.")
+
+            def try_load_state_file(filepath, file_type="simulation"):
+                """
+                Attempt to load a state file, trying backups if the primary fails.
+
+                Args:
+                    filepath: Path to the primary state file
+                    file_type: "simulation" or "validator" for logging
+
+                Returns:
+                    Unpacked state dict or None if all attempts fail
+                """
+                if os.path.exists(filepath):
+                    try:
+                        bt.logging.info(f"Loading {file_type} state from {filepath}...")
+                        with open(filepath, 'rb') as file:
+                            byte_data = file.read()
+                        use_list = (file_type == "simulation")
+                        state = msgpack.unpackb(byte_data, use_list=use_list, strict_map_key=False)
+                        bt.logging.success(f"Loaded {file_type} state from primary file")
+                        return state
+                    except Exception as ex:
+                        bt.logging.error(f"Failed to load {file_type} state from {filepath}: {ex}")
+                        bt.logging.warning(f"Attempting to load from backups...")
+                state_path = Path(filepath)
+                backups = sorted(
+                    [f for f in state_path.parent.glob(f"{state_path.name}.*")
+                    if f.suffix.lstrip('.').isdigit()],
+                    key=lambda x: int(x.suffix.lstrip('.')),
+                    reverse=True
+                )
+                if not backups:
+                    bt.logging.warning(f"No backup files found for {filepath}")
+                    return None
+                bt.logging.info(f"Found {len(backups)} backup files, trying most recent first...")
+                for backup_file in backups:
+                    try:
+                        bt.logging.info(f"Attempting to load from backup: {backup_file.name}")
+                        with open(backup_file, 'rb') as file:
+                            byte_data = file.read()
+                        use_list = (file_type == "simulation")
+                        state = msgpack.unpackb(byte_data, use_list=use_list, strict_map_key=False)
+                        bt.logging.success(f"Successfully loaded from backup: {backup_file.name}")
+                        bt.logging.info(f"Restoring {backup_file.name} as primary state file...")
+                        shutil.copy2(backup_file, filepath)
+                        bt.logging.success(f"Restored backup to {filepath}")
+                        return state
+                    except Exception as ex:
+                        bt.logging.warning(f"Backup {backup_file.name} also corrupted: {ex}")
+                        continue
+                bt.logging.error(f"All backups failed for {file_type} state")
+                return None
+
+            if not self.config.neuron.reset:
+                simulation_state = try_load_state_file(self.simulation_state_file, "simulation")
+
+                if simulation_state:
+                    self.start_time = simulation_state["start_time"]
+                    self.start_timestamp = simulation_state["start_timestamp"]
+                    self.step_rates = simulation_state.get("step_rates", [])
+                    self.pending_notices = simulation_state["pending_notices"]
+                    self.initial_balances = simulation_state.get("initial_balances", {
+                        uid: {bookId: {'BASE': None, 'QUOTE': None, 'WEALTH': None}
+                            for bookId in range(self.simulation.book_count)}
+                        for uid in range(self.subnet_info.max_uids)
+                    })
+                    for uid, initial_balances in self.initial_balances.items():
+                        if 'WEALTH' not in initial_balances[0]:
+                            self.initial_balances[uid] = {
+                                bookId: initial_balance | {'WEALTH': self.simulation.miner_wealth}
+                                for bookId, initial_balance in initial_balances.items()
+                            }
+
+                    self.recent_trades = {
+                        book_id: [TradeInfo.model_construct(**t) for t in book_trades]
+                        for book_id, book_trades in simulation_state["recent_trades"].items()
+                    }
+                    self.recent_miner_trades = simulation_state.get("recent_miner_trades", {
+                        uid: {bookId: [] for bookId in range(self.simulation.book_count)}
+                        for uid in range(self.subnet_info.max_uids)
+                    })
+                    if self.recent_miner_trades:
+                        self.recent_miner_trades = {
+                            uid: {
+                                book_id: [[TradeEvent.model_construct(**t), r] for t, r in trades]
+                                for book_id, trades in uid_miner_trades.items()
+                            }
+                            for uid, uid_miner_trades in self.recent_miner_trades.items()
+                        }
+                    self.simulation.logDir = simulation_state["simulation.logDir"]
+                    bt.logging.success(f"Loaded simulation state")
                 else:
-                    bt.logging.info(f"No previous state information at {self.simulation_state_file}, initializing new simulation state.")
-                self.pending_notices = {uid : [] for uid in range(self.subnet_info.max_uids)}
-                self.initial_balances = {uid : {bookId : {'BASE' : None, 'QUOTE' : None, 'WEALTH' : None} for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                self.recent_trades = {bookId : [] for bookId in range(self.simulation.book_count)}
-                self.recent_miner_trades = {uid : {bookId : [] for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                self.fundamental_price = {bookId : None for bookId in range(self.simulation.book_count)}
+                    bt.logging.warning("All simulation state files corrupted, initializing fresh state")
+                    simulation_state = None
+            else:
+                simulation_state = None
+
+            if simulation_state is None:
+                if self.config.neuron.reset:
+                    bt.logging.warning(f"`neuron.reset is True, ignoring previous state")
+                else:
+                    bt.logging.info(f"No valid simulation state found, initializing new state")
+
+                self.pending_notices = {uid: [] for uid in range(self.subnet_info.max_uids)}
+                self.initial_balances = {
+                    uid: {bookId: {'BASE': None, 'QUOTE': None, 'WEALTH': None}
+                        for bookId in range(self.simulation.book_count)}
+                    for uid in range(self.subnet_info.max_uids)
+                }
+                self.recent_trades = {bookId: [] for bookId in range(self.simulation.book_count)}
+                self.recent_miner_trades = {
+                    uid: {bookId: [] for bookId in range(self.simulation.book_count)}
+                    for uid in range(self.subnet_info.max_uids)
+                }
+                self.fundamental_price = {bookId: None for bookId in range(self.simulation.book_count)}
 
             if os.path.exists(self.validator_state_file.replace('.mp', '.pt')):
                 bt.logging.info("Pytorch validator state file exists - converting to msgpack...")
@@ -1488,221 +1896,244 @@ if __name__ != "__mp_main__":
                 os.rename(self.validator_state_file.replace('.mp', '.pt'), self.validator_state_file.replace('.mp', '.pt') + ".bak")
                 bt.logging.info(f"Pytorch validator state file converted to msgpack at {self.validator_state_file}")
 
-            if not self.config.neuron.reset and os.path.exists(self.validator_state_file):
-                bt.logging.info(f"Loading validator state variables from {self.validator_state_file}...")
-                with open(self.validator_state_file, 'rb') as file:
-                    byte_data = file.read()
-                validator_state = msgpack.unpackb(byte_data, use_list=False, strict_map_key=False)
-                self.step = validator_state["step"]
-                self.simulation_timestamp = validator_state["simulation_timestamp"] if "simulation_timestamp" in validator_state else 0
-                self.hotkeys = validator_state["hotkeys"]
-                self.deregistered_uids = list(validator_state["deregistered_uids"]) if "deregistered_uids" in validator_state else []
-                self.scores = torch.tensor(validator_state["scores"])
-                self.activity_factors = validator_state["activity_factors"] if "activity_factors" in validator_state else {uid : {bookId : 0.0 for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                if isinstance(self.activity_factors[0], float):
-                    self.activity_factors = {uid : {bookId : self.activity_factors[uid] for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                self.activity_factors_realized = validator_state.get("activity_factors_realized", {uid : {bookId : 0.0 for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)})
-                self.inventory_history = validator_state["inventory_history"] if "inventory_history" in validator_state else {uid : {} for uid in range(self.subnet_info.max_uids)}
-                for uid in self.inventory_history:
-                    for timestamp in self.inventory_history[uid]:
-                        if len(self.inventory_history[uid][timestamp]) < self.simulation.book_count:
-                            for bookId in range(len(self.inventory_history[uid][timestamp]),self.simulation.book_count):
-                                self.inventory_history[uid][timestamp][bookId] = 0.0
-                        if len(self.inventory_history[uid][timestamp]) > self.simulation.book_count:
-                            self.inventory_history[uid][timestamp] = {k : v for k, v in self.inventory_history[uid][timestamp].items() if k < self.simulation.book_count}
-                self.sharpe_values = validator_state["sharpe_values"]
-                for uid in self.sharpe_values:
-                    if self.sharpe_values[uid]:
-                        if 'books_realized' not in self.sharpe_values[uid]:
-                            self.sharpe_values[uid]['books_realized'] = {
-                                bookId: 0.0 for bookId in range(self.simulation.book_count)
-                            }
-                        if 'books_weighted_realized' not in self.sharpe_values[uid]:
-                            self.sharpe_values[uid]['books_weighted_realized'] = {
-                                bookId: 0.0 for bookId in range(self.simulation.book_count)
-                            }
-                        for field in ['total_realized', 'average_realized', 'median_realized',
-                                    'normalized_average_realized', 'normalized_total_realized',
-                                    'normalized_median_realized', 'activity_weighted_normalized_median_realized',
-                                    'penalty_realized', 'score_realized']:
-                            if field not in self.sharpe_values[uid]:
-                                self.sharpe_values[uid][field] = 0.0
-                self.unnormalized_scores = validator_state["unnormalized_scores"]
-                self.trade_volumes = validator_state["trade_volumes"] if "trade_volumes" in validator_state else {uid : {bookId : {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}} for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                reorg = False
-                for uid in self.trade_volumes:
-                    for bookId in self.trade_volumes[uid]:
-                        if not 'total' in self.trade_volumes[uid][bookId]:
-                            if not reorg:
-                                bt.logging.info(f"Optimizing miner volume history structures...")
-                                reorg = True
-                            volumes = {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}}
-                            for time, role_volume in self.trade_volumes[uid][bookId].items():
-                                sampled_time = math.ceil(time / self.config.scoring.activity.trade_volume_sampling_interval) * self.config.scoring.activity.trade_volume_sampling_interval
-                                for role, volume in role_volume.items():
-                                    if not sampled_time in volumes[role]:
-                                        volumes[role][sampled_time] = 0.0
-                                    volumes[role][sampled_time] += volume
-                            self.trade_volumes[uid][bookId] = {role : {time : round(volumes[role][time], self.simulation.volumeDecimals) for time in volumes[role]} for role in volumes}
-                    if len(self.trade_volumes[uid]) < self.simulation.book_count:
-                        for bookId in range(len(self.trade_volumes[uid]),self.simulation.book_count):
-                            self.trade_volumes[uid][bookId] = {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}}
-                    if len(self.trade_volumes[uid]) > self.simulation.book_count:
-                        self.trade_volumes[uid] = {k : v for k, v in self.trade_volumes[uid].items() if k < self.simulation.book_count}
-                    if len(self.activity_factors[uid]) < self.simulation.book_count:
-                        for bookId in range(len(self.activity_factors[uid]),self.simulation.book_count):
-                            self.activity_factors[uid][bookId] = 0.0
-                    if len(self.activity_factors[uid]) > self.simulation.book_count:
-                        self.activity_factors[uid] = {k : v for k, v in self.activity_factors[uid].items() if k < self.simulation.book_count}
-                    if len(self.activity_factors_realized[uid]) < self.simulation.book_count:
-                        for bookId in range(len(self.activity_factors_realized[uid]), self.simulation.book_count):
-                            self.activity_factors_realized[uid][bookId] = 0.0
-                    if len(self.activity_factors_realized[uid]) > self.simulation.book_count:
-                        self.activity_factors_realized[uid] = {k : v for k, v in self.activity_factors_realized[uid].items() if k < self.simulation.book_count}
-                self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-                if "roundtrip_volumes" in validator_state:
-                    for uid, books in validator_state["roundtrip_volumes"].items():
-                        for book_id, volumes in books.items():
-                            if book_id >= self.simulation.book_count:
-                                continue
-                            self.roundtrip_volumes[uid][book_id] = defaultdict(float)
-                            for timestamp, volume in volumes.items():
-                                self.roundtrip_volumes[uid][book_id][timestamp] = volume
+            if not self.config.neuron.reset:
+                validator_state = try_load_state_file(self.validator_state_file, "validator")
+                if validator_state:
+                    self.step = validator_state["step"]
+                    self.simulation_timestamp = validator_state.get("simulation_timestamp", 0)
+                    self.hotkeys = validator_state["hotkeys"]
+                    self.deregistered_uids = list(validator_state.get("deregistered_uids", []))
+                    self.scores = torch.tensor(validator_state["scores"])
+                    self.activity_factors = validator_state.get("activity_factors", {
+                        uid: {bookId: 0.0 for bookId in range(self.simulation.book_count)}
+                        for uid in range(self.subnet_info.max_uids)
+                    })
+                    if isinstance(self.activity_factors[0], float):
+                        self.activity_factors = {
+                            uid: {bookId: self.activity_factors[uid] for bookId in range(self.simulation.book_count)}
+                            for uid in range(self.subnet_info.max_uids)
+                        }
 
-                def load_volume_sums(data, name, book_count):
-                    """Load volume sums and prune books that exceed book_count."""
-                    result = defaultdict(lambda: defaultdict(float))
+                    self.inventory_history = validator_state.get("inventory_history", {
+                        uid: {} for uid in range(self.subnet_info.max_uids)
+                    })
 
-                    if name not in data:
-                        bt.logging.info(f"No {name} in saved state, initializing empty")
+                    for uid in self.inventory_history:
+                        for timestamp in self.inventory_history[uid]:
+                            if len(self.inventory_history[uid][timestamp]) < self.simulation.book_count:
+                                for bookId in range(len(self.inventory_history[uid][timestamp]), self.simulation.book_count):
+                                    self.inventory_history[uid][timestamp][bookId] = 0.0
+                            if len(self.inventory_history[uid][timestamp]) > self.simulation.book_count:
+                                self.inventory_history[uid][timestamp] = {
+                                    k: v for k, v in self.inventory_history[uid][timestamp].items()
+                                    if k < self.simulation.book_count
+                                }
+
+                    if 'kappa_values' in validator_state:
+                        self.kappa_values = validator_state['kappa_values']
+                        for uid in range(self.subnet_info.max_uids):
+                            if uid in self.kappa_values and self.kappa_values[uid] is not None:
+                                kappa = self.kappa_values[uid]
+                                if 'books' in kappa:
+                                    kappa['books'] = {
+                                        book_id: val for book_id, val in kappa['books'].items()
+                                        if book_id < self.simulation.book_count
+                                    }
+                                    for book_id in range(len(kappa['books']), self.simulation.book_count):
+                                        kappa['books'][book_id] = None
+                                if 'books_weighted' in kappa:
+                                    kappa['books_weighted'] = {
+                                        book_id: val for book_id, val in kappa['books_weighted'].items()
+                                        if book_id < self.simulation.book_count
+                                    }
+                                    for book_id in range(len(kappa['books_weighted']), self.simulation.book_count):
+                                        kappa['books_weighted'][book_id] = 0.0
+                    elif 'sharpe_values' in validator_state:
+                        bt.logging.info("Converting sharpe_values to kappa_values format...")
+                        self.kappa_values = {}
+                        for uid, sharpe_data in validator_state['sharpe_values'].items():
+                            if sharpe_data:
+                                self.kappa_values[uid] = {
+                                    'books': sharpe_data.get('books_realized', {bookId: None for bookId in range(self.simulation.book_count)}),
+                                    'books_weighted': sharpe_data.get('books_weighted_realized', {bookId: 0.0 for bookId in range(self.simulation.book_count)}),
+                                    'total': sharpe_data.get('total_realized'),
+                                    'average': sharpe_data.get('average_realized'),
+                                    'median': sharpe_data.get('median_realized'),
+                                    'normalized_average': sharpe_data.get('normalized_average_realized', 0.0),
+                                    'normalized_median': sharpe_data.get('normalized_median_realized', 0.0),
+                                    'normalized_total': sharpe_data.get('normalized_total_realized', 0.0),
+                                    'activity_weighted_normalized_median': sharpe_data.get('activity_weighted_normalized_median_realized', 0.0),
+                                    'penalty': sharpe_data.get('penalty_realized', 0.0),
+                                    'score': sharpe_data.get('score_realized', 0.0),
+                                }
+                            else:
+                                self.kappa_values[uid] = None
+                    else:
+                        self.kappa_values = {uid: None for uid in range(self.subnet_info.max_uids)}
+                    self.unnormalized_scores = validator_state["unnormalized_scores"]
+
+
+                    self.trade_volumes = validator_state.get("trade_volumes", {
+                        uid: {bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
+                            for bookId in range(self.simulation.book_count)}
+                        for uid in range(self.subnet_info.max_uids)
+                    })
+
+
+                    reorg = False
+                    for uid in self.trade_volumes:
+                        for bookId in self.trade_volumes[uid]:
+                            if not 'total' in self.trade_volumes[uid][bookId]:
+                                if not reorg:
+                                    bt.logging.info(f"Optimizing miner volume history structures...")
+                                    reorg = True
+                                volumes = {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}}
+                                for time, role_volume in self.trade_volumes[uid][bookId].items():
+                                    sampled_time = math.ceil(time / self.config.scoring.activity.trade_volume_sampling_interval) * self.config.scoring.activity.trade_volume_sampling_interval
+                                    for role, volume in role_volume.items():
+                                        if not sampled_time in volumes[role]:
+                                            volumes[role][sampled_time] = 0.0
+                                        volumes[role][sampled_time] += volume
+                                self.trade_volumes[uid][bookId] = {role : {time : round(volumes[role][time], self.simulation.volumeDecimals) for time in volumes[role]} for role in volumes}
+                        if len(self.trade_volumes[uid]) < self.simulation.book_count:
+                            for bookId in range(len(self.trade_volumes[uid]),self.simulation.book_count):
+                                self.trade_volumes[uid][bookId] = {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}}
+                        if len(self.trade_volumes[uid]) > self.simulation.book_count:
+                            self.trade_volumes[uid] = {k : v for k, v in self.trade_volumes[uid].items() if k < self.simulation.book_count}
+                        if len(self.activity_factors[uid]) < self.simulation.book_count:
+                            for bookId in range(len(self.activity_factors[uid]),self.simulation.book_count):
+                                self.activity_factors[uid][bookId] = 0.0
+                        if len(self.activity_factors[uid]) > self.simulation.book_count:
+                            self.activity_factors[uid] = {k : v for k, v in self.activity_factors[uid].items() if k < self.simulation.book_count}
+
+                    def load_volume_sums(data, name, book_count):
+                        """Load volume sums and prune books that exceed book_count."""
+                        result = defaultdict(lambda: defaultdict(float))
+
+                        if name not in data:
+                            bt.logging.info(f"No {name} in saved state, initializing empty")
+                            return result
+
+                        volume_data = data[name]
+
+                        if volume_data:
+                            first_key = next(iter(volume_data.keys()))
+
+                            if isinstance(first_key, (tuple, list)) and len(first_key) == 2:
+                                bt.logging.info(f"Converting {name} from old tuple-key format to nested dict...")
+                                for key, vol in volume_data.items():
+                                    uid, book_id = key
+                                    if book_id < book_count:
+                                        result[uid][book_id] = vol
+                                bt.logging.debug(f"Converted {len(volume_data)} entries in {name}")
+
+                            elif isinstance(first_key, int):
+                                first_value = volume_data[first_key]
+
+                                if isinstance(first_value, dict):
+                                    bt.logging.debug(f"Loading {name} in nested dict format...")
+                                    for uid, books in volume_data.items():
+                                        for book_id, vol in books.items():
+                                            if book_id < book_count:
+                                                result[uid][book_id] = vol
+                                else:
+                                    bt.logging.warning(f"Unexpected format for {name}: single-level dict")
+                                    if 0 < book_count:
+                                        result[first_key][0] = first_value
+                            else:
+                                bt.logging.warning(f"Unknown format for {name}, initializing empty")
+
                         return result
 
-                    volume_data = data[name]
+                    self.volume_sums = load_volume_sums(validator_state, "volume_sums", self.simulation.book_count)
+                    self.maker_volume_sums = load_volume_sums(validator_state, "maker_volume_sums", self.simulation.book_count)
+                    self.taker_volume_sums = load_volume_sums(validator_state, "taker_volume_sums", self.simulation.book_count)
+                    self.self_volume_sums = load_volume_sums(validator_state, "self_volume_sums", self.simulation.book_count)
+                    self.roundtrip_volume_sums = load_volume_sums(validator_state, "roundtrip_volume_sums", self.simulation.book_count)
 
-                    if volume_data:
-                        first_key = next(iter(volume_data.keys()))
+                    self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+                    if "roundtrip_volumes" in validator_state:
+                        for uid, books in validator_state["roundtrip_volumes"].items():
+                            for book_id, volumes in books.items():
+                                if book_id >= self.simulation.book_count:
+                                    continue
+                                for timestamp, volume in volumes.items():
+                                    self.roundtrip_volumes[uid][book_id][timestamp] = volume
 
-                        if isinstance(first_key, (tuple, list)) and len(first_key) == 2:
-                            bt.logging.info(f"Converting {name} from old tuple-key format to nested dict...")
-                            for key, vol in volume_data.items():
-                                uid, book_id = key
-                                if book_id < book_count:
-                                    result[uid][book_id] = vol
-                            bt.logging.debug(f"Converted {len(volume_data)} entries in {name}")
-
-                        elif isinstance(first_key, int):
-                            first_value = volume_data[first_key]
-
-                            if isinstance(first_value, dict):
-                                bt.logging.debug(f"Loading {name} in nested dict format...")
-                                for uid, books in volume_data.items():
-                                    for book_id, vol in books.items():
-                                        if book_id < book_count:
-                                            result[uid][book_id] = vol
-                            else:
-                                bt.logging.warning(f"Unexpected format for {name}: single-level dict")
-                                if 0 < book_count:
-                                    result[first_key][0] = first_value
-                        else:
-                            bt.logging.warning(f"Unknown format for {name}, initializing empty")
-
-                    return result
-
-                self.volume_sums = load_volume_sums(validator_state, "volume_sums", self.simulation.book_count)
-                self.maker_volume_sums = load_volume_sums(validator_state, "maker_volume_sums", self.simulation.book_count)
-                self.taker_volume_sums = load_volume_sums(validator_state, "taker_volume_sums", self.simulation.book_count)
-                self.self_volume_sums = load_volume_sums(validator_state, "self_volume_sums", self.simulation.book_count)
-                self.roundtrip_volume_sums = load_volume_sums(validator_state, "roundtrip_volume_sums", self.simulation.book_count)
-
-                self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-                if "realized_pnl_history" in validator_state:
-                    for uid, hist in validator_state["realized_pnl_history"].items():
-                        for timestamp, books in hist.items():
-                            for book_id, pnl in books.items():
-                                if book_id < self.simulation.book_count:
-                                    self.realized_pnl_history[uid][timestamp][book_id] = pnl
+                    self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+                    if "realized_pnl_history" in validator_state:
+                        for uid, hist in validator_state["realized_pnl_history"].items():
+                            for timestamp, books in hist.items():
+                                for book_id, pnl in books.items():
+                                    if book_id < self.simulation.book_count:
+                                        self.realized_pnl_history[uid][timestamp][book_id] = pnl
+                    self.open_positions = defaultdict(lambda: defaultdict(lambda: {
+                        'longs': deque(),
+                        'shorts': deque()
+                    }))
+                    if "open_positions" in validator_state:
+                        legacy_count = 0
+                        for uid, books in validator_state["open_positions"].items():
+                            for book_id, pos in books.items():
+                                if book_id >= self.simulation.book_count:
+                                    continue
+                                longs = []
+                                for p in pos['longs']:
+                                    if len(p) == 4:
+                                        longs.append(tuple(p))
+                                    elif len(p) == 3:
+                                        longs.append((*p, 0.0))
+                                        legacy_count += 1
+                                shorts = []
+                                for p in pos['shorts']:
+                                    if len(p) == 4:
+                                        shorts.append(tuple(p))
+                                    elif len(p) == 3:
+                                        shorts.append((*p, 0.0))
+                                        legacy_count += 1
+                                self.open_positions[uid][book_id]['longs'] = deque(longs)
+                                self.open_positions[uid][book_id]['shorts'] = deque(shorts)
+                        if legacy_count > 0:
+                            bt.logging.info(f"Converted {legacy_count} legacy positions to new format")
+                    bt.logging.success(f"Loaded validator state")
                 else:
-                    bt.logging.info("No realized P&L history in saved state, initializing empty")
-                self.open_positions = defaultdict(lambda: defaultdict(lambda: {
-                    'longs': deque(),
-                    'shorts': deque()
-                }))
-                if "open_positions" in validator_state:
-                    bt.logging.info("Loading open positions from saved state...")
-                    legacy_count = 0
-                    for uid, books in validator_state["open_positions"].items():
-                        for book_id, pos in books.items():
-                            if book_id >= self.simulation.book_count:
-                                continue
-                            longs = []
-                            for p in pos['longs']:
-                                if len(p) == 4:
-                                    longs.append(tuple(p))
-                                elif len(p) == 3:
-                                    longs.append((*p, 0.0))
-                                    legacy_count += 1
-                                else:
-                                    bt.logging.warning(f"Unexpected position tuple length {len(p)} for uid {uid} book {book_id}")
-
-                            shorts = []
-                            for p in pos['shorts']:
-                                if len(p) == 4:
-                                    shorts.append(tuple(p))
-                                elif len(p) == 3:
-                                    shorts.append((*p, 0.0))
-                                    legacy_count += 1
-                                else:
-                                    bt.logging.warning(f"Unexpected position tuple length {len(p)} for uid {uid} book {book_id}")
-
-                            self.open_positions[uid][book_id]['longs'] = deque(longs)
-                            self.open_positions[uid][book_id]['shorts'] = deque(shorts)
-                    if legacy_count > 0:
-                        bt.logging.info(f"Converted {legacy_count} legacy positions (3-tuple) to new format (4-tuple with 0.0 fees)")
-                else:
-                    bt.logging.info("No open positions in saved state, initializing empty")
-                if reorg:
-                    self._save_state()
-                bt.logging.success(f"Loaded validator state.")
+                    bt.logging.warning("All validator state files corrupted, initializing fresh state")
+                    validator_state = None
             else:
-                # If no state exists or the neuron.reset flag is set, re-initialize the validator state
-                if self.config.neuron.reset and os.path.exists(self.validator_state_file):
-                    bt.logging.warning(f"`neuron.reset is True, ignoring previous state info at {self.validator_state_file}.")
+                validator_state = None
+
+            if validator_state is None:
+                if self.config.neuron.reset:
+                    bt.logging.warning(f"`neuron.reset is True, ignoring previous validator state")
                 else:
-                    bt.logging.info(f"No previous state information at {self.validator_state_file}, initializing new simulation state.")
-                self.activity_factors = {uid : {bookId : 0.0 for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                self.activity_factors_realized = {uid : {bookId : 0.0 for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
-                self.inventory_history = {uid : {} for uid in range(self.subnet_info.max_uids)}
-                self.sharpe_values = {uid:
-                    {
-                        'books': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
-                        'books_realized': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
-                        'books_weighted': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
-                        'books_weighted_realized': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
-                        'total': 0.0,
-                        'total_realized': 0.0,
-                        'average': 0.0,
-                        'average_realized': 0.0,
-                        'median': 0.0,
-                        'median_realized': 0.0,
-                        'normalized_average': 0.0,
-                        'normalized_average_realized': 0.0,
-                        'normalized_total': 0.0,
-                        'normalized_total_realized': 0.0,
-                        'normalized_median': 0.0,
-                        'normalized_median_realized': 0.0,
-                        'activity_weighted_normalized_median': 0.0,
-                        'activity_weighted_normalized_median_realized': 0.0,
-                        'book_balance_multipliers': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
-                        'balance_ratio_multiplier': 0.0,
-                        'penalty': 0.0,
-                        'penalty_realized': 0.0,
-                        'score_unrealized': 0.0,
-                        'score_realized': 0.0,
-                        'score': 0.0,
-                    } for uid in range(self.subnet_info.max_uids)
+                    bt.logging.info(f"No valid validator state found, initializing new state")
+
+                    self.activity_factors = {
+                        uid: {bookId: 0.0 for bookId in range(self.simulation.book_count)}
+                        for uid in range(self.subnet_info.max_uids)
+                    }
+                    self.inventory_history = {uid: {} for uid in range(self.subnet_info.max_uids)}
+                    self.kappa_values = {uid:
+                        {
+                            'books': {bookId: None for bookId in range(self.simulation.book_count)},
+                            'books_weighted': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
+                            'total': None,
+                            'average': None,
+                            'median': None,
+                            'normalized_average': 0.0,
+                            'normalized_median': 0.0,
+                            'normalized_total': 0.0,
+                            'activity_weighted_normalized_median': 0.0,
+                            'penalty': 0.0,
+                            'score': 0.0,
+                        } for uid in range(self.subnet_info.max_uids)
+                    }
+                self.unnormalized_scores = {uid: 0.0 for uid in range(self.subnet_info.max_uids)}
+                self.trade_volumes = {
+                    uid: {bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
+                        for bookId in range(self.simulation.book_count)}
+                    for uid in range(self.subnet_info.max_uids)
                 }
-                self.unnormalized_scores = {uid : 0.0 for uid in range(self.subnet_info.max_uids)}
-                self.trade_volumes = {uid : {bookId : {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}} for bookId in range(self.simulation.book_count)} for uid in range(self.subnet_info.max_uids)}
                 self.volume_sums = defaultdict(lambda: defaultdict(float))
                 self.maker_volume_sums = defaultdict(lambda: defaultdict(float))
                 self.taker_volume_sums = defaultdict(lambda: defaultdict(float))
@@ -1740,7 +2171,7 @@ if __name__ != "__mp_main__":
 
             Behavior:
                 - Detects successful agent reset events (RDRA / ERDRA).
-                - Resets Sharpe values, activity factors, volume histories, inventory,
+                - Resets Kappa values, activity factors, volume histories, inventory,
                 and all accumulated metrics for each affected UID.
                 - Removes UID from deregistration list after reset.
                 - Restores the UID to a clean initial state.
@@ -1758,50 +2189,28 @@ if __name__ != "__mp_main__":
                         if reset['u']:
                             bt.logging.info(f"Agent {reset['a']} Balances Reset! {reset}")
                             if reset['a'] in self.deregistered_uids:
-                                self.sharpe_values[reset['a']] = {
+                                self.kappa_values[reset['a']] = {
                                     'books': {
-                                        bookId: 0.0 for bookId in range(self.simulation.book_count)
-                                    },
-                                    'books_realized': {
-                                        bookId: 0.0 for bookId in range(self.simulation.book_count)
+                                        bookId: None for bookId in range(self.simulation.book_count)
                                     },
                                     'books_weighted': {
                                         bookId: 0.0 for bookId in range(self.simulation.book_count)
                                     },
-                                    'books_weighted_realized': {
-                                        bookId: 0.0 for bookId in range(self.simulation.book_count)
-                                    },
-                                    'total': 0.0,
-                                    'total_realized': 0.0,
-                                    'average': 0.0,
-                                    'average_realized': 0.0,
-                                    'median': 0.0,
-                                    'median_realized': 0.0,
+                                    'total': None,
+                                    'average': None,
+                                    'median': None,
                                     'normalized_average': 0.0,
-                                    'normalized_average_realized': 0.0,
-                                    'normalized_total': 0.0,
-                                    'normalized_total_realized': 0.0,
                                     'normalized_median': 0.0,
-                                    'normalized_median_realized': 0.0,
+                                    'normalized_total': 0.0,
                                     'activity_weighted_normalized_median': 0.0,
-                                    'activity_weighted_normalized_median_realized': 0.0,
                                     'penalty': 0.0,
-                                    'penalty_realized': 0.0,
-                                    'book_balance_multipliers': {
-                                        bookId: 0.0 for bookId in range(self.simulation.book_count)
-                                    },
-                                    'balance_ratio_multiplier': 0.0,
-                                    'score_unrealized': 0.0,
-                                    'score_realized': 0.0,
                                     'score': 0.0,
                                 }
                                 self.unnormalized_scores[reset['a']] = 0.0
                                 self.activity_factors[reset['a']] = {bookId: 0.0 for bookId in range(self.simulation.book_count)}
-                                self.activity_factors_realized[reset['a']] = {bookId: 0.0 for bookId in range(self.simulation.book_count)}
                                 self.inventory_history[reset['a']] = {}
                                 self.trade_volumes[reset['a']] = {bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}} for bookId in range(self.simulation.book_count)}
 
-                                # Clear volume sums
                                 for book_id in range(self.simulation.book_count):
                                     self.volume_sums[reset['a']][book_id] = 0.0
                                     self.maker_volume_sums[reset['a']][book_id] = 0.0
@@ -1897,21 +2306,22 @@ if __name__ != "__mp_main__":
             pnl_start = time.time()
             total_realized_pnl = {}
             realized_pnl_by_book = {}
-            
+
             for uid, hist in self.realized_pnl_history.items():
                 if not hist:
                     total_realized_pnl[uid] = 0.0
                     realized_pnl_by_book[uid] = {book_id: 0.0 for book_id in range(book_count)}
                     continue
-                
+
                 book_totals = [0.0] * book_count
-                for timestamp_data in hist.values():
+                for ts, timestamp_data in hist.items():
                     for book_id, pnl in timestamp_data.items():
-                        book_totals[book_id] += pnl
-                
+                        if book_id < len(book_totals):
+                            book_totals[book_id] += pnl
+
                 realized_pnl_by_book[uid] = {book_id: book_totals[book_id] for book_id in range(book_count)}
                 total_realized_pnl[uid] = sum(book_totals)
-            
+
             bt.logging.debug(f"Computed realized P&L totals ({time.time()-pnl_start:.4f}s)")
 
             bt.logging.debug("Building minimal inventory...")
@@ -1934,20 +2344,20 @@ if __name__ != "__mp_main__":
 
             bt.logging.debug("Serializing volume sums...")
             serialize_start = time.time()
-            
+
             def serialize_nested_dict(d):
                 return {
                     f"{uid}:{book_id}": vol
                     for uid, books in d.items()
                     for book_id, vol in books.items()
                 }
-            
+
             volume_sums_flat = serialize_nested_dict(self.volume_sums)
             maker_volume_sums_flat = serialize_nested_dict(self.maker_volume_sums)
             taker_volume_sums_flat = serialize_nested_dict(self.taker_volume_sums)
             self_volume_sums_flat = serialize_nested_dict(self.self_volume_sums)
             roundtrip_volume_sums_flat = serialize_nested_dict(self.roundtrip_volume_sums)
-            
+
             bt.logging.debug(f"Serialized volume sums ({time.time()-serialize_start:.4f}s)")
 
             bt.logging.debug("Building metagraph data...")
@@ -1972,7 +2382,7 @@ if __name__ != "__mp_main__":
                 bookId: [t.model_dump() for t in trades[-25:]]
                 for bookId, trades in self.recent_trades.items()
             }
-            
+
             recent_miner_trades = {
                 uid: {
                     bookId: [
@@ -2021,7 +2431,7 @@ if __name__ != "__mp_main__":
 
             bt.logging.debug("Assembling final data structure...")
             final_start = time.time()
-            
+
             data = {
                 'metagraph_data': metagraph_data,
                 'simulation': self.simulation.model_dump(),
@@ -2039,8 +2449,7 @@ if __name__ != "__mp_main__":
                 'realized_pnl_by_book': realized_pnl_by_book,
                 'book_count': book_count,
                 'activity_factors': self.activity_factors,
-                'activity_factors_realized': self.activity_factors_realized,
-                'sharpe_values': self.sharpe_values,
+                'kappa_values': self.kappa_values,
                 'unnormalized_scores': self.unnormalized_scores,
                 'scores': {i: score.item() for i, score in enumerate(self.scores)},
                 'miner_stats': self.miner_stats,
@@ -2054,9 +2463,9 @@ if __name__ != "__mp_main__":
                 'current_block': self.current_block,
                 'uid': self.uid,
             }
-            
+
             bt.logging.debug(f"Assembled final structure ({time.time()-final_start:.4f}s)")
-            
+
             return data
 
         async def _report(self):
@@ -2122,11 +2531,11 @@ if __name__ != "__mp_main__":
                     "Reporting",
                     self.reporting_ipc_executor
                 )
-                
+
                 if not write_success:
                     self.pagerduty_alert("Failed to write reporting data")
                     return
-                
+
                 bt.logging.info(f"Wrote reporting data ({time.time()-write_start:.4f}s)")
 
                 await asyncio.get_event_loop().run_in_executor(
@@ -2151,7 +2560,7 @@ if __name__ != "__mp_main__":
                         if poll_count % 10 == 0:
                             await asyncio.sleep(0.001)
                             bt.logging.debug(f"Still polling for reporting response ({elapsed:.1f}s, {poll_count} polls)")
-                        
+
                         continue
                 else:
                     self.pagerduty_alert(f"Reporting response timeout after {max_wait}s")
@@ -2321,7 +2730,7 @@ if __name__ != "__mp_main__":
             **Operations:**
             • Samples volume at aligned timestamps (trade_volume_sampling_interval)
             • Prunes old volume entries outside assessment window (trade_volume_assessment_period)
-            • Prunes old inventory and realized P&L history outside Sharpe lookback window
+            • Prunes old inventory and realized P&L history outside Kappa lookback window
             • Batch processes updates for performance (deferred rounding)
             • Ensures all nested structures are initialized dynamically
 
@@ -2349,7 +2758,15 @@ if __name__ != "__mp_main__":
                 timestamp / self.config.scoring.activity.trade_volume_sampling_interval
             ) * self.config.scoring.activity.trade_volume_sampling_interval
 
-            should_prune = (self.step % 60 == 0)
+            if not hasattr(self, '_last_prune_timestamp'):
+                self._last_prune_timestamp = 0
+
+            time_since_prune = timestamp - self._last_prune_timestamp
+            prune_interval = 60_000_000_000
+            should_prune = time_since_prune >= prune_interval
+            if should_prune:
+                self._last_prune_timestamp = timestamp
+                bt.logging.info(f"Pruning at step {self.step} (timestamp {timestamp})")
             volume_prune_threshold = timestamp - self.config.scoring.activity.trade_volume_assessment_period
 
             for bookId, book in books.items():
@@ -2497,11 +2914,10 @@ if __name__ != "__mp_main__":
                                         }
 
                             for book_id, deltas in volume_deltas[uid_item].items():
-                                self.volume_sums[uid_item][book_id] += deltas['total']
-                                self.maker_volume_sums[uid_item][book_id] += deltas['maker']
-                                self.taker_volume_sums[uid_item][book_id] += deltas['taker']
-                                self.self_volume_sums[uid_item][book_id] += deltas['self']
-
+                                self.volume_sums[uid_item][book_id] = self.volume_sums[uid_item].get(book_id, 0.0) + deltas['total']
+                                self.maker_volume_sums[uid_item][book_id] = self.maker_volume_sums[uid_item].get(book_id, 0.0) + deltas['maker']
+                                self.taker_volume_sums[uid_item][book_id] = self.taker_volume_sums[uid_item].get(book_id, 0.0) + deltas['taker']
+                                self.self_volume_sums[uid_item][book_id] = self.self_volume_sums[uid_item].get(book_id, 0.0) + deltas['self']
                     # Initialize zero P&L for timestamps with no trades
                     if timestamp not in self.realized_pnl_history[uid_item]:
                         self.realized_pnl_history[uid_item][timestamp] = {
@@ -2531,7 +2947,7 @@ if __name__ != "__mp_main__":
 
                     if should_prune:
                         inventory_hist = self.inventory_history[uid_item]
-                        lookback_limit = self.config.scoring.sharpe.lookback
+                        lookback_limit = self.config.scoring.kappa.lookback
 
                         if len(inventory_hist) > lookback_limit:
                             timestamps_to_keep = heapq.nlargest(lookback_limit, inventory_hist.keys())
@@ -2563,13 +2979,13 @@ if __name__ != "__mp_main__":
 
                 except Exception as ex:
                     self.pagerduty_alert(f"Failed to update trade data for UID {uid_item}: {ex}", details={"trace": traceback.format_exc()})
-                    
+
             for uid_item, timestamps in realized_pnl_updates.items():
                 for ts, books in timestamps.items():
                     if uid_item not in self.realized_pnl_history:
                         self.realized_pnl_history[uid_item] = defaultdict(lambda: defaultdict(float))
                     if ts not in self.realized_pnl_history[uid_item]:
-                        self.realized_pnl_history[uid_item][ts] = defaultdict(float)                    
+                        self.realized_pnl_history[uid_item][ts] = defaultdict(float)
                     for book_id, pnl in books.items():
                         if book_id not in self.realized_pnl_history[uid_item][ts]:
                             self.realized_pnl_history[uid_item][ts][book_id] = 0.0
@@ -2585,18 +3001,18 @@ if __name__ != "__mp_main__":
                         if ts not in self.roundtrip_volumes[uid_item][book_id]:
                             self.roundtrip_volumes[uid_item][book_id][ts] = 0.0
                         self.roundtrip_volumes[uid_item][book_id][ts] += rt_vol
-                        self.roundtrip_volume_sums[uid_item][book_id] += rt_vol
+                        self.roundtrip_volume_sums[uid_item][book_id] = self.roundtrip_volume_sums[uid_item].get(book_id, 0.0) + rt_vol
                         uids_to_round.add(uid_item)
 
             for uid_item in uids_to_round:
                 changed_books = set(volume_deltas.get(uid_item, {}).keys())
-                
+
                 if uid_item in roundtrip_volume_updates:
                     for ts_books in roundtrip_volume_updates[uid_item].values():
                         changed_books.update(ts_books.keys())
                 if not changed_books:
                     changed_books = range(book_count)
-                
+
                 for book_id in changed_books:
                     if uid_item in self.trade_volumes and book_id in self.trade_volumes[uid_item]:
                         book_vols = self.trade_volumes[uid_item][book_id]
@@ -2607,30 +3023,35 @@ if __name__ != "__mp_main__":
                                     volume_decimals
                                 )
 
-                    self.volume_sums[uid_item][book_id] = round(
-                        self.volume_sums[uid_item][book_id], volume_decimals
-                    )
-                    self.maker_volume_sums[uid_item][book_id] = round(
-                        self.maker_volume_sums[uid_item][book_id], volume_decimals
-                    )
-                    self.taker_volume_sums[uid_item][book_id] = round(
-                        self.taker_volume_sums[uid_item][book_id], volume_decimals
-                    )
-                    self.self_volume_sums[uid_item][book_id] = round(
-                        self.self_volume_sums[uid_item][book_id], volume_decimals
-                    )
-                    self.roundtrip_volume_sums[uid_item][book_id] = round(
-                        self.roundtrip_volume_sums[uid_item][book_id], volume_decimals
-                    )
+                    if book_id in self.volume_sums[uid_item]:
+                        self.volume_sums[uid_item][book_id] = round(
+                            self.volume_sums[uid_item][book_id], volume_decimals
+                        )
+                    if book_id in self.maker_volume_sums[uid_item]:
+                        self.maker_volume_sums[uid_item][book_id] = round(
+                            self.maker_volume_sums[uid_item][book_id], volume_decimals
+                        )
+                    if book_id in self.taker_volume_sums[uid_item]:
+                        self.taker_volume_sums[uid_item][book_id] = round(
+                            self.taker_volume_sums[uid_item][book_id], volume_decimals
+                        )
+                    if book_id in self.self_volume_sums[uid_item]:
+                        self.self_volume_sums[uid_item][book_id] = round(
+                            self.self_volume_sums[uid_item][book_id], volume_decimals
+                        )
+                    if book_id in self.roundtrip_volume_sums[uid_item]:
+                        self.roundtrip_volume_sums[uid_item][book_id] = round(
+                            self.roundtrip_volume_sums[uid_item][book_id], volume_decimals
+                        )
 
-                if uid_item in realized_pnl_updates:
-                    for ts in realized_pnl_updates[uid_item]:
-                        for book_id in range(book_count):
-                            if ts in self.realized_pnl_history[uid_item]:
-                                self.realized_pnl_history[uid_item][ts][book_id] = round(
-                                    self.realized_pnl_history[uid_item][ts][book_id],
-                                    volume_decimals
-                                )
+                    if uid_item in realized_pnl_updates:
+                        for ts in realized_pnl_updates[uid_item]:
+                            if book_id < book_count and ts in self.realized_pnl_history[uid_item]:
+                                if book_id in self.realized_pnl_history[uid_item][ts]:
+                                    self.realized_pnl_history[uid_item][ts][book_id] = round(
+                                        self.realized_pnl_history[uid_item][ts][book_id],
+                                        volume_decimals
+                                    )
             total_time = time.time() - total_start
             if should_prune:
                 bt.logging.debug(f"[UPDATE_VOLUMES] Total: {total_time:.4f}s (pruned, {uid_count} UIDs)")
@@ -2640,7 +3061,7 @@ if __name__ != "__mp_main__":
         def should_block_queries(self) -> bool:
             """Block queries if reward is lagging."""
             if self._pending_reward_tasks >= 5:
-                return True      
+                return True
             return False
 
         async def _reward(self, state: MarketSimulationStateUpdate):
@@ -2649,7 +3070,7 @@ if __name__ != "__mp_main__":
             """
             if not hasattr(self, "_reward_lock"):
                 self._reward_lock = asyncio.Lock()
-                
+
             with self._rewarding_lock:
                 self._pending_reward_tasks += 1
 
@@ -2673,7 +3094,6 @@ if __name__ != "__mp_main__":
                         if timestamp % self.config.scoring.interval != 0:
                             bt.logging.info(f"Agent Scores Data Updated for {duration} ({time.time()-start:.4f}s)")
                             return
-                        
                         bt.logging.info("Starting reward calculation...")
                         calc_start = time.time()
 
@@ -2683,12 +3103,11 @@ if __name__ != "__mp_main__":
                             get_rewards,
                             self
                         )
-                        
+
                         bt.logging.info(f"Reward calculation completed ({time.time()-calc_start:.4f}s)")
 
-                        self.sharpe_values = updated_data['sharpe_values']
+                        self.kappa_values = updated_data['kappa_values']
                         self.activity_factors = updated_data['activity_factors']
-                        self.activity_factors_realized = updated_data['activity_factors_realized']
 
                         bt.logging.debug(f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n{rewards}")
                         self.update_scores(rewards, self.metagraph.uids)
@@ -3170,7 +3589,7 @@ if __name__ != "__mp_main__":
                         bt.logging.warning(f"Error closing reporting response queue: {e}")
 
                 bt.logging.info("Reporting service cleanup complete")
-                
+
                 bt.logging.info("Cleaning up seed service...")
                 if hasattr(self, 'seed_process') and self.seed_process:
                     try:
@@ -3179,7 +3598,7 @@ if __name__ != "__mp_main__":
                         bt.logging.info(f"Seed service exited with code {self.seed_process.returncode}")
                     except subprocess.TimeoutExpired:
                         bt.logging.warning("Seed service did not exit gracefully, killing...")
-                        self.seed_process.kill()                
+                        self.seed_process.kill()
                 bt.logging.info("Seed service cleanup complete")
 
             except Exception as e:
@@ -3223,7 +3642,7 @@ if __name__ != "__mp_main__":
                         bt.logging.info("reward_executor processes terminated")
                     except Exception as term_ex:
                         bt.logging.error(f"Error terminating reward_executor: {term_ex}")
-            
+
             if hasattr(self, 'query_ipc_executor') and self.query_ipc_executor is not None:
                 try:
                     bt.logging.info("Shutting down query_ipc_executor...")
@@ -3231,7 +3650,7 @@ if __name__ != "__mp_main__":
                     bt.logging.info("query_ipc_executor shut down successfully")
                 except Exception as ex:
                     bt.logging.error(f"Error shutting down query_ipc_executor: {ex}")
-            
+
             if hasattr(self, 'reporting_ipc_executor') and self.reporting_ipc_executor is not None:
                 try:
                     bt.logging.info("Shutting down reporting_ipc_executor...")

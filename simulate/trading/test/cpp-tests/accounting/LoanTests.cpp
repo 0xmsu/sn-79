@@ -77,7 +77,6 @@ struct LoanCreationDesc
             .price = desc.price,
             .quoteProportion = desc.collateralQuoteProportion
         }),
-        .price = desc.price,
         .marginCallPrice = calculateMarginCallPrice(
             desc.price, desc.leverage, desc.direction, desc.maintenanceMargin) 
     });

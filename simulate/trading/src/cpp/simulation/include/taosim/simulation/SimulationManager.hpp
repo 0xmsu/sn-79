@@ -5,9 +5,11 @@
 #pragma once
 
 #include <Simulation.hpp>
-#include "taosim/ipc/ipc.hpp"
-#include "taosim/replay/ReplayManager.hpp"
-#include "net.hpp"
+#include <taosim/checkpoint/CheckpointToken.hpp>
+#include <taosim/checkpoint/CheckpointManager.hpp>
+#include <taosim/ipc/ipc.hpp>
+#include <taosim/replay/ReplayManager.hpp>
+#include <net.hpp>
 
 #include <boost/asio.hpp>
 #include <pugixml.hpp>
@@ -28,8 +30,6 @@ struct SimulationBlockInfo
     uint32_t dimension;
 };
 
-//-------------------------------------------------------------------------
-
 struct NetworkingInfo
 {
     std::string host, port, bookStateEndpoint, generalMsgEndpoint;
@@ -47,21 +47,20 @@ public:
     void publishStartInfo();
     void publishEndInfo();
     void publishState();
-    void publishStateMessagePack();
     
     [[nodiscard]] SimulationBlockInfo blockInfo() const noexcept { return m_blockInfo; }
-    [[nodiscard]] std::span<const std::unique_ptr<Simulation>> simulations() const noexcept { return m_simulations; }
+    [[nodiscard]] auto&& threadPool(this auto&& self) noexcept { return self.m_threadPool; }
+    [[nodiscard]] auto&& simulations(this auto&& self) noexcept { return self.m_simulations; }
     [[nodiscard]] const fs::path& logDir() const noexcept { return m_logDir; }
+    [[nodiscard]] auto&& stepSignal(this auto&& self) noexcept { return self.m_stepSignal; }
+    [[nodiscard]] auto&& checkpointManager(this auto&& self) noexcept { return self.m_checkpointManager; }
+    [[nodiscard]] auto&& measurements(this auto&& self) noexcept { return self.m_measurements; }
 
-    [[nodiscard]] rapidjson::Document makeStateJson() const;
-    [[nodiscard]] rapidjson::Document makeCollectiveBookStateJson() const;
+    [[nodiscard]] bool online() const noexcept;
+    [[nodiscard]] bool warmingUp() const noexcept;
 
-    [[nodiscard]] bool online() const noexcept
-    {
-        return !m_disallowPublish && !m_netInfo.host.empty() && !m_netInfo.port.empty();
-    }
-
-    static std::unique_ptr<SimulationManager> fromConfig(const fs::path& path);
+    static std::unique_ptr<SimulationManager> fromConfig(const fs::path& configPath, const fs::path& baseDir);
+    static std::unique_ptr<SimulationManager> fromCheckpoint(const checkpoint::CheckpointToken& ckptToken);
     static std::unique_ptr<SimulationManager> fromReplay(const replay::ReplayDesc& desc);
 
     // TODO: ENV?
@@ -71,6 +70,13 @@ public:
     static constexpr std::string_view s_remoteResponsesShmName{"responses"};
 
 private:
+    void setupLogDir(pugi::xml_node simuNode, const fs::path& logPath);
+    void publishStateJson();
+    void publishStateMessagePack();
+
+    [[nodiscard]] rapidjson::Document makeStateJson() const;
+    [[nodiscard]] rapidjson::Document makeCollectiveBookStateJson() const;
+
     SimulationBlockInfo m_blockInfo;
     boost::asio::io_context m_io;
     std::unique_ptr<boost::asio::thread_pool> m_threadPool;
@@ -81,21 +87,20 @@ private:
     UnsyncSignal<void()> m_stepSignal;
     std::unique_ptr<ipc::PosixMessageQueue> m_validatorReqMessageQueue;
     std::unique_ptr<ipc::PosixMessageQueue> m_validatorResMessageQueue;
-    bool m_disallowPublish{};
     bool m_useMessagePack{};
+    bool m_replayMode{};
     std::unique_ptr<replay::ReplayManager> m_replayManager;
+    std::unique_ptr<checkpoint::CheckpointManager> m_checkpointManager;
     bool m_measureStepWallClockTime{};
     struct {
         using Measurement = decltype(std::chrono::high_resolution_clock::now());
-        std::optional<Measurement> t0parse;
-        std::optional<Measurement> t1parse;
-        std::optional<Measurement> t0proc;
-        std::optional<Measurement> t1proc;
-        std::optional<Measurement> t0state;
-        std::optional<Measurement> t1state;
+        std::optional<Measurement>
+            t0parse, t1parse,
+            t0proc, t1proc,
+            t0state, t1state,
+            t0ckptSave, t1ckptSave,
+            t0ckptLoad, t1ckptLoad;
     } m_measurements;
-
-    void setupLogDir(pugi::xml_node node);
 
     net::awaitable<void> asyncSendOverNetwork(
         const rapidjson::Value& reqBody, const std::string& endpoint, rapidjson::Document& resJson);

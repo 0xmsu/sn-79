@@ -1,6 +1,6 @@
 find_package(GTest CONFIG REQUIRED)
 
-set(test_sources "")
+set(TEST_SOURCES "" CACHE INTERNAL "List of all collected test compilation units")
 
 include(CollectTestSources)
 
@@ -8,17 +8,16 @@ add_subdirectory(test-common)
 add_subdirectory(accounting)
 add_subdirectory(decimal)
 add_subdirectory(message)
+add_subdirectory(serialization)
+add_subdirectory(util)
 
 add_executable(taosim-tests
-    ${test_sources}
-    SubscriptionRegistryTests.cpp
+    ${TEST_SOURCES}
     UtilTests.cpp
     SelfTradePreventionTests.cpp
     QuoteBasedOrderTests.cpp
     LoanSettlementTests.cpp
 )
-
-target_compile_definitions(taosim-tests PRIVATE "${internal_compile_definitions}")
 
 target_include_directories(taosim-tests
     PRIVATE
@@ -29,11 +28,8 @@ target_include_directories(taosim-tests
 
 target_link_libraries(taosim-tests
     PRIVATE
-        GTest::gtest
-        GTest::gtest_main
-        GTest::gmock
         GTest::gmock_main
-        taosim::test::common
+        taosim_tests::common
         taosim::simulator
 )
 

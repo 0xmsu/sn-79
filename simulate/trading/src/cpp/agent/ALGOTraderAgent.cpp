@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "ALGOTraderAgent.hpp"
+#include <taosim/agent/ALGOTraderAgent.hpp>
 
 #include "DistributionFactory.hpp"
 #include "RayleighDistribution.hpp"
@@ -11,7 +11,8 @@
 #include <boost/accumulators/accumulators.hpp>
 #include <boost/accumulators/statistics/stats.hpp>
 #include <boost/accumulators/statistics/variance.hpp>
-#include <boost/math/statistics/linear_regression.hpp>  
+#include <boost/math/statistics/linear_regression.hpp>
+
 //-------------------------------------------------------------------------
 
 namespace taosim::agent
@@ -19,15 +20,14 @@ namespace taosim::agent
 
 //-------------------------------------------------------------------------
 
-ALGOTraderVolumeStats::ALGOTraderVolumeStats(Timestamp period, 
-    double alpha, double beta, double omega, double gamma, double initPrice, size_t depth)
-    : m_period{period},
-        m_alpha{alpha},
-        m_beta{beta},
-        m_omega{omega},
-        m_gamma{gamma},
-        m_initPrice{initPrice},
-        m_depth{depth}
+ALGOTraderVolumeStats::ALGOTraderVolumeStats(const ALGOTraderVolumeStatsDesc& desc)
+    : m_period{desc.period},
+      m_alpha{desc.alpha},
+      m_beta{desc.beta},
+      m_omega{desc.omega},
+      m_gamma{desc.gamma},
+      m_initPrice{desc.initPrice},
+      m_depth{desc.depth}
 {
     if (m_period == 0) {
         throw std::invalid_argument{fmt::format(
@@ -51,9 +51,11 @@ ALGOTraderVolumeStats::ALGOTraderVolumeStats(Timestamp period,
     }
     m_priceLast = 0.0;
 }
+
 //-------------------------------------------------------------------------
 
-void ALGOTraderVolumeStats::push_levels(Timestamp timestamp, std::vector<BookLevel>& bids, std::vector<BookLevel>& asks)
+void ALGOTraderVolumeStats::pushLevels(
+    Timestamp timestamp, std::span<const BookLevel> bids, std::span<const BookLevel> asks)
 {
     BookStat volumes = {.bid=volumeSum(bids, 5), .ask=volumeSum(asks, 5)};
     double bidSlope = (volumeSum(bids, m_depth) - taosim::util::decimal2double(bids.front().quantity))/(m_depth - 1); // absolute value
@@ -79,28 +81,48 @@ void ALGOTraderVolumeStats::push_levels(Timestamp timestamp, std::vector<BookLev
     }
 }
 
-double ALGOTraderVolumeStats::volumeSum(std::vector<BookLevel>& side, size_t depth) {
-    auto volumes = side | views::take(depth) | views::transform([] (const auto& level) { return taosim::util::decimal2double(level.quantity);});;
-    return std::accumulate(volumes.begin(),volumes.end(),0);
+//-------------------------------------------------------------------------
+
+double ALGOTraderVolumeStats::estimatedVolatility() const noexcept
+{
+    return std::pow(m_estimatedVol, 0.5) * std::pow((double)86'400'000'000'000 / m_period, 0.5);
 }
 
-double ALGOTraderVolumeStats::slopeOLS(std::vector<BookLevel>& side) {
+//-------------------------------------------------------------------------
+
+double ALGOTraderVolumeStats::volumeSum(std::span<const BookLevel> side, size_t depth)
+{
+    auto volumesView = side | views::take(depth) | views::transform(&BookLevel::quantity);
+    return taosim::util::decimal2double(ranges::accumulate(volumesView, decimal_t{}));
+}
+
+//-------------------------------------------------------------------------
+
+double ALGOTraderVolumeStats::slopeOLS(std::span<const BookLevel> side)
+{
     using boost::math::statistics::simple_ordinary_least_squares;
 
-    std::vector<double> x = side | views::transform([](const auto& level) { return taosim::util::decimal2double(level.price); }) | ranges::to<std::vector>();;
-    std::vector<double> y(side.size());
-    ranges::partial_sum(side
-    | views::transform([](const auto& level) { return taosim::util::decimal2double(level.price); }), y);
-    auto [c0, c1] = simple_ordinary_least_squares(x, y);
+    auto sidePriceAsDoubleView = side
+        | views::transform(&BookLevel::price)
+        | views::transform(&taosim::util::decimal2double);
+
+    const auto x = sidePriceAsDoubleView | ranges::to<std::vector>;
+    const auto y = sidePriceAsDoubleView | views::partial_sum | ranges::to<std::vector>;
+
+    [[maybe_unused]] const auto [c0, c1] = simple_ordinary_least_squares(x, y);
+
     return c1;
 }
-
 
 //-------------------------------------------------------------------------
 
 void ALGOTraderVolumeStats::push(const Trade& trade)
 {
-    push({.timestamp = trade.timestamp(), .volume = trade.volume(), .price = trade.price()});
+    push({
+        .timestamp = trade.timestamp(),
+        .volume = trade.volume(),
+        .price = trade.price()
+    });
 }
 
 //-------------------------------------------------------------------------
@@ -111,7 +133,7 @@ void ALGOTraderVolumeStats::push(TimestampedVolume timestampedVolume)
         m_queue.push(timestampedVolume);
         m_rollingSum += timestampedVolume.volume;
 
-        std::priority_queue<TimestampedVolume, std::vector<TimestampedVolume>, std::greater<TimestampedVolume>> temp = m_queue;
+        auto temp = m_queue;
         std::vector<double> windowLogRets;
         if (!temp.empty()) {
             TimestampedVolume prev = temp.top(); temp.pop();
@@ -120,7 +142,7 @@ void ALGOTraderVolumeStats::push(TimestampedVolume timestampedVolume)
                 if (cur.timestamp == prev.timestamp) {
                     decimal_t totalVol = cur.volume + prev.volume;
                     cur.price = (cur.price * cur.volume + prev.price * prev.volume)/ totalVol; 
-                } else if (prev.price != decimal_t{0.0}) {  // avoid division by zero, just in case
+                } else if (prev.price != decimal_t{}) {  // avoid division by zero, just in case
                     double logret = std::log(util::decimal2double(cur.price) / util::decimal2double(prev.price));
                     windowLogRets.push_back(logret);
                 } else {
@@ -175,24 +197,28 @@ void ALGOTraderVolumeStats::push(TimestampedVolume timestampedVolume)
 
 //-------------------------------------------------------------------------
 
-ALGOTraderVolumeStats ALGOTraderVolumeStats::fromXML(pugi::xml_node node, double initPrice, size_t depth)
+ALGOTraderVolumeStats ALGOTraderVolumeStats::fromXML(
+    pugi::xml_node node, double initPrice, size_t depth)
 {
-    const auto period = node.attribute("volumeStatsPeriod").as_ullong();
-    if (period == 0) {
-        throw std::invalid_argument{fmt::format(
-            "{}: attribute 'volumeStatsPeriod' should be > 0, was {}",
-            std::source_location::current().file_name(), period)};
-    }
-    pugi::xml_attribute attr;
-    attr = node.attribute("alpha");
-    const double alpha = attr.as_double();
-    attr = node.attribute("beta");
-    const double beta = attr.as_double();
-    attr = node.attribute("omega");
-    const double omega = attr.as_double();
-    attr = node.attribute("gammaX");
-    const double gamma = attr.as_double();
-    return ALGOTraderVolumeStats{period, alpha, beta, omega, gamma, initPrice, depth};
+    return ALGOTraderVolumeStats({
+        .period = [&] {
+            static constexpr const char* attrName = "volumeStatsPeriod";
+            const auto period = node.attribute(attrName).as_ullong();
+            if (period == 0) {
+                throw std::invalid_argument{fmt::format(
+                    "{}: attribute '{}' should be > 0, was {}",
+                    std::source_location::current().function_name(), attrName, period
+                )};
+            }
+            return period;
+        }(),
+        .alpha = node.attribute("alpha").as_double(),
+        .beta = node.attribute("beta").as_double(),
+        .omega = node.attribute("omega").as_double(),
+        .gamma = node.attribute("gammaX").as_double(),
+        .initPrice = initPrice,
+        .depth = depth
+    });
 }
 
 //-------------------------------------------------------------------------
@@ -234,8 +260,6 @@ void ALGOTraderAgent::configure(const pugi::xml_node& node)
         return val;
     };
 
-
-
     m_volumeDistribution =
         stats::DistributionFactory::createFromXML(node.child("VolumeDistribution"));
 
@@ -253,7 +277,7 @@ void ALGOTraderAgent::configure(const pugi::xml_node& node)
         for (BookId bookId = 0; bookId < m_bookCount; ++bookId) {
             state.push_back(ALGOTraderState{
                 .status = ALGOTraderStatus::ASLEEP,
-                .volumeStats = ALGOTraderVolumeStats::fromXML(node, initPrice,m_depth),
+                .volumeStats = ALGOTraderVolumeStats::fromXML(node, initPrice, m_depth),
                 .volumeToBeExecuted = 0_dec,
                 .direction = OrderDirection::BUY,
                 .statusChangeTime = 0,
@@ -277,8 +301,6 @@ void ALGOTraderAgent::configure(const pugi::xml_node& node)
             return attr.empty() ? 1'000'000'000.0 : attr.as_double(); 
         }()
     };
-
-
 
     if (attr = node.attribute("minOPLatency"); attr.as_ullong() == 0) {
         throw std::invalid_argument(fmt::format(
@@ -397,7 +419,6 @@ void ALGOTraderAgent::handleSimulationStart(Message::Ptr msg)
     }
 }
 
-
 //-------------------------------------------------------------------------
 
 void ALGOTraderAgent::handleTrade(Message::Ptr msg)
@@ -408,13 +429,14 @@ void ALGOTraderAgent::handleTrade(Message::Ptr msg)
     m_state.at(payload->bookId).volumeStats.push(payload->trade);
 }
 
-
 //-------------------------------------------------------------------------
+
 void ALGOTraderAgent::handleBookResponse(Message::Ptr msg) 
 {
     const auto payload = std::dynamic_pointer_cast<RetrieveL2ResponsePayload>(msg->payload);
     BookId bookId = payload->bookId;
-    m_state.at(bookId).volumeStats.push_levels(static_cast<Timestamp>(payload->time / m_period), payload->bids,payload->asks);
+    m_state.at(bookId).volumeStats.pushLevels(
+        static_cast<Timestamp>(payload->time / m_period), payload->bids, payload->asks);
     auto& topLevel = m_topLevel.at(bookId);
     topLevel.bid = taosim::util::decimal2double(payload->bids.front().quantity);
     topLevel.ask = taosim::util::decimal2double(payload->asks.front().quantity);
@@ -440,6 +462,7 @@ void ALGOTraderAgent::handleBookResponse(Message::Ptr msg)
             execute(bookId,state);
          }
     }
+
     simulation()->dispatchMessage(
         simulation()->currentTimestamp(),
         m_period + marketFeedLatency(),
@@ -451,18 +474,20 @@ void ALGOTraderAgent::handleBookResponse(Message::Ptr msg)
 
 }
 
-void ALGOTraderAgent::handleL1Response(Message::Ptr msg) {
-        const auto payload = std::dynamic_pointer_cast<RetrieveL1ResponsePayload>(msg->payload);    
-        const BookId bookId = payload->bookId;
-        auto& topLevel = m_topLevel.at(bookId);
-        topLevel.bid = taosim::util::decimal2double(payload->bestBidVolume);
-        topLevel.ask = taosim::util::decimal2double(payload->bestAskVolume);
-        auto& state = m_state.at(bookId);
-        execute(bookId, state);
+//-------------------------------------------------------------------------
+
+void ALGOTraderAgent::handleL1Response(Message::Ptr msg)
+{
+    const auto payload = std::dynamic_pointer_cast<RetrieveL1ResponsePayload>(msg->payload);    
+    const BookId bookId = payload->bookId;
+    auto& topLevel = m_topLevel.at(bookId);
+    topLevel.bid = taosim::util::decimal2double(payload->bestBidVolume);
+    topLevel.ask = taosim::util::decimal2double(payload->bestAskVolume);
+    auto& state = m_state.at(bookId);
+    execute(bookId, state);
 }
 
-
-
+//-------------------------------------------------------------------------
 
 void ALGOTraderAgent::handleWakeup(Message::Ptr msg)
 {
@@ -505,11 +530,11 @@ void ALGOTraderAgent::handleWakeup(Message::Ptr msg)
 
 
     simulation()->dispatchMessage(
-            simulation()->currentTimestamp(),
-            decisionMakingDelay(),
-            name(),
-            name(),
-            "WAKEUP_ALGOTRADER");  
+        simulation()->currentTimestamp(),
+        decisionMakingDelay(),
+        name(),
+        name(),
+        "WAKEUP_ALGOTRADER");  
 }
 
 //-------------------------------------------------------------------------
@@ -554,6 +579,7 @@ void ALGOTraderAgent::handleMarketOrderPlacementErrorResponse(Message::Ptr msg)
     auto& state = m_state.at(bookId);
     execute(bookId,state);
 }
+
 //-------------------------------------------------------------------------
 
 void ALGOTraderAgent::execute(BookId bookId, ALGOTraderState& state)
@@ -569,9 +595,6 @@ void ALGOTraderAgent::execute(BookId bookId, ALGOTraderState& state)
     const decimal_t volumeToExecute = state.direction == OrderDirection::BUY ? 
     std::min(volume, (balances.quote.getFree()* decimal_t{0.99}) /m_lastPrice.at(bookId))
         : std::min(volume, (baseBalance.getFree() * (decimal_t{0.99}) ));
-    
-
-
 
     simulation()->logDebug(
         "{} ATTEMPTING TO EXECUTE {} OF {}, | at {}", name(), state.direction, volumeToExecute, simulation()->currentTimestamp());
@@ -585,8 +608,11 @@ void ALGOTraderAgent::execute(BookId bookId, ALGOTraderState& state)
         MessagePayload::create<PlaceOrderMarketPayload>(
             state.direction, volumeToExecute, bookId));
 }
+
 //-------------------------------------------------------------------------
-double ALGOTraderAgent::wakeupProb(ALGOTraderState& state, double fundDist){
+
+double ALGOTraderAgent::wakeupProb(ALGOTraderState& state, double fundDist)
+{
     double probVolatility = m_volatilityBounds.activationCapacity/
         (1 + std::exp(m_volatilityBounds.activationRate*(state.volumeStats.estimatedVolatility() -  m_volatilityBounds.activationMidpoint)));
     double slope = state.direction == OrderDirection::BUY ? state.volumeStats.askSlope() : state.volumeStats.bidSlope();
@@ -602,15 +628,22 @@ double ALGOTraderAgent::wakeupProb(ALGOTraderState& state, double fundDist){
 }
 
 //-------------------------------------------------------------------------
+
 decimal_t ALGOTraderAgent::drawNewVolume(uint32_t baseDecimals) {
         const double rayleighDraw = m_volumeDrawDistribution->sample(*m_rng);
         return  util::double2decimal(rayleighDraw,baseDecimals);
 }
+
 //-------------------------------------------------------------------------
 
-Timestamp ALGOTraderAgent::orderPlacementLatency() {
-    return static_cast<Timestamp>(std::lerp(m_opl.min, m_opl.max, m_orderPlacementLatencyDistribution->sample(*m_rng)));
+Timestamp ALGOTraderAgent::orderPlacementLatency()
+{
+    return static_cast<Timestamp>(
+        std::lerp(m_opl.min, m_opl.max, m_orderPlacementLatencyDistribution->sample(*m_rng)));
 }
+
+//-------------------------------------------------------------------------
+
 Timestamp ALGOTraderAgent::marketFeedLatency() {
     return static_cast<Timestamp>(std::min(std::abs(m_marketFeedLatencyDistribution(*m_rng)),
         m_marketFeedLatencyDistribution.mean() + 3.0 * m_marketFeedLatencyDistribution.stddev()));
@@ -621,18 +654,19 @@ Timestamp ALGOTraderAgent::decisionMakingDelay() {
             m_delay.mean() + 3.0 * m_delay.stddev()));
 }
 //-------------------------------------------------------------------------
+
 double ALGOTraderAgent::getProcessValue(BookId bookId, const std::string& name)
 {
     return simulation()->exchange()->process(name, bookId)->value();
 }
 
-
 //-------------------------------------------------------------------------
+
 uint64_t ALGOTraderAgent::getProcessCount(BookId bookId, const std::string& name)
 {
     return simulation()->exchange()->process(name, bookId)->count();
 }
-//-------------------------------------------------------------------------
+
 //-------------------------------------------------------------------------
 
 }  // namespace taosim::agent

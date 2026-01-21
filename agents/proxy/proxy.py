@@ -70,6 +70,28 @@ class Proxy(Validator):
         self.xml_config = ET.parse(self.simulator_config_file).getroot()
         self.simulation = MarketSimulationConfig.from_xml(self.xml_config)
 
+    def seed(self) -> None:
+        """
+        Generates simulator seed data with improved error handling and non-blocking restarts.
+
+        Returns:
+            None
+        """
+        from taos.im.validator.seed import seed_thread
+        
+        # Wrap seed in try-except to prevent thread crashes
+        while True:
+            try:
+                seed_thread(self)
+            except Exception as ex:
+                bt.logging.error(f"Seed process crashed: {ex}")
+                bt.logging.error(traceback.format_exc())
+                self.pagerduty_alert(
+                    f"Seed process crashed, restarting in 5s: {ex}",
+                    details={"trace": traceback.format_exc()}
+                )
+                time.sleep(5)
+
     def onStart(self, timestamp, event : SimulationStartEvent) -> None:
         """
         Triggered when start of simulation event is published by simulator.

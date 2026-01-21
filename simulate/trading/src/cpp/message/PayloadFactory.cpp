@@ -2,13 +2,14 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/message/PayloadFactory.hpp"
+#include <taosim/message/PayloadFactory.hpp>
 
-#include "taosim/accounting/Balance.hpp"
+#include <taosim/accounting/Balance.hpp>
 #include "Cancellation.hpp"
 #include "ClosePosition.hpp"
-#include "taosim/message/MultiBookMessagePayloads.hpp"
+#include <taosim/message/MultiBookMessagePayloads.hpp>
 #include "Order.hpp"
+#include <taosim/serialization/msgpack/utils.hpp>
 
 #include <fmt/core.h>
 
@@ -56,7 +57,7 @@ MessagePayload::Ptr PayloadFactory::createFromJsonMessage(const rapidjson::Value
     else if (type == "ERROR_RESPONSE_CANCEL_ORDERS") {
         return CancelOrdersErrorResponsePayload::fromJson(payloadJson);
     }
-    else if (type == "RETRIEVE_L1") {
+    else if (type == "RETRIEVE_L1" || type == "WAKEUP") {
         return RetrieveL1Payload::fromJson(payloadJson);
     }
     else if (type == "RESPONSE_RETRIEVE_L1") {
@@ -100,6 +101,23 @@ MessagePayload::Ptr PayloadFactory::createFromMessagePack(const msgpack::object&
     using namespace std::literals::string_view_literals;
 
     static constexpr auto ctx = std::source_location::current().function_name();
+
+    if (auto prefix = "DISTRIBUTED_"sv; type.starts_with(prefix)) {
+        try {
+            return MessagePayload::create<DistributedAgentResponsePayload>(
+                *taosim::serialization::msgpackFindMap<AgentId>(o, "agentId"),
+                createFromMessagePack(
+                    *taosim::serialization::msgpackFindMapObj(o, "payload"),
+                    type.substr(prefix.size())
+                )
+            );
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error{fmt::format(
+                "{}: Error creating payload of type '{}': {}", ctx, type, e.what()
+            )};
+        }
+    }
 
     auto makePayload = [&]<std::derived_from<MessagePayload> T> {
         try {
@@ -146,11 +164,17 @@ MessagePayload::Ptr PayloadFactory::createFromMessagePack(const msgpack::object&
     else if (type == "ERROR_RESPONSE_CANCEL_ORDERS") {
         return makePayload.operator()<CancelOrdersErrorResponsePayload>();
     }
-    else if (type == "RETRIEVE_L1") {
+    else if (type == "RETRIEVE_L1" || type == "WAKEUP") {
         return makePayload.operator()<RetrieveL1Payload>();
     }
     else if (type == "RESPONSE_RETRIEVE_L1") {
         return makePayload.operator()<RetrieveL1ResponsePayload>();
+    }
+    else if (type == "RETRIEVE_L2") {
+        return makePayload.operator()<RetrieveL2Payload>();
+    }
+    else if (type == "RESPONSE_RETRIEVE_L2") {
+        return makePayload.operator()<RetrieveL2ResponsePayload>();
     }
     else if (type == "RETRIEVE_BOOK") {
         return makePayload.operator()<RetrieveL2Payload>();
@@ -177,6 +201,9 @@ MessagePayload::Ptr PayloadFactory::createFromMessagePack(const msgpack::object&
         return makePayload.operator()<ResetAgentsErrorResponsePayload>();
     }
     else if (type == "EVENT_SIMULATION_START" || type == "EVENT_SIMULATION_END") {
+        return MessagePayload::create<EmptyPayload>();
+    }
+    else {
         return MessagePayload::create<EmptyPayload>();
     }
 

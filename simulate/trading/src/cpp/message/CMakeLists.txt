@@ -5,16 +5,14 @@ add_library(taosim::message ALIAS message)
 target_include_directories(message
     PUBLIC
         include
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${src_dir}/accounting"
-        "${src_dir}/base"
-        "${src_dir}/serialization"
-        "${src_dir}/util"
+        "${SRC_DIR}/base"
 )
 
 target_link_libraries(message
     PRIVATE
         taosim::accounting
         taosim::book
+        taosim::dsa
+        taosim::serialization
         taosim::util
 )

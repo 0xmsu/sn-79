@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "taosim/decimal/decimal.hpp"
+#include <taosim/decimal/decimal.hpp>
 
 #include <rapidjson/document.h>
 
@@ -22,8 +22,6 @@ namespace taosim::json
 //-------------------------------------------------------------------------
 
 inline constexpr uint32_t kMaxDecimalPlaces = 8;
-
-//-------------------------------------------------------------------------
 
 struct IndentOptions
 {
@@ -51,7 +49,19 @@ void dumpJson(
 
 [[nodiscard]] decimal_t getDecimal(const rapidjson::Value& json);
 
-[[nodiscard]] rapidjson::Value packedDecimal2json(const auto& val, auto& allocator)
+[[nodiscard]] rapidjson::Value packedDecimal2json(const auto& val, auto& allocator);
+
+void serializeHelper(
+    rapidjson::Document& json,
+    const std::string& key,
+    std::function<void(rapidjson::Document&)> serializer);
+
+template<typename T>
+void setOptionalMember(rapidjson::Document& json, const std::string& key, std::optional<T> opt);
+
+//-------------------------------------------------------------------------
+
+rapidjson::Value packedDecimal2json(const auto& val, auto& allocator)
 {
     auto toJson = [&](const auto& packed) {
         rapidjson::Value arrJson{rapidjson::kArrayType};
@@ -59,7 +69,7 @@ void dumpJson(
             [&] {
                 uint64_t left{};
                 std::memcpy(
-                    std::bit_cast<uint8_t*>(&left),
+                    reinterpret_cast<uint8_t*>(&left),
                     packed.data,
                     sizeof(uint64_t));
                 return left;
@@ -69,33 +79,35 @@ void dumpJson(
             [&] {
                 uint64_t right{};
                 std::memcpy(
-                    std::bit_cast<uint8_t*>(&right),
+                    reinterpret_cast<uint8_t*>(&right),
                     packed.data + sizeof(uint64_t),
                     sizeof(uint64_t));
                 return right;
             }(),
-        allocator);
+            allocator);
         return arrJson;
     };
+
     using T = std::remove_cvref_t<decltype(val)>;
+
     if constexpr (std::same_as<T, decimal_t>) {
         return toJson(util::packDecimal(val));
-    } else if constexpr (std::same_as<T, PackedDecimal>) {
+    }
+    else if constexpr (std::same_as<T, PackedDecimal>) {
         return toJson(val);
-    } else {
+    }
+    else {
         static_assert(false, "T should be either decimal_t or PackedDecimal");
     }
 }
 
-void serializeHelper(
-    rapidjson::Document& json,
-    const std::string& key,
-    std::function<void(rapidjson::Document&)> serializer);
+//-------------------------------------------------------------------------
 
 template<typename T>
 void setOptionalMember(rapidjson::Document& json, const std::string& key, std::optional<T> opt)
 {
     auto& allocator = json.GetAllocator();
+
     json.AddMember(
         rapidjson::Value{key.c_str(), allocator},
         [&] {
@@ -103,7 +115,7 @@ void setOptionalMember(rapidjson::Document& json, const std::string& key, std::o
                 return std::move(rapidjson::Value{}.SetNull());
             }
             if constexpr (std::constructible_from<rapidjson::Value, T>) {
-                return std::move(rapidjson::Value{opt.value()});
+                return rapidjson::Value{opt.value()};
             }
             else if constexpr (
                 std::constructible_from<rapidjson::Value, const char*, decltype(allocator)>

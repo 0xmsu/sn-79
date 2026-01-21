@@ -2,14 +2,13 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "NoiseTraderAgent.hpp"
+#include <taosim/agent/NoiseTraderAgent.hpp>
 
-
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/MessagePayload.hpp>
+#include <taosim/process/MagneticField.hpp>
 #include "DistributionFactory.hpp"
 #include "RayleighDistribution.hpp"
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/MessagePayload.hpp"
-#include "MagneticField.hpp"
 #include "Simulation.hpp"
 
 #include <boost/algorithm/string/regex.hpp>
@@ -24,14 +23,15 @@
 
 //-------------------------------------------------------------------------
 
-
 namespace taosim::agent
 {
+
 inline auto investmentPosition = [](double price, double forecast, double variance, double base, double quote) {
     return (std::log(forecast/price) + variance)/(variance*price);
 };    
 
 //-------------------------------------------------------------------------
+
 NoiseTraderAgent::NoiseTraderAgent(Simulation* simulation) noexcept
     : Agent{simulation}
 {}
@@ -157,8 +157,7 @@ void NoiseTraderAgent::configure(const pugi::xml_node& node)
     m_tau = (attr.empty() || attr.as_ullong() == 0) ? 120'000'000'000 : attr.as_ullong();
 
     
-    m_orderFlag = std::vector<bool>(m_bookCount, false);
-
+    m_state.orderFlag = std::vector<bool>(m_bookCount, false);
  
     size_t pos = name().find_last_not_of("0123456789");
     if (pos != std::string::npos && pos + 1 < name().size()) {
@@ -166,7 +165,7 @@ void NoiseTraderAgent::configure(const pugi::xml_node& node)
         m_catUId = static_cast<uint32_t>(std::stoul(numStr));
     }
 
-    m_logFlag = node.attribute("log").as_bool(false);
+    m_logFlag = node.attribute("log").as_bool();
 
 }
 
@@ -222,9 +221,9 @@ void NoiseTraderAgent::handleSimulationStart()
                 "WAKEUP",
                 MessagePayload::create<RetrieveL1Payload>(bookId));
 
-            const auto field = dynamic_cast<MagneticField*>(simulation()->exchange()->process("magneticfield",bookId));
+            const auto field = dynamic_cast<process::MagneticField*>(simulation()->exchange()->process("magneticfield",bookId));
             float initValue = std::exp((float) m_maxDelay/3.0f);
-            field->insertDurationComp(m_baseName, DurationComp{.delay=initValue, .psi=initValue});
+            field->insertDurationComp(m_baseName, process::DurationComp{.delay=initValue, .psi=initValue});
         }
     }
 }
@@ -243,7 +242,8 @@ void NoiseTraderAgent::handleTradeSubscriptionResponse()
 
 //------------------------------------------------------------------------
 
-uint64_t NoiseTraderAgent::selectTurn() {
+uint64_t NoiseTraderAgent::selectTurn()
+{
     const auto& agentBaseNamesToCounts = simulation()->localAgentManager()->roster()->baseNamesToCounts();
     return  std::uniform_int_distribution<uint64_t>{0, agentBaseNamesToCounts.at(m_baseName) - 1}(*m_rng);
 }
@@ -269,10 +269,8 @@ void NoiseTraderAgent::handleRetrieveL1Response(Message::Ptr msg)
 
     const BookId bookId = payload->bookId;
     
-
-    
     uint64_t chosenOne = selectTurn();
-    const auto field = dynamic_cast<MagneticField*>(simulation()->exchange()->process("magneticfield",bookId));
+    const auto field = dynamic_cast<process::MagneticField*>(simulation()->exchange()->process("magneticfield", bookId));
     double avgMagnetism = std::abs(field->avgMagnetism());
     const auto lastDurationComp = field->getDurationComp(m_baseName);
     float lastDelay = lastDurationComp.delay;
@@ -292,7 +290,7 @@ void NoiseTraderAgent::handleRetrieveL1Response(Message::Ptr msg)
         "WAKEUP",
         MessagePayload::create<RetrieveL1Payload>(bookId));
 
-    field->insertDurationComp(m_baseName, DurationComp{.delay=std::log(delay), .psi=psi_next});
+    field->insertDurationComp(m_baseName, process::DurationComp{.delay=std::log(delay), .psi=psi_next});
 
     double bestBid = taosim::util::decimal2double(payload->bestBidPrice);
     double bestAsk = taosim::util::decimal2double(payload->bestAskPrice);    
@@ -308,7 +306,7 @@ void NoiseTraderAgent::handleRetrieveL1Response(Message::Ptr msg)
 void NoiseTraderAgent::handleMarketOrderPlacementResponse(Message::Ptr msg)
 {
     const auto payload = std::dynamic_pointer_cast<PlaceOrderMarketResponsePayload>(msg->payload);
-    m_orderFlag.at(payload->requestPayload->bookId) = false;
+    m_state.orderFlag.at(payload->requestPayload->bookId) = false;
 }
 
 //-------------------------------------------------------------------------
@@ -320,7 +318,7 @@ void NoiseTraderAgent::handleMarketOrderPlacementErrorResponse(Message::Ptr msg)
 
     const BookId bookId = payload->requestPayload->bookId;
 
-    m_orderFlag.at(bookId) = false;
+    m_state.orderFlag.at(bookId) = false;
 }
 
 //-------------------------------------------------------------------------
@@ -338,7 +336,7 @@ void NoiseTraderAgent::handleLimitOrderPlacementResponse(Message::Ptr msg)
         MessagePayload::create<CancelOrdersPayload>(
             std::vector{taosim::event::Cancellation(payload->id)}, payload->requestPayload->bookId));
 
-    m_orderFlag.at(payload->requestPayload->bookId) = false;
+    m_state.orderFlag.at(payload->requestPayload->bookId) = false;
 }
 
 //-------------------------------------------------------------------------
@@ -350,7 +348,7 @@ void NoiseTraderAgent::handleLimitOrderPlacementErrorResponse(Message::Ptr msg)
 
     const BookId bookId = payload->requestPayload->bookId;
 
-    m_orderFlag.at(bookId) = false;
+    m_state.orderFlag.at(bookId) = false;
 }
 
 //-------------------------------------------------------------------------
@@ -366,18 +364,14 @@ void NoiseTraderAgent::handleCancelOrdersErrorResponse(Message::Ptr msg)
 //-------------------------------------------------------------------------
 
 void NoiseTraderAgent::handleTrade(Message::Ptr msg)
-{
-    const auto payload = std::dynamic_pointer_cast<EventTradePayload>(msg->payload);
-
-}
-
+{}
 
 //-------------------------------------------------------------------------
 
 void NoiseTraderAgent::placeOrder(BookId bookId)
 {
-    const auto field = dynamic_cast<MagneticField*>(simulation()->exchange()->process("magneticfield",bookId));
-    const int sign = field->sign_at(m_catUId);
+    const auto field = dynamic_cast<process::MagneticField*>(simulation()->exchange()->process("magneticfield", bookId));
+    const int sign = field->signAt(m_catUId);
     if (m_logFlag) field->logState(simulation()->currentTimestamp(), m_catUId);
     const float magnetism = field->avgMagnetism();
     const float avgMagnetism = std::abs(magnetism);
@@ -562,7 +556,7 @@ void NoiseTraderAgent::placeBid(BookId bookId, double volume, double price)
 {
     volume = std::floor(volume / m_volumeIncrement) * m_volumeIncrement;
     if (volume == 0) return;
-    m_orderFlag.at(bookId) = true;
+    m_state.orderFlag.at(bookId) = true;
 
     simulation()->dispatchMessage(
         simulation()->currentTimestamp(),
@@ -580,7 +574,7 @@ void NoiseTraderAgent::placeBid(BookId bookId, double volume, double price)
 
 void NoiseTraderAgent::placeBuy(BookId bookId, double volume)
 {
-    m_orderFlag.at(bookId) = true;
+    m_state.orderFlag.at(bookId) = true;
 
     simulation()->dispatchMessage(
         simulation()->currentTimestamp(),
@@ -600,7 +594,7 @@ void NoiseTraderAgent::placeAsk(BookId bookId, double volume, double price)
 {
     volume = std::floor(volume / m_volumeIncrement) * m_volumeIncrement;
     if (volume == 0) return;
-    m_orderFlag.at(bookId) = true;
+    m_state.orderFlag.at(bookId) = true;
     simulation()->dispatchMessage(
         simulation()->currentTimestamp(),
         orderPlacementLatency(),
@@ -618,7 +612,7 @@ void NoiseTraderAgent::placeAsk(BookId bookId, double volume, double price)
 
 void NoiseTraderAgent::placeSell(BookId bookId, double volume)
 {
-    m_orderFlag.at(bookId) = true;
+    m_state.orderFlag.at(bookId) = true;
     simulation()->dispatchMessage(
         simulation()->currentTimestamp(),
         orderPlacementLatency(),
@@ -633,29 +627,23 @@ void NoiseTraderAgent::placeSell(BookId bookId, double volume)
 
 //-------------------------------------------------------------------------
 
-Timestamp NoiseTraderAgent::orderPlacementLatency() {
-    return static_cast<Timestamp>(std::lerp(m_opl.min, m_opl.max, m_orderPlacementLatencyDistribution->sample(*m_rng)));
-}
-
-//-------------------------------------------------------------------------
-Timestamp NoiseTraderAgent::marketFeedLatency() {
-    return static_cast<Timestamp>(std::min(std::abs(m_marketFeedLatencyDistribution(*m_rng)),
-            +m_marketFeedLatencyDistribution.mean() + 3 * m_marketFeedLatencyDistribution.stddev()));
-}
-
-//-------------------------------------------------------------------------
-double NoiseTraderAgent::getProcessValue(BookId bookId, const std::string& name)
+Timestamp NoiseTraderAgent::orderPlacementLatency()
 {
-    return simulation()->exchange()->process(name, bookId)->value();
+    return static_cast<Timestamp>(
+        std::lerp(m_opl.min, m_opl.max, m_orderPlacementLatencyDistribution->sample(*m_rng)));
 }
 
 //-------------------------------------------------------------------------
-void NoiseTraderAgent::setProcessValue(BookId bookId, const std::string& name, int value)
+
+Timestamp NoiseTraderAgent::marketFeedLatency()
 {
-    const auto field = dynamic_cast<MagneticField*>(simulation()->exchange()->process(name,bookId));
-    field->setValAt(m_catUId, value);
+    return static_cast<Timestamp>(std::min(
+        std::abs(m_marketFeedLatencyDistribution(*m_rng)),
+        m_marketFeedLatencyDistribution.mean() + 3 * m_marketFeedLatencyDistribution.stddev()));
 }
 
 //-------------------------------------------------------------------------
-} // namespace taosim::agent
+
+}  // namespace taosim::agent
+
 //-------------------------------------------------------------------------

@@ -4,7 +4,7 @@
  */
 #include "Simulation.hpp"
 
-#include "taosim/simulation/SimulationException.hpp"
+#include <taosim/simulation/SimulationException.hpp>
 #include "util.hpp"
 
 #include <boost/algorithm/string/regex.hpp>
@@ -112,13 +112,6 @@ taosim::accounting::Account& Simulation::account(const LocalAgentId& id) const n
 
 //-------------------------------------------------------------------------
 
-std::span<const std::unique_ptr<Agent>> Simulation::agents() const noexcept
-{
-    return m_localAgentManager->agents();
-}
-
-//-------------------------------------------------------------------------
-
 Timestamp Simulation::currentTimestamp() const noexcept
 {
     return m_time.current;
@@ -177,11 +170,7 @@ void Simulation::configure(const pugi::xml_node& node)
     m_time.step = node.attribute("step").as_ullong(1);
     m_time.current = node.attribute("current").as_ullong(m_time.start);
 
-    if (attr = node.attribute("seed"); !attr.empty()) {
-        m_rng = std::mt19937{attr.as_ullong()};
-    } else {
-        m_rng = std::mt19937{std::random_device{}()};
-    }
+    m_rng = std::mt19937{std::random_device{}()};
 
     m_config = [node] -> std::string {
         std::ostringstream oss;
@@ -189,13 +178,9 @@ void Simulation::configure(const pugi::xml_node& node)
         return oss.str();
     }();
 
-    if (node.attribute("debug").as_bool()) {
-        m_debug = true;
-    }
+    m_debug = node.attribute("debug").as_bool();
 
-    if (node.attribute("error").as_bool()) {
-        m_error = true;
-    }
+    m_error = node.attribute("error").as_bool();
 
     m_logWindow = [&] -> Timestamp {
         static constexpr const char* attrName = "logWindow";
@@ -215,281 +200,6 @@ void Simulation::configure(const pugi::xml_node& node)
     // NOTE: Ordering important!
     configureLogging(node);
     configureAgents(node);
-}
-
-//-------------------------------------------------------------------------
-
-void Simulation::saveCheckpoint()
-{
-    fmt::println("Saving checkpoint...");
-    rapidjson::Document json{rapidjson::kObjectType};
-    auto& allocator = json.GetAllocator();
-
-    // Config file contents, with current id and time added.
-    logDebug("Serializing config...");
-    taosim::json::serializeHelper(
-        json,
-        "config",
-        [this](rapidjson::Document& json) {
-            const auto config = [this] -> std::string {
-                pugi::xml_document doc;
-                pugi::xml_parse_result result = doc.load_string(m_config.c_str());
-                pugi::xml_node node = doc.child("Simulation");
-                if (pugi::xml_attribute attr = node.attribute("id")) {
-                    attr.set_value(m_id.c_str());
-                } else {
-                    node.append_attribute("id") = m_id.c_str();
-                }
-                if (pugi::xml_attribute attr = node.attribute("current")) {
-                    attr.set_value(m_time.current);
-                } else {
-                    node.append_attribute("current") = m_time.current;
-                }
-                std::ostringstream oss;
-                doc.print(oss, "");
-                return oss.str();
-            }();
-            json.SetString(config.c_str(), config.size(), json.GetAllocator());
-        });
-
-    // Accounts, including standing orders.
-    logDebug("Serializing accounts...");
-    m_exchange->checkpointSerialize(json, "accounts");
-
-    // Active OrderContexts.
-    logDebug("Serializing OrderContexts...");
-    taosim::json::serializeHelper(
-        json,
-        "order2clientCtx",
-        [this](rapidjson::Document& json) {
-            json.SetArray();
-            auto& allocator = json.GetAllocator();
-            for (const auto& book : m_exchange->books()) {
-                rapidjson::Document subJson{rapidjson::kObjectType, &allocator};
-                for (const auto& [orderId, clientCtx] : book->m_order2clientCtx) {
-                    clientCtx.checkpointSerialize(subJson, std::to_string(orderId));
-                }
-                json.PushBack(subJson, allocator);
-            }
-        }
-    );
-
-    // ID counters of order & trade factories.
-    logDebug("Serializing Order & Trade factories...");
-    taosim::json::serializeHelper(
-        json,
-        "orderIdCounters",
-        [this](rapidjson::Document& json) {
-            json.SetArray();
-            auto& allocator = json.GetAllocator();
-            for (const auto& book : m_exchange->books()) {
-                rapidjson::Document subJson{&allocator};
-                book->orderFactory().checkpointSerialize(subJson);
-                json.PushBack(subJson, allocator);
-            }
-        });
-    taosim::json::serializeHelper(
-        json,
-        "tradeIdCounters",
-        [this](rapidjson::Document& json) {
-            json.SetArray();
-            auto& allocator = json.GetAllocator();
-            for (const auto& book : m_exchange->books()) {
-                rapidjson::Document subJson{&allocator};
-                book->tradeFactory().checkpointSerialize(subJson);
-                json.PushBack(subJson, allocator);
-            }
-        });
-
-    // Subscriptions.
-    logDebug("Serializing Subscriptions...");
-    taosim::json::serializeHelper(
-        json,
-        "subscriptions",
-        [this](rapidjson::Document& json) {
-            json.SetObject();
-            m_exchange->m_localMarketOrderSubscribers.checkpointSerialize(json, "market");
-            logDebug("Serialized localMarketOrderSubscribers");
-            m_exchange->m_localLimitOrderSubscribers.checkpointSerialize(json, "limit");
-            logDebug("Serialized localLimitOrderSubscribers");
-            m_exchange->m_localTradeSubscribers.checkpointSerialize(json, "trade");
-            logDebug("Serialized localTradeSubscribers");
-            taosim::json::serializeHelper(
-                json,
-                "tradeByOrder",
-                [this](rapidjson::Document& json) {
-                    json.SetObject();
-                    for (const auto& [orderId, subs] : m_exchange->m_localTradeByOrderSubscribers) {
-                        subs.checkpointSerialize(json, std::to_string(orderId));
-                    }
-                });
-        });
-
-    // Misc.
-    logDebug("Serializing Misc...");
-    json.AddMember("retainRecord", rapidjson::Value{m_exchange->m_retainRecord}, allocator);
-    json.AddMember(
-        "checkpointWriteTime",
-        rapidjson::Value{
-            date::format(
-                "%Y%m%d_%H%M%S",
-                date::make_zoned(
-                    date::current_zone(),
-                    std::chrono::system_clock::now())).c_str(), allocator},
-        allocator);
-    json.AddMember("state", rapidjson::Value{std::to_underlying(m_state)}, allocator);
-    m_exchange->m_bookProcessManager->checkpointSerialize(json, "processManager");    
-
-    // Save to disk...
-    const fs::path ckptDir = m_logDir / "ckpt";
-    logDebug("Replacing checkpoint data at {}...", ckptDir.string());
-    fs::create_directories(ckptDir);
-
-    // ...and the log files up to this point.
-    logDebug("Storing log file sizes...");
-    taosim::json::serializeHelper(
-        json,
-        "logs",
-        [this](rapidjson::Document& json) -> void {
-            json.SetObject();
-            auto& allocator = json.GetAllocator();
-            for ([[maybe_unused]] const auto& [_, logger] : m_exchange->m_L2Loggers) {
-                // std::string lastLine = util::getLastLines(logger->filepath().string(), 1)[0];
-                std::ifstream source{logger->filepath().generic_string(), std::ios_base::binary};
-                source.seekg(0, std::ios_base::end);
-                const size_t size = static_cast<size_t>(source.tellg());
-                logDebug("Storing size {} for file {}...", size, logger->filepath().c_str());
-                json.AddMember(
-                    rapidjson::Value{logger->filepath().filename().c_str(), allocator},
-                    rapidjson::Value{size},
-                    allocator);
-            }
-            for ([[maybe_unused]] const auto& [_, logger] : m_exchange->m_L3EventLoggers) {
-                // std::string lastLine = util::getLastLines(logger->filepath().string(), 1)[0];
-                std::ifstream source{logger->filepath().generic_string(), std::ios_base::binary};
-                source.seekg(0, std::ios_base::end);
-                const size_t size = static_cast<size_t>(source.tellg());
-                logDebug("Storing size {} for file {}...", size, logger->filepath().c_str());
-                json.AddMember(
-                    rapidjson::Value{logger->filepath().filename().c_str(), allocator},
-                    rapidjson::Value{size},
-                    allocator);
-            }
-        }
-    );
-
-    const fs::path ckptPath = ckptDir / "ckpt.json";
-    const fs::path ckptTmpPath = ckptDir / "ckpt.tmp.json";
-    std::ofstream ckptTmpFile{ckptTmpPath};
-    if (!ckptTmpFile) {
-        throw std::runtime_error(fmt::format(
-            "{}: Error writing checkpoint to '{}'",
-            std::source_location::current().function_name(),
-            ckptTmpPath.c_str()));
-    }
-    logDebug("Writing new checkpoint data...");
-    taosim::json::dumpJson(json, ckptTmpFile);
-    logDebug("Cleaning up...");
-    fs::remove(ckptPath);
-    fs::rename(ckptTmpPath, ckptPath);
-
-    fmt::println("Checkpoint saved!");
-}
-
-//-------------------------------------------------------------------------
-
-std::unique_ptr<Simulation> Simulation::fromCheckpoint(const fs::path& path)
-{
-    fmt::println("Resuming simulation from checkpoint at {}", path.string());
-    rapidjson::Document json = taosim::json::loadJson(path);
-
-    auto simulation = std::make_unique<Simulation>();
-
-    pugi::xml_document doc;
-    pugi::xml_parse_result result = doc.load_string(json["config"].GetString());
-    pugi::xml_node node = doc.child("Simulation");
-
-    // Config.
-    fmt::println("Configuring simulation...");
-    simulation->configure(node);
-    
-    fmt::println("\nRestoring accounts...");
-    simulation->exchange()->accounts().registerJson(json["accounts"]);
-
-    // Books & Accounts.
-    fmt::println("Restoring books...");
-    int cnt = 0;
-    const BookId bookCount = simulation->exchange()->books().size();
-    for (const auto& member : json["accounts"].GetObject()) {
-        const rapidjson::Value& accountJson = member.value;
-        const AgentId agentId = accountJson["agentId"].GetInt();
-        for (BookId bookId = 0; bookId < bookCount; ++bookId) {
-            Book::Ptr book = simulation->exchange()->books()[bookId];
-            book->m_orderFactory.m_idCounter =
-                json["orderIdCounters"][bookId]["idCounter"].GetUint64();
-            book->m_tradeFactory.m_idCounter =
-                json["tradeIdCounters"][bookId]["idCounter"].GetUint64();
-            book->m_initMode = true;
-            const rapidjson::Value& bookOrdersJson = accountJson["orders"][bookId];
-            for (const rapidjson::Value& orderJson : bookOrdersJson.GetArray()) {
-                LimitOrder::Ptr order = LimitOrder::fromJson(
-                    orderJson, 
-                    simulation->exchange()->m_config.parameters().priceIncrementDecimals, 
-                    simulation->exchange()->m_config.parameters().volumeIncrementDecimals);
-                book->m_order2clientCtx[order->id()] =
-                    OrderClientContext::fromJson(
-                        json["order2clientCtx"][bookId][std::to_string(order->id()).c_str()]);
-                book->placeOrder(order);
-                simulation->exchange()->accounts()[agentId].activeOrders()[bookId].insert(order);
-                fmt::print("Restored Agent {} Book {} Order {}         \r", agentId, bookId, order->id());
-                cnt++;
-            }
-            book->m_initMode = false;
-        }
-    }
-
-    // Subscriptions.
-    fmt::println("Restoring Subscriptions: localMarketOrderSubscribers");
-    simulation->exchange()->m_localMarketOrderSubscribers =
-        SubscriptionRegistry<LocalAgentId>::fromJson(json["subscriptions"]["market"]);
-    fmt::println("Restoring Subscriptions: localLimitOrderSubscribers");
-    simulation->exchange()->m_localLimitOrderSubscribers =
-        SubscriptionRegistry<LocalAgentId>::fromJson(json["subscriptions"]["limit"]);
-    fmt::println("Restoring Subscriptions: localTradeSubscribers");
-    simulation->exchange()->m_localTradeSubscribers = 
-        SubscriptionRegistry<LocalAgentId>::fromJson(json["subscriptions"]["trade"]);
-    fmt::println("Restoring Subscriptions: localTradeByOrderSubscribers");
-    for (const auto& member : json["subscriptions"]["tradeByOrder"].GetObject()) {
-        const char* name = member.name.GetString();
-        const BookId bookId = std::stoi(name);
-        simulation->exchange()->m_localTradeByOrderSubscribers[bookId] =
-            SubscriptionRegistry<LocalAgentId>::fromJson(
-                json["subscriptions"]["tradeByOrder"][name]);
-    }
-
-    // Misc.
-    fmt::println("Restoring Misc..");
-    simulation->exchange()->retainRecord(json["retainRecord"].GetBool());
-    simulation->m_state = taosim::simulation::SimulationState{json["state"].GetUint()};
-    simulation->exchange()->m_bookProcessManager = BookProcessManager::fromCheckpoint(
-        json["processManager"],
-        simulation.get(),
-        const_cast<taosim::exchange::ExchangeConfig*>(&simulation->exchange()->config2()));
-
-    // Replace log files with those from the checkpoint.
-    fmt::println("Aligning Logs with Checkpoint..");
-    std::regex pattern{".*L[23].*\\.log$"};
-    for (const fs::directory_entry& entry : fs::directory_iterator(simulation->m_logDir)) {
-        const std::string filename = entry.path().filename().string();
-        if (fs::is_regular_file(entry) && std::regex_match(filename, pattern)) {
-            off_t size = json["logs"][filename.c_str()].GetInt();
-            auto logFile = (simulation->m_logDir / filename);
-            fs::resize_file(logFile, size);
-            fmt::println("Truncated file {} to size {}", logFile.string(), size);
-        }
-    }
-    fmt::println("Resumed from checkpoint!");
-    return simulation;
 }
 
 //-------------------------------------------------------------------------

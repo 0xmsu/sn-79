@@ -4,9 +4,9 @@
  */
 #pragma once
 
-#include "taosim/message/MultiBookMessagePayloads.hpp"
-#include "taosim/message/PayloadFactory.hpp"
-#include "taosim/serialization/msgpack_util.hpp"
+#include <taosim/message/MultiBookMessagePayloads.hpp>
+#include <taosim/message/PayloadFactory.hpp>
+#include <taosim/serialization/msgpack/common.hpp>
 
 //-------------------------------------------------------------------------
 

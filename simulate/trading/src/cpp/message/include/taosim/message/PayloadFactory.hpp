@@ -4,8 +4,8 @@
  */
 #pragma once
 
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/MessagePayload.hpp"
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/MessagePayload.hpp>
 
 #include <msgpack.hpp>
 

@@ -2,8 +2,8 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "taosim/book/OrderContainer.hpp"
-#include "taosim/book/TickContainer.hpp"
+#include <taosim/book/OrderContainer.hpp>
+#include <taosim/book/TickContainer.hpp>
 
 #include "util.hpp"
 
@@ -15,7 +15,7 @@ namespace taosim::book
 //-------------------------------------------------------------------------
 
 TickContainer::TickContainer(OrderContainer* orderContainer, taosim::decimal_t price) noexcept
-    : list{}, m_orderContainer{orderContainer}, m_price{price}
+    : TickContainer::BaseType{}, m_orderContainer{orderContainer}, m_price{price}
 {}
 
 //-------------------------------------------------------------------------
@@ -30,7 +30,7 @@ void TickContainer::updateVolume(taosim::decimal_t deltaVolume) noexcept
 
 void TickContainer::push_back(const TickContainer::value_type& order)
 {
-    ContainerType::push_back(order);
+    BaseType::push_back(order);
     m_volume += order->totalVolume();
     m_orderContainer->updateVolume(order->totalVolume());
 }
@@ -39,7 +39,7 @@ void TickContainer::push_back(const TickContainer::value_type& order)
 
 void TickContainer::pop_front()
 {
-    ContainerType::pop_front();
+    BaseType::pop_front();
 }
 
 //-------------------------------------------------------------------------
@@ -61,13 +61,6 @@ void TickContainer::jsonSerialize(rapidjson::Document& json, const std::string& 
         json.AddMember("volume", rapidjson::Value{taosim::util::decimal2double(m_volume)}, allocator);
     };
     taosim::json::serializeHelper(json, key, serialize);
-}
-
-//-------------------------------------------------------------------------
-
-void TickContainer::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-
 }
 
 //-------------------------------------------------------------------------

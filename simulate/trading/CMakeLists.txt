@@ -14,6 +14,7 @@ file(WRITE "${CMAKE_BINARY_DIR}/.gitignore" "*")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -29,7 +30,11 @@ if(ENABLE_ASAN)
     string(APPEND CMAKE_CXX_FLAGS " -fsanitize=address")
 endif()
 
-set(src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp" CACHE STRING "C++ source directory")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    #string(APPEND CMAKE_CXX_FLAGS " -Wall -Wextra -Wpedantic")
+endif()
+
+set(SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp" CACHE STRING "C++ source directory")
 
 #-------------------------------------------------------------------------
 
@@ -48,7 +53,7 @@ find_package(Python3 REQUIRED COMPONENTS Development)
 
 #-------------------------------------------------------------------------
 
-add_subdirectory("${src_dir}")
+add_subdirectory("${SRC_DIR}")
 
 if(BUILD_TESTS)
     enable_testing()

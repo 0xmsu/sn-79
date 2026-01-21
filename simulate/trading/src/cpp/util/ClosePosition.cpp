@@ -20,13 +20,6 @@ void ClosePosition::jsonSerialize(rapidjson::Document& json, const std::string& 
 
 //-------------------------------------------------------------------------
 
-void ClosePosition::checkpointSerialize(rapidjson::Document& json, const std::string& key) const
-{
-
-}
-
-//-------------------------------------------------------------------------
-
 ClosePosition::Ptr ClosePosition::fromJson(const rapidjson::Value& json)
 {
     return ClosePosition::Ptr{new ClosePosition(

@@ -4,9 +4,9 @@
  */
 #pragma once
 
+#include <taosim/decimal/decimal.hpp>
 #include "JsonSerializable.hpp"
 #include "Order.hpp"
-#include "taosim/decimal/decimal.hpp"
 
 #include <deque>
 #include <list>
@@ -24,16 +24,18 @@ class OrderContainer;
 
 class TickContainer
     : public std::list<LimitOrder::Ptr>,
-      public JsonSerializable,
-      public CheckpointSerializable
+      public JsonSerializable
 {
 public:
-    using ContainerType = std::list<value_type>;
+    using BaseType = std::list<value_type>;
+
+    using BaseType::BaseType;
 
     TickContainer(OrderContainer* orderContainer, taosim::decimal_t price) noexcept;
 
-    [[nodiscard]] taosim::decimal_t price() const noexcept { return m_price; }
-    [[nodiscard]] taosim::decimal_t volume() const noexcept { return m_volume; }
+    [[nodiscard]] auto&& orderContainer(this auto&& self) noexcept { return self.m_orderContainer; }
+    [[nodiscard]] auto&& price(this auto&& self) noexcept { return self.m_price; }
+    [[nodiscard]] auto&& volume(this auto&& self) noexcept { return self.m_volume; }
 
     void updateVolume(taosim::decimal_t deltaVolume) noexcept;
 
@@ -44,8 +46,6 @@ public:
     void pop_front();
 
     virtual void jsonSerialize(
-        rapidjson::Document& json, const std::string& key = {}) const override;
-    virtual void checkpointSerialize(
         rapidjson::Document& json, const std::string& key = {}) const override;
 
 private:

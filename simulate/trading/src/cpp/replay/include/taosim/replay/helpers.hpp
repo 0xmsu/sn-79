@@ -4,10 +4,10 @@
  */
 #pragma once
 
-#include "taosim/message/ExchangeAgentMessagePayloads.hpp"
-#include "taosim/message/Message.hpp"
-#include "taosim/message/MessagePayload.hpp"
-#include "taosim/message/MultiBookMessagePayloads.hpp"
+#include <taosim/message/ExchangeAgentMessagePayloads.hpp>
+#include <taosim/message/Message.hpp>
+#include <taosim/message/MessagePayload.hpp>
+#include <taosim/message/MultiBookMessagePayloads.hpp>
 
 #include <stdexcept>
 
@@ -17,8 +17,6 @@ namespace taosim::replay::helpers
 {
 
 [[nodiscard]] fs::path cleanReplayPath(const std::string& path);
-
-[[nodiscard]] std::vector<fs::path> collectMatchingPaths(const std::regex& pat, const fs::path& dir);
 
 [[nodiscard]] std::unordered_map<Timestamp, decimal_t>
     makeTimestampToMidPriceMapping(const fs::path& L2LogPath);

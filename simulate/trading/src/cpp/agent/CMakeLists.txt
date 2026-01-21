@@ -1,52 +1,34 @@
-add_library(agent STATIC
-    Agent.cpp
-    DelayDistribution.cpp
-    ALGOTraderAgent.cpp
-    DistributedProxyAgent.cpp
-    ExchangeAgentConfig.cpp
-    InitializationAgent.cpp
-    LocalAgentManager.cpp
-    LocalAgentRoster.cpp
-    MultiBookExchangeAgent.cpp
-    FuturesTraderAgent.cpp
-    OrderLogAgent.cpp
-    PythonAgent.cpp
-    StylizedTraderAgent.cpp
-    TradeLogAgent.cpp
-    HighFrequencyTraderAgent.cpp
-    NoiseTraderAgent.cpp
-    RandomTraderAgent.cpp
-)
+file(GLOB agent_sources CONFIGURE_DEPENDS "*.cpp")
+add_library(agent STATIC ${agent_sources})
 add_library(taosim::agent ALIAS agent)
 
 target_include_directories(agent
     PUBLIC
+        include
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${src_dir}"
-        "${src_dir}/accounting"
-        "${src_dir}/base"
-        "${src_dir}/book"
-        "${src_dir}/decimal"
-        "${src_dir}/exchange"
-        "${src_dir}/mp"
-        "${src_dir}/net"
-        "${src_dir}/process"
-        "${src_dir}/serialization"
-        "${src_dir}/stats"
-        "${src_dir}/util"
+        "${SRC_DIR}"
+        "${SRC_DIR}/base"
+        "${SRC_DIR}/book"
+        "${SRC_DIR}/decimal"
+        "${SRC_DIR}/exchange"
+        "${SRC_DIR}/mp"
+        "${SRC_DIR}/net"
+        "${SRC_DIR}/serialization"
 )
 
 target_link_libraries(agent
     PUBLIC
         pugixml::static pugixml::pugixml
-    PRIVATE
         taosim::accounting
+        taosim::dsa
         taosim::event
         taosim::exchange
         taosim::message
+        taosim::process
         taosim::replay
         taosim::simulation
         taosim::stats
+        taosim::util
         Eigen3::Eigen
         date::date
         pybind11::embed

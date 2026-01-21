@@ -2,12 +2,12 @@
  * SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
  * SPDX-License-Identifier: MIT
  */
-#include "ClearingManager.hpp"
+#include <taosim/exchange/ClearingManager.hpp>
 
 #include "MultiBookExchangeAgent.hpp"
 #include "Simulation.hpp"
-#include "taosim/accounting/margin_utils.hpp"
-#include "taosim/exchange/FeePolicy.hpp"
+#include <taosim/accounting/margin_utils.hpp>
+#include <taosim/exchange/FeePolicy.hpp>
 
 #include <bit>
 
@@ -20,12 +20,16 @@ namespace taosim::exchange
 
 ClearingManager::ClearingManager(
     MultiBookExchangeAgent* exchange,
+    size_t bookCount,
     std::unique_ptr<FeePolicyWrapper> feePolicy,
     OrderPlacementValidator::Parameters validatorParams) noexcept
     : m_exchange{exchange},
       m_feePolicy{std::move(feePolicy)},
       m_orderPlacementValidator{std::move(validatorParams), exchange}
-{}
+{
+    m_marginBuy.resize(bookCount);
+    m_marginSell.resize(bookCount);
+}
 
 //-------------------------------------------------------------------------
 
@@ -45,7 +49,6 @@ accounting::AccountRegistry& ClearingManager::accounts() noexcept
 
 OrderResult ClearingManager::handleOrder(const OrderDesc& orderDesc)
 {
-
     const auto [agentId, bookId, quantity, price, expectedValidationResult] =
         std::visit(
             [&](auto&& desc) {
@@ -95,9 +98,9 @@ OrderResult ClearingManager::handleOrder(const OrderDesc& orderDesc)
     const auto& validationResult = expectedValidationResult.value();
 
     auto& balances = accounts().at(agentId).at(bookId);
-    const OrderID orderId = m_exchange->books()[bookId]->orderFactory().getCounterState();
+    const OrderID orderId = m_exchange->books()[bookId]->orderIdCounter();
 
-    if (validationResult.instantTrade){
+    if (validationResult.instantTrade) {
         m_exchange->instructionLogCallback(orderDesc, orderId);
     }
 
@@ -121,6 +124,7 @@ OrderResult ClearingManager::handleOrder(const OrderDesc& orderDesc)
     auto reserved = balances.makeReservation(orderId, price > 0_dec ? price : curPrice,
         m_exchange->books()[bookId]->bestBid(), m_exchange->books()[bookId]->bestAsk(),
         validationResult.amount, validationResult.leverage, validationResult.direction, m_exchange->simulation()->bookIdCanon(bookId));
+
 
     // if (validationResult.leverage > 0_dec){
     //     throw std::runtime_error(fmt::format("Stopped to check the order with lev:{}", validationResult.leverage));
@@ -209,7 +213,7 @@ void ClearingManager::handleCancelOrder(const CancelOrderDesc& cancelDesc)
     const auto& [bookId, order, volumeToCancel] = cancelDesc;
 
     const OrderID orderId = order->id();
-    const AgentId agentId = m_exchange->books()[bookId]->orderClientContext(orderId).agentId;
+    const AgentId agentId = m_exchange->books()[bookId]->orderToClientInfo().at(orderId).agentId;
 
     accounting::Account& account = accounts()[agentId];
     accounting::Balances& balances = account[bookId];
@@ -421,7 +425,7 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
         if (aggressingOrder->leverage() > 0_dec){
             aggressingMarginCall = accounting::calculateMarginCallPrice(trade->price(), aggressingOrder->leverage(),
                 OrderDirection::BUY, m_exchange->getMaintenanceMargin());
-            m_marginBuy[bookId][aggressingMarginCall].push_back({
+            m_marginBuy.at(bookId)[aggressingMarginCall].push_back({
                 .orderId = aggressingOrderId, .agentId = aggressingAgentId
             });
         }
@@ -429,7 +433,7 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
         if (restingOrder->leverage() > 0_dec){
             restingMarginCall = accounting::calculateMarginCallPrice(trade->price(), restingOrder->leverage(),
                 OrderDirection::SELL, m_exchange->getMaintenanceMargin());
-            m_marginSell[bookId][restingMarginCall].push_back({
+            m_marginSell.at(bookId)[restingMarginCall].push_back({
                 .orderId = restingOrderId, .agentId = restingAgentId
             });
         }
@@ -544,7 +548,7 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
         if (aggressingOrder->leverage() > 0_dec){
             aggressingMarginCall = accounting::calculateMarginCallPrice(trade->price(), aggressingOrder->leverage(),
                 OrderDirection::SELL, m_exchange->getMaintenanceMargin());
-            m_marginSell[bookId][aggressingMarginCall].push_back({.orderId = aggressingOrderId, .agentId = aggressingAgentId});
+            m_marginSell.at(bookId)[aggressingMarginCall].push_back({.orderId = aggressingOrderId, .agentId = aggressingAgentId});
         }
         // margin call price for margin buying
         if (restingOrder->leverage() > 0_dec){
@@ -552,7 +556,7 @@ Fees ClearingManager::handleTrade(const TradeDesc& tradeDesc)
                 OrderDirection::BUY, m_exchange->getMaintenanceMargin());
             (restingOrder->leverage() * trade->price()) / ((1_dec + restingOrder->leverage()) * 
                 (1 - m_exchange->getMaintenanceMargin()));
-            m_marginBuy[bookId][restingMarginCall].push_back({.orderId = restingOrderId, .agentId = restingAgentId});
+            m_marginBuy.at(bookId)[restingMarginCall].push_back({.orderId = restingOrderId, .agentId = restingAgentId});
         }
 
         const auto aggressingVolume = util::round(trade->volume(), m_exchange->config().parameters().baseIncrementDecimals);
@@ -627,10 +631,7 @@ void ClearingManager::removeMarginOrders(
 {   
     auto& cont = direction == OrderDirection::BUY ? m_marginBuy : m_marginSell;
 
-    auto marginIt = cont.find(bookId);
-    if (marginIt == cont.end()) return;
-
-    auto& marginOrders = marginIt->second;
+    auto& marginOrders = cont.at(bookId);
 
     for (const auto& [orderId, amount] : ids) {
         auto ordersIt = marginOrders.find(amount);
@@ -641,10 +642,6 @@ void ClearingManager::removeMarginOrders(
         if (orders.empty()) {
             marginOrders.erase(ordersIt);
         }
-    }
-
-    if (marginOrders.empty()) {
-        cont.erase(marginIt);
     }
 }
 

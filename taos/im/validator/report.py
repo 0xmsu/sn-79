@@ -28,7 +28,7 @@ from prometheus_client import Counter, Gauge, Info
 class ReportingService:
     def __init__(self, config):
         self.config = config
-        self.wallet = bt.wallet(
+        self.wallet = bt.Wallet(
             path=self.config.wallet.path,
             name=self.config.wallet.name,
             hotkey=self.config.wallet.hotkey
@@ -1038,7 +1038,7 @@ if __name__ == '__main__':
     parser.add_argument('--prometheus.level', type=str, default='INFO')
     parser.add_argument('--cpu-cores', type=str, default=None)
     
-    config = bt.config(parser)
+    config = bt.Config(parser)
     bt.logging(config=config)
     
     if config.cpu_cores:

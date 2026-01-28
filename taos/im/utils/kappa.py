@@ -10,8 +10,48 @@ from loky import get_reusable_executor
 
 from taos.im.utils import normalize
 
+def _get_pnl_fingerprint(realized_pnl_values):
+    """
+    Generate a robust fingerprint of P&L data for cache validation.
+    
+    Uses multiple independent metrics to ensure uniqueness:
+    - Count of non-zero entries
+    - Sum of all P&L values
+    - Sum of squares (captures magnitude distribution)
+    - Min and max values (captures range)
+    
+    Args:
+        realized_pnl_values: Dict of {timestamp: {book_id: pnl}}
+        
+    Returns:
+        Tuple of (count, sum, sum_squares, min_val, max_val)
+    """
+    if not realized_pnl_values:
+        return (0, 0.0, 0.0, 0.0, 0.0)
+    
+    count = 0
+    total = 0.0
+    sum_squares = 0.0
+    min_val = float('inf')
+    max_val = float('-inf')
+    
+    for books in realized_pnl_values.values():
+        for pnl in books.values():
+            count += 1
+            total += pnl
+            sum_squares += pnl * pnl
+            min_val = min(min_val, pnl)
+            max_val = max(max_val, pnl)
+
+    if count == 0:
+        return (0, 0.0, 0.0, 0.0, 0.0)
+    
+    return (count, total, sum_squares, min_val, max_val)
+
+
 def kappa_3(uid, realized_pnl_values, tau, lookback, norm_min, norm_max, 
-           min_lookback, min_realized_observations, grace_period, deregistered_uids) -> dict:
+           min_lookback, min_realized_observations, grace_period, deregistered_uids, book_count,
+           cache=None) -> dict:
     """
     Calculates realized Kappa-3 ratio based on actual P&L from completed round-trip trades.
     
@@ -32,16 +72,28 @@ def kappa_3(uid, realized_pnl_values, tau, lookback, norm_min, norm_max,
         min_realized_observations: Minimum required non-zero trades for valid calculation
         grace_period: Time threshold for detecting simulation changeovers
         deregistered_uids: List of UIDs that are deregistered
+        book_count: Total number of books in simulation
+        cache: Optional dict for caching results {uid: (fingerprint, kappa_values)}
         
     Returns:
         Dict containing realized Kappa-3 metrics, or None on error
     """
     try:
-        num_values = len(realized_pnl_values)
-        if uid in deregistered_uids or num_values < min(min_lookback, lookback):
+        if cache is not None:
+            current_fingerprint = _get_pnl_fingerprint(realized_pnl_values)
+            if uid in cache:
+                cached_fingerprint, cached_kappa = cache[uid]
+                if cached_fingerprint == current_fingerprint:
+                    return cached_kappa
+
+        if uid in deregistered_uids or not realized_pnl_values:
             return None
-        timestamps = list(realized_pnl_values.keys())
-        book_ids = list(next(iter(realized_pnl_values.values())).keys())
+        timestamps = sorted(realized_pnl_values.keys())
+        if timestamps[-1] - timestamps[0] < min_lookback:
+            return None
+        
+        num_values = len(timestamps)
+        book_ids = list(range(book_count))
         num_books = len(book_ids)
         
         np_realized_pnl = np.zeros((num_books, num_values), dtype=np.float64)
@@ -182,6 +234,9 @@ def kappa_3(uid, realized_pnl_values, tau, lookback, norm_min, norm_max,
         kappa_values['normalized_total'] = (
             normalize(norm_min, norm_max, kappa_values['total'])
         )
+
+        if cache is not None:
+            cache[uid] = (_get_pnl_fingerprint(realized_pnl_values), kappa_values)
         
         return kappa_values
         
@@ -191,9 +246,12 @@ def kappa_3(uid, realized_pnl_values, tau, lookback, norm_min, norm_max,
 
 
 def kappa_3_batch(realized_pnl_values, tau, lookback, norm_min, norm_max,
-                  min_lookback, min_realized_observations, grace_period, deregistered_uids):
+                  min_lookback, min_realized_observations, grace_period, deregistered_uids, book_count,
+                  cache=None):
     """
     Process a batch of UIDs for Kappa-3 calculation with realized P&L only.
+    
+    Returns both results and cache updates for parent process.
     
     Args:
         realized_pnl_values: Dict of {uid: {timestamp: {book_id: pnl}}}
@@ -205,15 +263,24 @@ def kappa_3_batch(realized_pnl_values, tau, lookback, norm_min, norm_max,
         min_realized_observations: Minimum required non-zero trades for valid calculation
         grace_period: Time threshold for changeover detection
         deregistered_uids: List of deregistered UIDs
+        book_count: Total number of books in simulation
+        cache: Optional cache dict (passed from parent, read-only in worker)
         
     Returns:
-        Dict of {uid: kappa_values}
+        Tuple of (results_dict, cache_updates_dict)
     """
-    return {
-        uid: kappa_3(uid, realized_pnl_value, tau, lookback, norm_min, norm_max, 
-                    min_lookback, min_realized_observations, grace_period, deregistered_uids)
-        for uid, realized_pnl_value in realized_pnl_values.items()
-    }
+    results = {}
+    cache_updates = {}    
+    for uid, realized_pnl_value in realized_pnl_values.items():
+        kappa_values = kappa_3(
+            uid, realized_pnl_value, tau, lookback, norm_min, norm_max,
+            min_lookback, min_realized_observations, grace_period, 
+            deregistered_uids, book_count, cache=cache
+        )
+        results[uid] = kappa_values
+        fingerprint = _get_pnl_fingerprint(realized_pnl_value)
+        cache_updates[uid] = (fingerprint, kappa_values)        
+    return results, cache_updates
 
 def _init_worker_affinity(cores):
     """
@@ -230,12 +297,12 @@ def _init_worker_affinity(cores):
             pass
 
 def batch_kappa_3(realized_pnl_values, tau, batches, lookback, norm_min, norm_max,
-                  min_lookback, min_realized_observations, grace_period, deregistered_uids, cores=None):
+                  min_lookback, min_realized_observations, grace_period, deregistered_uids, 
+                  book_count, cache=None, cores=None):
     """
     Parallel processing of Kappa-3 calculations with realized P&L only.
     
-    Uses loky for process-based parallelism to avoid GIL limitations
-    during NumPy computations.
+    Returns results and cache updates to avoid Manager overhead.
     
     Args:
         realized_pnl_values: Dict of {uid: {timestamp: {book_id: pnl}}}
@@ -248,10 +315,12 @@ def batch_kappa_3(realized_pnl_values, tau, batches, lookback, norm_min, norm_ma
         min_realized_observations: Minimum required non-zero trades for valid calculation
         grace_period: Time threshold for changeover detection
         deregistered_uids: List of deregistered UIDs
+        book_count: Total number of books in simulation
+        cache: Optional dict for caching (read-only in workers)
         cores: Optional list of CPU cores for worker affinity
         
     Returns:
-        Dict of {uid: kappa_values} for all UIDs
+        Tuple of (results_dict, cache_updates_dict)
     """
     if cores is not None:
         initializer = partial(_init_worker_affinity, cores)
@@ -268,15 +337,19 @@ def batch_kappa_3(realized_pnl_values, tau, batches, lookback, norm_min, norm_ma
             kappa_3_batch,
             {uid: realized_pnl_values.get(uid, {}) for uid in batch},
             tau, lookback, norm_min, norm_max, min_lookback, min_realized_observations,
-            grace_period, deregistered_uids
+            grace_period, deregistered_uids, book_count,
+            cache=cache
         )
         for batch in batches
     ]
     
     result = {}
+    cache_updates = {}
+    
     for task in tasks:
-        batch_result = task.result()
+        batch_result, batch_cache_updates = task.result()
         for k, v in batch_result.items():
             result[int(k)] = v
+        cache_updates.update(batch_cache_updates)
     
-    return result
+    return result, cache_updates

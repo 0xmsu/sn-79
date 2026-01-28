@@ -438,7 +438,7 @@ if __name__ != "__mp_main__":
                         rebuild_simulator(self)
                     if simulator_config_changed:
                         bt.logging.warning("SIMULATOR CONFIG CHANGED")
-                    restart_simulator(self)
+                    restart_simulator(self, end)
                     if validator_py_files_changed:
                         update_validator(self)
                 return True
@@ -630,6 +630,7 @@ if __name__ != "__mp_main__":
             self.maintaining = False
             self.compressing = False
             self.querying = False
+            self._receiving_state = False
             self._rewarding = False
             self._pending_reward_tasks = 0
             self._saving = False
@@ -651,9 +652,10 @@ if __name__ != "__mp_main__":
                 'shorts': deque()
             }))
             self.inventory_history = {uid : {} for uid in range(self.subnet_info.max_uids)}
-            self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+            self.realized_pnl_history = defaultdict(lambda: defaultdict(dict))
             self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             self.roundtrip_volume_sums = defaultdict(lambda: defaultdict(float))
+            self.kappa_cache = {}
 
             self.load_simulation_config()
 
@@ -890,10 +892,7 @@ if __name__ != "__mp_main__":
             old_simulation_timestamp = self.simulation_timestamp  # End time of old simulation
             new_simulation_timestamp = timestamp  # Start time of new simulation (0)
 
-            lookback_period = (
-                self.config.scoring.kappa.lookback *
-                self.simulation.publish_interval
-            )
+            lookback_period = self.config.scoring.kappa.lookback
             volume_assessment_period = self.config.scoring.activity.trade_volume_assessment_period
 
             new_threshold = new_simulation_timestamp - lookback_period
@@ -986,20 +985,15 @@ if __name__ != "__mp_main__":
             for uid in range(self.subnet_info.max_uids):
                 if uid in self.inventory_history and self.inventory_history[uid]:
                     hist = self.inventory_history[uid]
-                    # Keep only last N observations before shifting
-                    if len(hist) > self.config.scoring.kappa.lookback:
-                        timestamps_to_keep = sorted(hist.keys())[-self.config.scoring.kappa.lookback:]
+                    if len(hist) > 3:
+                        timestamps_to_keep = sorted(hist.keys())[-3:]
                         hist = {ts: hist[ts] for ts in timestamps_to_keep}
 
                     shifted_inventory[uid] = {}
                     for prev_time, values in hist.items():
-                        # Shift ALL timestamps to be relative to new start (negative)
                         time_from_old_end = old_simulation_timestamp - prev_time
                         new_time = new_simulation_timestamp - time_from_old_end
-
-                        # Prune AFTER shifting, check against NEW threshold
-                        if new_time >= new_threshold:
-                            shifted_inventory[uid][new_time] = values
+                        shifted_inventory[uid][new_time] = values
 
             self.inventory_history = {
                 uid: shifted_inventory.get(uid, {})
@@ -1011,21 +1005,16 @@ if __name__ != "__mp_main__":
             for uid in range(self.subnet_info.max_uids):
                 if uid in self.realized_pnl_history and self.realized_pnl_history[uid]:
                     hist = self.realized_pnl_history[uid]
-                    if len(hist) > self.config.scoring.kappa.lookback:
-                        timestamps_to_keep = sorted(hist.keys())[-self.config.scoring.kappa.lookback:]
-                        hist = {ts: hist[ts] for ts in timestamps_to_keep}
-
                     shifted_pnl_history[uid] = {}
                     for prev_time, books in hist.items():
                         time_from_old_end = old_simulation_timestamp - prev_time
                         new_time = new_simulation_timestamp - time_from_old_end
-
                         if new_time >= new_threshold:
                             shifted_pnl_history[uid][new_time] = books
 
-            self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-            for uid, timestamps in shifted_pnl_history.items():
-                for ts, books in timestamps.items():
+            self.realized_pnl_history = defaultdict(lambda: defaultdict(dict))
+            for uid, timestamps_data in shifted_pnl_history.items():
+                for ts, books in timestamps_data.items():
                     for book_id, pnl in books.items():
                         self.realized_pnl_history[uid][ts][book_id] = pnl
 
@@ -1170,7 +1159,7 @@ if __name__ != "__mp_main__":
             """
             result = {}
             for uid in range(self.subnet_info.max_uids):
-                if uid in self.inventory_history:
+                if uid in self.inventory_history and self.inventory_history[uid]:
                     result[uid] = {}
                     for ts, books in self.inventory_history[uid].items():
                         result[uid][ts] = dict(books)
@@ -1483,11 +1472,10 @@ if __name__ != "__mp_main__":
             self.inventory_history = new_inv
 
             # Rebuild realized_pnl_history
-            new_pnl = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+            new_pnl = defaultdict(lambda: defaultdict(dict))
             for uid, timestamps in self.realized_pnl_history.items():
                 for ts, books in timestamps.items():
-                    for book_id, pnl in books.items():
-                        new_pnl[uid][ts][book_id] = pnl
+                    new_pnl[uid][ts] = dict(books)
             self.realized_pnl_history = new_pnl
 
             # Rebuild trade_volumes
@@ -1531,6 +1519,8 @@ if __name__ != "__mp_main__":
         async def _save_state(self) -> bool:
             """
             Saves simulation and validator state asynchronously via executor workers.
+            Uses atomic file writes (temp + rename) to prevent corruption.
+            Backups are organized by simulation ID and timestamp.
 
             Returns:
                 bool: True if state saved successfully, False otherwise.
@@ -1547,6 +1537,7 @@ if __name__ != "__mp_main__":
 
                 save_step = self.step
                 save_timestamp = self.simulation_timestamp
+                sim_id = self.simulation.simulation_id
 
                 # Defragment at the start of each simulation hour
                 simulation_hour = save_timestamp // 3600_000_000_000
@@ -1576,34 +1567,86 @@ if __name__ != "__mp_main__":
                     )
 
                     simulation_state_data, validator_state_data, prep_time = await self._construct_save_data_async()
+                    
+                async def wait_for_query_and_receive(process):
+                    """
+                    Wait for both query completion AND state reception before continuing.
+                    This prevents IO contention between mmap reads and msgpack serialization.
+                    """
+                    wait_start = time.time()
+                    waited = False
+                    while self.querying:
+                        if not waited:
+                            bt.logging.debug(f"Waiting for query to complete before {process}...")
+                            waited = True
+                        await asyncio.sleep(0.05)
+                    while self._receiving_state:
+                        if not waited:
+                            bt.logging.debug(f"Waiting for state reception to complete before {process}...")
+                            waited = True
+                        await asyncio.sleep(0.05)
+                    wait_time = time.time() - wait_start
+                    if wait_time > 0.01:
+                        bt.logging.info(f"Waited {wait_time:.4f}s for query/reception to complete before {process}")
+                    await asyncio.sleep(0)
 
                 async def async_save_worker():
-                    """Non-blocking async file I/O."""
+                    """Non-blocking async file I/O with atomic writes."""
                     io_start = time.time()
 
                     try:
+                        await wait_for_query_and_receive('serializing simulation state')
+                        sim_serialize_start = time.time()
                         loop = asyncio.get_event_loop()
                         sim_bytes = await loop.run_in_executor(
                             self.save_state_executor,
                             lambda: msgpack.packb(simulation_state_data, use_bin_type=True)
                         )
+                        sim_serialize_time = time.time() - sim_serialize_start
+                        await wait_for_query_and_receive('serializing validator state')
+                        val_serialize_start = time.time()
                         val_bytes = await loop.run_in_executor(
                             self.save_state_executor,
                             lambda: msgpack.packb(validator_state_data, use_bin_type=True)
                         )
+                        val_serialize_time = time.time() - val_serialize_start
 
                         sim_mb = len(sim_bytes) / 1024 / 1024
                         val_mb = len(val_bytes) / 1024 / 1024
-                        bt.logging.info(f"Serialized: sim={sim_mb:.2f}MB, val={val_mb:.2f}MB")
-
+                        bt.logging.info(
+                            f"Serialized: sim={sim_mb:.2f}MB, val={val_mb:.2f}MB "
+                            f"({sim_serialize_time + val_serialize_time:.4f}s)"
+                        )
+                        await wait_for_query_and_receive('writing simulation state file')
                         sim_start = time.time()
-                        async with aiofiles.open(self.simulation_state_file, 'wb') as f:
-                            await f.write(sim_bytes)
+                        sim_temp = f"{self.simulation_state_file}.tmp.{save_timestamp}"
+                        try:
+                            async with aiofiles.open(sim_temp, 'wb') as f:
+                                await f.write(sim_bytes)
+                            await aiofiles.os.replace(sim_temp, self.simulation_state_file)
+                        except Exception as ex:
+                            if os.path.exists(sim_temp):
+                                try:
+                                    await aiofiles.os.remove(sim_temp)
+                                except:
+                                    pass
+                            raise ex
                         sim_time = time.time() - sim_start
 
+                        await wait_for_query_and_receive('writing validator state file')
                         val_start = time.time()
-                        async with aiofiles.open(self.validator_state_file, 'wb') as f:
-                            await f.write(val_bytes)
+                        val_temp = f"{self.validator_state_file}.tmp.{save_timestamp}"
+                        try:
+                            async with aiofiles.open(val_temp, 'wb') as f:
+                                await f.write(val_bytes)
+                            await aiofiles.os.replace(val_temp, self.validator_state_file)
+                        except Exception as ex:
+                            if os.path.exists(val_temp):
+                                try:
+                                    await aiofiles.os.remove(val_temp)
+                                except:
+                                    pass
+                            raise ex
                         val_time = time.time() - val_start
 
                         return {
@@ -1630,10 +1673,11 @@ if __name__ != "__mp_main__":
                         f"total ({total_time:.4f}s, prep={prep_time:.4f}s, io={result['io_time']:.4f}s)"
                     )
 
+                    await wait_for_query_and_receive('creating state backups')
                     max_backups = 5
                     for state_file in [self.simulation_state_file, self.validator_state_file]:
                         if os.path.exists(state_file):
-                            backup = f"{state_file}.{save_timestamp}"
+                            backup = f"{state_file}.{sim_id}.{save_timestamp}"
                             try:
                                 async with aiofiles.open(state_file, 'rb') as src:
                                     content = await src.read()
@@ -1642,21 +1686,25 @@ if __name__ != "__mp_main__":
                                 bt.logging.debug(f"Created backup: {backup}")
                             except Exception as ex:
                                 bt.logging.warning(f"Failed to create backup {backup}: {ex}")
-
                             state_path = Path(state_file)
                             try:
-                                backups = sorted(
-                                    [f for f in state_path.parent.glob(f"{state_path.name}.*")
-                                    if f.suffix.lstrip('.').isdigit()],
-                                    key=lambda x: int(x.suffix.lstrip('.')),
-                                    reverse=True
-                                )
-                                for old_backup in backups[max_backups:]:
+                                all_backups = []
+                                for backup_file in state_path.parent.glob(f"{state_path.name}.*.*"):
+                                    try:
+                                        parts = backup_file.name.split('.')
+                                        if len(parts) >= 3:
+                                            sim_id = parts[-2]
+                                            timestamp = int(parts[-1])
+                                            all_backups.append((backup_file, sim_id, timestamp))
+                                    except:
+                                        continue
+                                all_backups.sort(key=lambda x: (x[1], x[2]), reverse=True)
+                                for old_backup, _, _ in all_backups[max_backups:]:
                                     try:
                                         await aiofiles.os.remove(old_backup)
-                                        bt.logging.debug(f"Removed old backup: {old_backup}")
+                                        bt.logging.debug(f"Removed old backup: {old_backup.name}")
                                     except Exception as ex:
-                                        bt.logging.warning(f"Failed to remove {old_backup}: {ex}")
+                                        bt.logging.warning(f"Failed to remove {old_backup.name}: {ex}")
                             except Exception as ex:
                                 bt.logging.warning(f"Failed to clean old backups: {ex}")
                 else:
@@ -1732,6 +1780,84 @@ if __name__ != "__mp_main__":
                     self.pagerduty_alert(f"Direct save failed: {result['error']}")
             except Exception as ex:
                 self.pagerduty_alert(f"Error in direct save: {ex}", details={"trace": traceback.format_exc()})
+                
+        def migrate_sampling_interval(self, old_interval: int, new_interval: int):
+            """
+            Re-align trade volumes from old sampling interval to new interval.
+            
+            Uses floor bucketing: trades are assigned to the start of their interval bucket.
+            
+            Args:
+                old_interval: Previous sampling interval (e.g., 600_000_000_000 for 10 min)
+                new_interval: New sampling interval (e.g., 3600_000_000_000 for 1 hour)
+            """
+            bt.logging.info(
+                f"Migrating sampling intervals: "
+                f"{old_interval}ns ({old_interval / 1e9:.0f}s) → "
+                f"{new_interval}ns ({new_interval / 1e9:.0f}s)"
+            )
+            
+            start_time = time.time()
+            volume_decimals = self.simulation.volumeDecimals
+            
+            migrated_trade_entries = 0
+            migrated_rt_entries = 0
+
+            bt.logging.info("Migrating trade_volumes...")
+            for uid in range(self.subnet_info.max_uids):
+                if uid not in self.trade_volumes:
+                    continue
+                for book_id in range(self.simulation.book_count):
+                    if book_id not in self.trade_volumes[uid]:
+                        continue
+                    for role in ['total', 'maker', 'taker', 'self']:
+                        old_volumes = self.trade_volumes[uid][book_id][role]
+                        if not old_volumes:
+                            continue
+                        new_volumes = {}
+                        for old_ts, volume in old_volumes.items():
+                            new_ts = (old_ts // new_interval) * new_interval
+                            if new_ts not in new_volumes:
+                                new_volumes[new_ts] = 0.0
+                            new_volumes[new_ts] += volume
+                            migrated_trade_entries += 1
+                        for ts in new_volumes:
+                            new_volumes[ts] = round(new_volumes[ts], volume_decimals)
+                        self.trade_volumes[uid][book_id][role] = new_volumes
+            bt.logging.info(f"Migrated {migrated_trade_entries} trade_volume entries")
+
+            bt.logging.info("Migrating roundtrip_volumes...")
+            new_roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+            for uid in range(self.subnet_info.max_uids):
+                if uid not in self.roundtrip_volumes:
+                    continue
+                for book_id in range(self.simulation.book_count):
+                    if book_id not in self.roundtrip_volumes[uid]:
+                        continue
+                    old_rt_volumes = self.roundtrip_volumes[uid][book_id]
+                    if not old_rt_volumes:
+                        continue
+                    new_rt_volumes = {}
+                    for old_ts, volume in old_rt_volumes.items():
+                        new_ts = (old_ts // new_interval) * new_interval
+                        if new_ts not in new_rt_volumes:
+                            new_rt_volumes[new_ts] = 0.0
+                        new_rt_volumes[new_ts] += volume
+                        migrated_rt_entries += 1
+                    for ts in new_rt_volumes:
+                        new_rt_volumes[ts] = round(new_rt_volumes[ts], volume_decimals)
+                    for ts, vol in new_rt_volumes.items():
+                        new_roundtrip_volumes[uid][book_id][ts] = vol
+
+            self.roundtrip_volumes = new_roundtrip_volumes
+            bt.logging.info(f"Migrated {migrated_rt_entries} roundtrip_volume entries")
+            
+            elapsed = time.time() - start_time
+            bt.logging.success(
+                f"Sampling interval migration complete ({elapsed:.4f}s): "
+                f"{migrated_trade_entries + migrated_rt_entries} total entries migrated"
+            )
+
         def load_state(self) -> None:
             """
             Loads validator and simulation state from msgpack or legacy PyTorch files.
@@ -1772,6 +1898,8 @@ if __name__ != "__mp_main__":
             def try_load_state_file(filepath, file_type="simulation"):
                 """
                 Attempt to load a state file, trying backups if the primary fails.
+                Backups are organized by simulation ID and timestamp.
+                Format: <filename>.<sim_id>.<timestamp>
 
                 Args:
                     filepath: Path to the primary state file
@@ -1793,32 +1921,73 @@ if __name__ != "__mp_main__":
                         bt.logging.error(f"Failed to load {file_type} state from {filepath}: {ex}")
                         bt.logging.warning(f"Attempting to load from backups...")
                 state_path = Path(filepath)
-                backups = sorted(
-                    [f for f in state_path.parent.glob(f"{state_path.name}.*")
-                    if f.suffix.lstrip('.').isdigit()],
-                    key=lambda x: int(x.suffix.lstrip('.')),
-                    reverse=True
-                )
-                if not backups:
+                all_backups = list(state_path.parent.glob(f"{state_path.name}.*.*"))
+                
+                if not all_backups:
                     bt.logging.warning(f"No backup files found for {filepath}")
                     return None
-                bt.logging.info(f"Found {len(backups)} backup files, trying most recent first...")
-                for backup_file in backups:
+
+                parsed_backups = []
+                for backup_file in all_backups:
                     try:
-                        bt.logging.info(f"Attempting to load from backup: {backup_file.name}")
+                        parts = backup_file.name.split('.')
+                        if len(parts) >= 3:
+                            sim_id = parts[-2]
+                            timestamp = parts[-1]
+                            if '_' in sim_id and timestamp.isdigit():
+                                parsed_backups.append({
+                                    'path': backup_file,
+                                    'sim_id': sim_id,
+                                    'timestamp': int(timestamp)
+                                })
+                    except Exception as ex:
+                        bt.logging.debug(f"Skipping malformed backup filename: {backup_file.name}")
+                        continue
+
+                if not parsed_backups:
+                    bt.logging.warning(f"No valid backup files found for {filepath}")
+                    return None
+
+                sorted_backups = sorted(
+                    parsed_backups,
+                    key=lambda x: (x['sim_id'], x['timestamp']),
+                    reverse=True
+                )
+                bt.logging.info(
+                    f"Found {len(sorted_backups)} valid backups across "
+                    f"{len(set(b['sim_id'] for b in sorted_backups))} simulation runs"
+                )
+                bt.logging.info("Trying backups (most recent simulation first)...")
+
+                for backup_info in sorted_backups:
+                    backup_file = backup_info['path']
+                    try:
+                        bt.logging.info(
+                            f"Attempting backup: {backup_file.name} "
+                            f"(sim_id={backup_info['sim_id']}, ts={backup_info['timestamp']})"
+                        )
                         with open(backup_file, 'rb') as file:
                             byte_data = file.read()
                         use_list = (file_type == "simulation")
                         state = msgpack.unpackb(byte_data, use_list=use_list, strict_map_key=False)
                         bt.logging.success(f"Successfully loaded from backup: {backup_file.name}")
+
+                        if os.path.exists(filepath):
+                            from datetime import datetime
+                            corrupted_backup = f"{filepath}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.corrupted"
+                            try:
+                                shutil.copy2(filepath, corrupted_backup)
+                                bt.logging.info(f"Saved corrupted primary file as: {corrupted_backup}")
+                            except Exception as ex:
+                                bt.logging.warning(f"Failed to backup corrupted file: {ex}")
                         bt.logging.info(f"Restoring {backup_file.name} as primary state file...")
                         shutil.copy2(backup_file, filepath)
                         bt.logging.success(f"Restored backup to {filepath}")
                         return state
                     except Exception as ex:
-                        bt.logging.warning(f"Backup {backup_file.name} also corrupted: {ex}")
+                        bt.logging.warning(f"Backup {backup_file.name} failed: {ex}")
                         continue
-                bt.logging.error(f"All backups failed for {file_type} state")
+                bt.logging.error(f"All {len(sorted_backups)} backups failed for {file_type} state")
                 return None
 
             if not self.config.neuron.reset:
@@ -1899,6 +2068,7 @@ if __name__ != "__mp_main__":
             if not self.config.neuron.reset:
                 validator_state = try_load_state_file(self.validator_state_file, "validator")
                 if validator_state:
+                    bt.logging.info(f"Populating validator data...")
                     self.step = validator_state["step"]
                     self.simulation_timestamp = validator_state.get("simulation_timestamp", 0)
                     self.hotkeys = validator_state["hotkeys"]
@@ -1918,6 +2088,7 @@ if __name__ != "__mp_main__":
                         uid: {} for uid in range(self.subnet_info.max_uids)
                     })
 
+                    bt.logging.info(f"Processing inventory history...")
                     for uid in self.inventory_history:
                         for timestamp in self.inventory_history[uid]:
                             if len(self.inventory_history[uid][timestamp]) < self.simulation.book_count:
@@ -1929,6 +2100,7 @@ if __name__ != "__mp_main__":
                                     if k < self.simulation.book_count
                                 }
 
+                    bt.logging.info(f"Processing kappa values...")
                     if 'kappa_values' in validator_state:
                         self.kappa_values = validator_state['kappa_values']
                         for uid in range(self.subnet_info.max_uids):
@@ -1972,14 +2144,14 @@ if __name__ != "__mp_main__":
                         self.kappa_values = {uid: None for uid in range(self.subnet_info.max_uids)}
                     self.unnormalized_scores = validator_state["unnormalized_scores"]
 
-
+                    bt.logging.info(f"Processing trade volumes...")
                     self.trade_volumes = validator_state.get("trade_volumes", {
                         uid: {bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
                             for bookId in range(self.simulation.book_count)}
                         for uid in range(self.subnet_info.max_uids)
                     })
 
-
+                    bt.logging.info(f"Processing trade volume histories...")
                     reorg = False
                     for uid in self.trade_volumes:
                         for bookId in self.trade_volumes[uid]:
@@ -2045,12 +2217,14 @@ if __name__ != "__mp_main__":
 
                         return result
 
+                    bt.logging.info(f"Processing volume sums...")
                     self.volume_sums = load_volume_sums(validator_state, "volume_sums", self.simulation.book_count)
                     self.maker_volume_sums = load_volume_sums(validator_state, "maker_volume_sums", self.simulation.book_count)
                     self.taker_volume_sums = load_volume_sums(validator_state, "taker_volume_sums", self.simulation.book_count)
                     self.self_volume_sums = load_volume_sums(validator_state, "self_volume_sums", self.simulation.book_count)
                     self.roundtrip_volume_sums = load_volume_sums(validator_state, "roundtrip_volume_sums", self.simulation.book_count)
 
+                    bt.logging.info(f"Processing roundtrip volumes...")
                     self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
                     if "roundtrip_volumes" in validator_state:
                         for uid, books in validator_state["roundtrip_volumes"].items():
@@ -2060,13 +2234,19 @@ if __name__ != "__mp_main__":
                                 for timestamp, volume in volumes.items():
                                     self.roundtrip_volumes[uid][book_id][timestamp] = volume
 
-                    self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+                    bt.logging.info(f"Processing realized PnL history...")
+                    self.realized_pnl_history = defaultdict(lambda: defaultdict(dict))
                     if "realized_pnl_history" in validator_state:
                         for uid, hist in validator_state["realized_pnl_history"].items():
                             for timestamp, books in hist.items():
-                                for book_id, pnl in books.items():
-                                    if book_id < self.simulation.book_count:
-                                        self.realized_pnl_history[uid][timestamp][book_id] = pnl
+                                ts_pnl = {
+                                    book_id: round(pnl, self.simulation.volumeDecimals)
+                                    for book_id, pnl in books.items()
+                                    if book_id < self.simulation.book_count and round(pnl, self.simulation.volumeDecimals) != 0.0
+                                }
+                                self.realized_pnl_history[uid][timestamp] = ts_pnl
+
+                    bt.logging.info(f"Processing open positions...")
                     self.open_positions = defaultdict(lambda: defaultdict(lambda: {
                         'longs': deque(),
                         'shorts': deque()
@@ -2095,6 +2275,71 @@ if __name__ != "__mp_main__":
                                 self.open_positions[uid][book_id]['shorts'] = deque(shorts)
                         if legacy_count > 0:
                             bt.logging.info(f"Converted {legacy_count} legacy positions to new format")
+
+                    current_sampling_interval = self.config.scoring.activity.trade_volume_sampling_interval
+                    detected_old_interval = None                    
+                    bt.logging.info(f"Checking for sampling interval changes (current config: {current_sampling_interval}ns)...")
+                    for uid in self.trade_volumes:
+                        if detected_old_interval is not None:
+                            break
+                        for book_id in self.trade_volumes[uid]:
+                            if detected_old_interval is not None:
+                                break
+                            for role in ['total', 'maker', 'taker', 'self']:
+                                timestamps = sorted(self.trade_volumes[uid][book_id][role].keys())
+                                if len(timestamps) >= 3:
+                                    detected_old_interval = timestamps[2] - timestamps[1]
+                                    bt.logging.info(
+                                        f"Detected old sampling interval from trade_volumes[{uid}][{book_id}][{role}]: "
+                                        f"{detected_old_interval}ns"
+                                    )
+                                    break
+                    if detected_old_interval is None:
+                        for uid in self.roundtrip_volumes:
+                            if detected_old_interval is not None:
+                                break
+                            for book_id in self.roundtrip_volumes[uid]:
+                                timestamps = sorted(self.roundtrip_volumes[uid][book_id].keys())
+                                if len(timestamps) >= 2:
+                                    detected_old_interval = timestamps[1] - timestamps[0]
+                                    bt.logging.info(
+                                        f"Detected old sampling interval from roundtrip_volumes[{uid}][{book_id}]: "
+                                        f"{detected_old_interval}ns"
+                                    )
+                                    break
+                    if detected_old_interval is not None and detected_old_interval != current_sampling_interval:
+                        bt.logging.warning(
+                            f"Sampling interval mismatch detected! "
+                            f"Old: {detected_old_interval}ns ({detected_old_interval / 1e9:.0f}s), "
+                            f"New: {current_sampling_interval}ns ({current_sampling_interval / 1e9:.0f}s)"
+                        )
+                        self.migrate_sampling_interval(detected_old_interval, current_sampling_interval)
+                    elif detected_old_interval is None:
+                        bt.logging.info("No existing volume data found, no migration needed")
+                    else:
+                        bt.logging.info(f"Sampling interval unchanged ({current_sampling_interval}ns), no migration needed")
+
+                    bt.logging.info("Downsampling inventory_history to minimal storage...")
+                    downsampled_count = 0
+                    for uid in self.inventory_history:
+                        hist = self.inventory_history[uid]
+                        if not hist:
+                            continue
+                        if len(hist) <= 3:
+                            continue
+                        timestamps = sorted(hist.keys())
+                        minimal_hist = {
+                            timestamps[0]: hist[timestamps[0]],
+                            timestamps[-2]: hist[timestamps[-2]],
+                            timestamps[-1]: hist[timestamps[-1]]
+                        }
+                        old_size = len(hist)
+                        self.inventory_history[uid] = minimal_hist
+                        downsampled_count += (old_size - 3)
+                    bt.logging.info(
+                        f"Downsampled inventory_history: removed {downsampled_count} entries "
+                    )
+
                     bt.logging.success(f"Loaded validator state")
                 else:
                     bt.logging.warning("All validator state files corrupted, initializing fresh state")
@@ -2140,7 +2385,7 @@ if __name__ != "__mp_main__":
                 self.self_volume_sums = defaultdict(lambda: defaultdict(float))
                 self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
                 self.roundtrip_volume_sums = defaultdict(lambda: defaultdict(float))
-                self.realized_pnl_history = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+                self.realized_pnl_history = defaultdict(lambda: defaultdict(dict))
                 self.open_positions = defaultdict(lambda: defaultdict(lambda: {
                     'longs': deque(),
                     'shorts': deque()
@@ -2365,7 +2610,7 @@ if __name__ != "__mp_main__":
             metagraph_data = {
                 'hotkeys': [str(hk) for hk in self.metagraph.hotkeys],
                 'stake': self.metagraph.stake.tolist(),
-                'trust': self.metagraph.trust.tolist(),
+                'trust': self.metagraph.trust.tolist() if hasattr(self.metagraph, 'trust') else [],
                 'consensus': self.metagraph.consensus.tolist(),
                 'incentive': self.metagraph.incentive.tolist(),
                 'emission': self.metagraph.emission.tolist(),
@@ -2754,9 +2999,7 @@ if __name__ != "__mp_main__":
             volume_decimals = self.simulation.volumeDecimals
             book_count = self.simulation.book_count
 
-            sampled_timestamp = math.ceil(
-                timestamp / self.config.scoring.activity.trade_volume_sampling_interval
-            ) * self.config.scoring.activity.trade_volume_sampling_interval
+            sampled_timestamp = (timestamp // self.config.scoring.activity.trade_volume_sampling_interval) * self.config.scoring.activity.trade_volume_sampling_interval
 
             if not hasattr(self, '_last_prune_timestamp'):
                 self._last_prune_timestamp = 0
@@ -2806,30 +3049,20 @@ if __name__ != "__mp_main__":
                                     pruned_volume = sum(v for t, v in trades.items() if t < volume_prune_threshold)
                                     if pruned_volume > 0:
                                         if role == 'total':
-                                            self.volume_sums[uid_item][book_id] = max(
-                                                0.0, self.volume_sums[uid_item][book_id] - pruned_volume
-                                            )
+                                            self.volume_sums[uid_item][book_id] = max(0.0, self.volume_sums[uid_item][book_id] - pruned_volume)
                                         elif role == 'maker':
-                                            self.maker_volume_sums[uid_item][book_id] = max(
-                                                0.0, self.maker_volume_sums[uid_item][book_id] - pruned_volume
-                                            )
+                                            self.maker_volume_sums[uid_item][book_id] = max(0.0, self.maker_volume_sums[uid_item][book_id] - pruned_volume)
                                         elif role == 'taker':
-                                            self.taker_volume_sums[uid_item][book_id] = max(
-                                                0.0, self.taker_volume_sums[uid_item][book_id] - pruned_volume
-                                            )
+                                            self.taker_volume_sums[uid_item][book_id] = max(0.0, self.taker_volume_sums[uid_item][book_id] - pruned_volume)
                                         elif role == 'self':
-                                            self.self_volume_sums[uid_item][book_id] = max(
-                                                0.0, self.self_volume_sums[uid_item][book_id] - pruned_volume
-                                            )
+                                            self.self_volume_sums[uid_item][book_id] = max(0.0, self.self_volume_sums[uid_item][book_id] - pruned_volume)
                                         uids_to_round.add(uid_item)
                                     trade_volumes_uid[book_id][role] = pruned
 
                     # Initialize sampled timestamp entries
                     for book_id in range(book_count):
                         if book_id not in trade_volumes_uid:
-                            trade_volumes_uid[book_id] = {
-                                'total': {}, 'maker': {}, 'taker': {}, 'self': {}
-                            }
+                            trade_volumes_uid[book_id] = {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
                         book_trade_volumes = trade_volumes_uid[book_id]
                         if sampled_timestamp not in book_trade_volumes['total']:
                             book_trade_volumes['total'][sampled_timestamp] = 0.0
@@ -2882,7 +3115,6 @@ if __name__ != "__mp_main__":
                                 quantity = trade['q']
                                 price = trade['p']
                                 side = trade['s']
-
                                 is_buy = (is_taker and side == 0) or (is_maker and side == 1)
                                 fee = trade['Mf'] if is_maker else trade['Tf']
 
@@ -2908,10 +3140,6 @@ if __name__ != "__mp_main__":
                                     if book_id not in roundtrip_volume_updates[uid_item][sampled_timestamp]:
                                         roundtrip_volume_updates[uid_item][sampled_timestamp][book_id] = 0.0
                                     roundtrip_volume_updates[uid_item][sampled_timestamp][book_id] += roundtrip_value
-                                    if timestamp not in self.realized_pnl_history[uid_item]:
-                                        self.realized_pnl_history[uid_item][timestamp] = {
-                                            book_id: 0.0 for book_id in range(book_count)
-                                        }
 
                             for book_id, deltas in volume_deltas[uid_item].items():
                                 self.volume_sums[uid_item][book_id] = self.volume_sums[uid_item].get(book_id, 0.0) + deltas['total']
@@ -2920,9 +3148,7 @@ if __name__ != "__mp_main__":
                                 self.self_volume_sums[uid_item][book_id] = self.self_volume_sums[uid_item].get(book_id, 0.0) + deltas['self']
                     # Initialize zero P&L for timestamps with no trades
                     if timestamp not in self.realized_pnl_history[uid_item]:
-                        self.realized_pnl_history[uid_item][timestamp] = {
-                            book_id: 0.0 for book_id in range(book_count)
-                        }
+                        self.realized_pnl_history[uid_item][timestamp] = {}
 
                     # Update inventory history
                     if uid_item in accounts:
@@ -2938,72 +3164,86 @@ if __name__ != "__mp_main__":
                             if initial_balance_book['WEALTH'] is None:
                                 initial_balance_book['WEALTH'] = get_inventory_value(account, books[bookId])
 
-                        self.inventory_history[uid_item][timestamp] = {
+                        current_inventory = {
                             book_id: get_inventory_value(accounts_uid[book_id], book) - initial_balances_uid[book_id]['WEALTH']
                             for book_id, book in books.items()
                         }
+                        if uid_item not in self.inventory_history:
+                            self.inventory_history[uid_item] = {}
+                        hist = self.inventory_history[uid_item]
+                        if not hist:
+                            hist[timestamp] = current_inventory
+                        else:
+                            timestamps = sorted(hist.keys())
+                            if len(timestamps) == 1:
+                                hist[timestamp] = current_inventory
+                            else:
+                                first_ts = timestamps[0]
+                                self.inventory_history[uid_item] = {
+                                    first_ts: hist[first_ts],
+                                    timestamps[-1]: hist[timestamps[-1]],
+                                    timestamp: current_inventory
+                                }
                     else:
                         self.inventory_history[uid_item][timestamp] = {book_id: 0.0 for book_id in books}
-
-                    if should_prune:
-                        inventory_hist = self.inventory_history[uid_item]
-                        lookback_limit = self.config.scoring.kappa.lookback
-
-                        if len(inventory_hist) > lookback_limit:
-                            timestamps_to_keep = heapq.nlargest(lookback_limit, inventory_hist.keys())
-                            self.inventory_history[uid_item] = {
-                                ts: inventory_hist[ts] for ts in timestamps_to_keep
-                            }
-
-                        pnl_hist = self.realized_pnl_history[uid_item]
-                        if len(pnl_hist) > lookback_limit:
-                            timestamps_to_keep = heapq.nlargest(lookback_limit, pnl_hist.keys())
-                            self.realized_pnl_history[uid_item] = {
-                                ts: pnl_hist[ts] for ts in timestamps_to_keep
-                            }
-
-                    if should_prune and uid_item in self.roundtrip_volumes:
-                        roundtrip_volumes_uid = self.roundtrip_volumes[uid_item]
-                        for book_id, rt_volumes in roundtrip_volumes_uid.items():
-                            if not rt_volumes:
-                                continue
-                            old_count = len(rt_volumes)
-                            pruned = {t: v for t, v in rt_volumes.items() if t >= volume_prune_threshold}
-                            if len(pruned) < old_count:
-                                pruned_rt_volume = sum(v for t, v in rt_volumes.items() if t < volume_prune_threshold)
-                                if pruned_rt_volume > 0:
-                                    current = self.roundtrip_volume_sums[uid_item][book_id]
-                                    self.roundtrip_volume_sums[uid_item][book_id] = max(0.0, current - pruned_rt_volume)
-                                    uids_to_round.add(uid_item)
-                                roundtrip_volumes_uid[book_id] = pruned
-
                 except Exception as ex:
                     self.pagerduty_alert(f"Failed to update trade data for UID {uid_item}: {ex}", details={"trace": traceback.format_exc()})
 
+            if should_prune:
+                lookback_time = self.config.scoring.kappa.lookback * self.simulation.publish_interval
+                lookback_threshold = timestamp - lookback_time
+                for uid_item in self.realized_pnl_history:
+                    pnl_hist = self.realized_pnl_history[uid_item]
+                    if not pnl_hist:
+                        continue
+                    self.realized_pnl_history[uid_item] = {
+                        ts: books 
+                        for ts, books in pnl_hist.items() 
+                        if ts >= lookback_threshold
+                    }
+                for uid_item in self.roundtrip_volumes:
+                    roundtrip_volumes_uid = self.roundtrip_volumes[uid_item]
+                    
+                    for book_id, rt_volumes in roundtrip_volumes_uid.items():
+                        if not rt_volumes:
+                            continue
+                        old_count = len(rt_volumes)
+                        pruned = {t: v for t, v in rt_volumes.items() if t >= volume_prune_threshold}
+                        if len(pruned) < old_count:
+                            pruned_rt_volume = sum(v for t, v in rt_volumes.items() if t < volume_prune_threshold)
+                            if pruned_rt_volume > 0:
+                                current = self.roundtrip_volume_sums[uid_item][book_id]
+                                self.roundtrip_volume_sums[uid_item][book_id] = max(0.0, current - pruned_rt_volume)
+                                uids_to_round.add(uid_item)
+                            roundtrip_volumes_uid[book_id] = pruned
+
             for uid_item, timestamps in realized_pnl_updates.items():
+                if uid_item not in self.realized_pnl_history:
+                    self.realized_pnl_history[uid_item] = {}
                 for ts, books in timestamps.items():
-                    if uid_item not in self.realized_pnl_history:
-                        self.realized_pnl_history[uid_item] = defaultdict(lambda: defaultdict(float))
                     if ts not in self.realized_pnl_history[uid_item]:
-                        self.realized_pnl_history[uid_item][ts] = defaultdict(float)
+                        self.realized_pnl_history[uid_item][ts] = {}
+                    ts_pnl = self.realized_pnl_history[uid_item][ts]
                     for book_id, pnl in books.items():
-                        if book_id not in self.realized_pnl_history[uid_item][ts]:
-                            self.realized_pnl_history[uid_item][ts][book_id] = 0.0
-                        self.realized_pnl_history[uid_item][ts][book_id] += pnl
+                        rounded_pnl = round(pnl, volume_decimals)
+                        if rounded_pnl == 0.0:
+                            continue
+                        current = ts_pnl.get(book_id, 0.0)
+                        new_value = round(current + rounded_pnl, volume_decimals)
+                        if new_value != 0.0:
+                            ts_pnl[book_id] = new_value
+                        elif book_id in ts_pnl:
+                            del ts_pnl[book_id]
             for uid_item, timestamps in roundtrip_volume_updates.items():
                 for ts, books in timestamps.items():
                     for book_id, rt_vol in books.items():
-                        _ = self.roundtrip_volumes[uid_item][book_id]
                         if uid_item not in self.roundtrip_volumes:
                             self.roundtrip_volumes[uid_item] = defaultdict(lambda: defaultdict(float))
                         if book_id not in self.roundtrip_volumes[uid_item]:
                             self.roundtrip_volumes[uid_item][book_id] = defaultdict(float)
-                        if ts not in self.roundtrip_volumes[uid_item][book_id]:
-                            self.roundtrip_volumes[uid_item][book_id][ts] = 0.0
                         self.roundtrip_volumes[uid_item][book_id][ts] += rt_vol
                         self.roundtrip_volume_sums[uid_item][book_id] = self.roundtrip_volume_sums[uid_item].get(book_id, 0.0) + rt_vol
                         uids_to_round.add(uid_item)
-
             for uid_item in uids_to_round:
                 changed_books = set(volume_deltas.get(uid_item, {}).keys())
 
@@ -3018,31 +3258,18 @@ if __name__ != "__mp_main__":
                         book_vols = self.trade_volumes[uid_item][book_id]
                         for role in ['total', 'maker', 'taker', 'self']:
                             if sampled_timestamp in book_vols[role]:
-                                book_vols[role][sampled_timestamp] = round(
-                                    book_vols[role][sampled_timestamp],
-                                    volume_decimals
-                                )
+                                book_vols[role][sampled_timestamp] = round(book_vols[role][sampled_timestamp], volume_decimals)
 
                     if book_id in self.volume_sums[uid_item]:
-                        self.volume_sums[uid_item][book_id] = round(
-                            self.volume_sums[uid_item][book_id], volume_decimals
-                        )
+                        self.volume_sums[uid_item][book_id] = round(self.volume_sums[uid_item][book_id], volume_decimals)
                     if book_id in self.maker_volume_sums[uid_item]:
-                        self.maker_volume_sums[uid_item][book_id] = round(
-                            self.maker_volume_sums[uid_item][book_id], volume_decimals
-                        )
+                        self.maker_volume_sums[uid_item][book_id] = round(self.maker_volume_sums[uid_item][book_id], volume_decimals)
                     if book_id in self.taker_volume_sums[uid_item]:
-                        self.taker_volume_sums[uid_item][book_id] = round(
-                            self.taker_volume_sums[uid_item][book_id], volume_decimals
-                        )
+                        self.taker_volume_sums[uid_item][book_id] = round(self.taker_volume_sums[uid_item][book_id], volume_decimals)
                     if book_id in self.self_volume_sums[uid_item]:
-                        self.self_volume_sums[uid_item][book_id] = round(
-                            self.self_volume_sums[uid_item][book_id], volume_decimals
-                        )
+                        self.self_volume_sums[uid_item][book_id] = round(self.self_volume_sums[uid_item][book_id], volume_decimals)
                     if book_id in self.roundtrip_volume_sums[uid_item]:
-                        self.roundtrip_volume_sums[uid_item][book_id] = round(
-                            self.roundtrip_volume_sums[uid_item][book_id], volume_decimals
-                        )
+                        self.roundtrip_volume_sums[uid_item][book_id] = round(self.roundtrip_volume_sums[uid_item][book_id], volume_decimals)
 
                     if uid_item in realized_pnl_updates:
                         for ts in realized_pnl_updates[uid_item]:
@@ -3251,42 +3478,46 @@ if __name__ != "__mp_main__":
             The method uses run‑in‑executor offloading for blocking IPC operations.
             """
             def receive(mq_req: posix_ipc.MessageQueue) -> tuple:
-                msg, priority = mq_req.receive()
-                receive_start = time.time()
-                bt.logging.info(f"Received state update from simulator (msgpack)")
-                byte_size_req = int.from_bytes(msg, byteorder="little")
-                shm_req = posix_ipc.SharedMemory("/state")
-                start = time.time()
-                packed_data = None
-                for attempt in range(1, 6):
-                    try:
-                        with mmap.mmap(shm_req.fd, byte_size_req, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
-                            packed_data = mm.read(byte_size_req)
-                        break
-                    except Exception as ex:
-                        if attempt < 5:
-                            bt.logging.error(f"mmap read failed (attempt {attempt}/5): {ex}")
-                            time.sleep(0.005)
-                        else:
-                            bt.logging.error(f"mmap read failed on all 5 attempts: {ex}")
-                            return None, receive_start
-                    finally:
-                        if packed_data is not None or attempt >= 5:
-                            shm_req.close_fd()
-                bt.logging.info(f"Retrieved State Update ({time.time() - receive_start}s)")
-                start = time.time()
-                for attempt in range(1, 6):
-                    try:
-                        result = msgpack.unpackb(packed_data, raw=False, use_list=True, strict_map_key=False)
-                        bt.logging.info(f"Unpacked state update ({time.time() - start:.4f}s)")
-                        break
-                    except Exception as ex:
-                        if attempt < 5:
-                            bt.logging.error(f"Msgpack unpack failed (attempt {attempt}/5): {ex}")
-                            time.sleep(0.005)
-                        else:
-                            bt.logging.error(f"Msgpack unpack failed on all 5 attempts: {ex}")
-                            return None, receive_start
+                self._receiving_state = True
+                try:
+                    msg, priority = mq_req.receive()
+                    receive_start = time.time()
+                    bt.logging.info(f"Received state update from simulator (msgpack)")
+                    byte_size_req = int.from_bytes(msg, byteorder="little")
+                    shm_req = posix_ipc.SharedMemory("/state")
+                    start = time.time()
+                    packed_data = None
+                    for attempt in range(1, 6):
+                        try:
+                            with mmap.mmap(shm_req.fd, byte_size_req, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
+                                packed_data = mm.read(byte_size_req)
+                            break
+                        except Exception as ex:
+                            if attempt < 5:
+                                bt.logging.error(f"mmap read failed (attempt {attempt}/5): {ex}")
+                                time.sleep(0.005)
+                            else:
+                                bt.logging.error(f"mmap read failed on all 5 attempts: {ex}")
+                                return None, receive_start
+                        finally:
+                            if packed_data is not None or attempt >= 5:
+                                shm_req.close_fd()
+                    bt.logging.info(f"Retrieved State Update ({time.time() - receive_start}s)")
+                    start = time.time()
+                    for attempt in range(1, 6):
+                        try:
+                            result = msgpack.unpackb(packed_data, raw=False, use_list=True, strict_map_key=False)
+                            bt.logging.info(f"Unpacked state update ({time.time() - start:.4f}s)")
+                            break
+                        except Exception as ex:
+                            if attempt < 5:
+                                bt.logging.error(f"Msgpack unpack failed (attempt {attempt}/5): {ex}")
+                                time.sleep(0.005)
+                            else:
+                                bt.logging.error(f"Msgpack unpack failed on all 5 attempts: {ex}")
+                                return None, receive_start
+                finally:                    
+                    self._receiving_state = False
                 return result, receive_start
 
             def respond(response: dict) -> dict:

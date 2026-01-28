@@ -56,9 +56,9 @@ class BaseNeuron(ABC):
     def config(cls):
         return config(cls)
 
-    subtensor: "bt.subtensor"
-    wallet: "bt.wallet"
-    metagraph: "bt.metagraph"
+    subtensor: "bt.Subtensor"
+    wallet: "bt.Wallet"
+    metagraph: "bt.Metagraph"
     spec_version: int = spec_version
 
     @property

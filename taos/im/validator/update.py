@@ -271,7 +271,7 @@ def rebuild_simulator(self : Validator) -> None:
         )
         raise
 
-def restart_simulator(self : Validator) -> None:
+def restart_simulator(self : Validator, end : bool) -> None:
     """
     Restarts the C++ simulator process with timeout protection and checkpoint resume.
     """
@@ -323,40 +323,41 @@ def restart_simulator(self : Validator) -> None:
             bt.logging.info(f"Killed {killed_count} simulator process(es)")
             time.sleep(2.0)
 
-        resume_cmd = [
-            "pm2", "start", "--no-autorestart", "--name=simulator",
-            "../build/src/cpp/taosim -c latest"
-        ]
-        
-        bt.logging.info(f"ATTEMPTING TO RESUME SIMULATOR FROM CHECKPOINT: {' '.join(resume_cmd)}")
-        resume_result = subprocess.run(
-            resume_cmd, 
-            cwd=str((self.repo_path / 'simulate' / 'trading' / 'run').resolve()), 
-            shell=isinstance(resume_cmd, str),
-            capture_output=True,
-            timeout=30.0
-        )
-
-        checkpoint_success = False
-        if resume_result.returncode == 0:
-            time.sleep(2.0)
-            if check_simulator(self):
-                bt.logging.success("SIMULATOR RESUMED FROM CHECKPOINT SUCCESSFULLY.")
-                checkpoint_success = True
-            else:
-                bt.logging.warning("Checkpoint resume started but simulator not healthy. Falling back to new simulation.")
-                try:
-                    subprocess.run(['pm2', 'delete', 'simulator'], capture_output=True, timeout=10.0)
-                    time.sleep(1.0)
-                except:
-                    pass
-        else:
-            bt.logging.warning(
-                f"Failed to resume from checkpoint (returncode={resume_result.returncode}). "
-                f"Falling back to new simulation.\n"
-                f"STDERR: {resume_result.stderr.decode() if resume_result.stderr else 'N/A'}"
+        if not end:
+            resume_cmd = [
+                "pm2", "start", "--no-autorestart", "--name=simulator",
+                "../build/src/cpp/taosim -c latest"
+            ]
+            
+            bt.logging.info(f"ATTEMPTING TO RESUME SIMULATOR FROM CHECKPOINT: {' '.join(resume_cmd)}")
+            resume_result = subprocess.run(
+                resume_cmd, 
+                cwd=str((self.repo_path / 'simulate' / 'trading' / 'run').resolve()), 
+                shell=isinstance(resume_cmd, str),
+                capture_output=True,
+                timeout=30.0
             )
-        if not checkpoint_success:
+
+            checkpoint_success = False
+            if resume_result.returncode == 0:
+                time.sleep(2.0)
+                if check_simulator(self):
+                    bt.logging.success("SIMULATOR RESUMED FROM CHECKPOINT SUCCESSFULLY.")
+                    checkpoint_success = True
+                else:
+                    bt.logging.warning("Checkpoint resume started but simulator not healthy. Falling back to new simulation.")
+                    try:
+                        subprocess.run(['pm2', 'delete', 'simulator'], capture_output=True, timeout=10.0)
+                        time.sleep(1.0)
+                    except:
+                        pass
+            else:
+                bt.logging.warning(
+                    f"Failed to resume from checkpoint (returncode={resume_result.returncode}). "
+                    f"Falling back to new simulation.\n"
+                    f"STDERR: {resume_result.stderr.decode() if resume_result.stderr else 'N/A'}"
+                )
+        if end or not checkpoint_success:
             fallback_cmd = [
                 "pm2", "start", "--no-autorestart", "--name=simulator",
                 f"../build/src/cpp/taosim -f {self.simulator_config_file}"

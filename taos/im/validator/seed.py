@@ -582,7 +582,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed.external.sampling_seconds', type=int, required=True)
     parser.add_argument('--logging.level', type=str, default='INFO')
 
-    config = bt.config(parser)
+    config = bt.Config(parser)
     bt.logging(config=config)
     
     run_seed_service(config)

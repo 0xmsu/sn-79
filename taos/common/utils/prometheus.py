@@ -25,7 +25,7 @@ class prometheus:
 
     def __new__(
         cls,
-        config: "bt.config" = None,
+        config: "bt.Config" = None,
         port: int = None,
         level: Union[str, "prometheus.level"] = None
     ):
@@ -94,11 +94,11 @@ class prometheus:
         """
         Get config from the argument parser
         
-        Return: bt.config object
+        Return: bt.Config object
         """
         parser = argparse.ArgumentParser()
         cls.add_args(parser=parser)
-        return bt.config(parser)
+        return bt.Config(parser)
 
     @classmethod
     def help(cls):

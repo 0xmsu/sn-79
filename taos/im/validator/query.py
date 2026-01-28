@@ -33,18 +33,18 @@ class QueryService:
         - Internal running state
 
         Args:
-            config (bt.config): The validator configuration object.
+            config (bt.Config): The validator configuration object.
 
         Returns:
             None
         """
         self.config = config
-        self.wallet = bt.wallet(
+        self.wallet = bt.Wallet(
             path=self.config.wallet.path,
             name=self.config.wallet.name,
             hotkey=self.config.wallet.hotkey
         )
-        self.dendrite = bt.dendrite(wallet=self.wallet)
+        self.dendrite = bt.Dendrite(wallet=self.wallet)
         self.running = True
         self.request_queue = None
         self.response_queue = None
@@ -304,7 +304,7 @@ class QueryService:
             gc.disable()
             
             old_dendrite = self.dendrite
-            self.dendrite = bt.dendrite(wallet=self.wallet)
+            self.dendrite = bt.Dendrite(wallet=self.wallet)
             
             class MinimalMetagraph:
                 def __init__(self, axons, uids):
@@ -643,10 +643,10 @@ class QueryService:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    bt.wallet.add_args(parser)
-    bt.subtensor.add_args(parser)
+    bt.Wallet.add_args(parser)
+    bt.Subtensor.add_args(parser)
     bt.logging.add_args(parser)
-    bt.axon.add_args(parser)
+    bt.Axon.add_args(parser)
     bt.logging.set_info()
 
     parser.add_argument('--netuid', type=int, default=1)
@@ -660,7 +660,7 @@ if __name__ == '__main__':
     parser.add_argument('--notify-fd', type=int, default=None)
     
 
-    config = bt.config(parser)
+    config = bt.Config(parser)
     bt.logging(config=config)
     
     if config.cpu_cores:

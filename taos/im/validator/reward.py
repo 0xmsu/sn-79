@@ -27,7 +27,7 @@ from typing import Dict, Tuple
 from collections import defaultdict
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
 from taos.im.utils import normalize
-from taos.im.utils.kappa import kappa_3, batch_kappa_3
+from taos.im.utils.kappa import kappa_3, batch_kappa_3, _get_pnl_fingerprint
 
 def score_uid(validator_data: Dict, uid: int) -> float:
     """
@@ -149,10 +149,14 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     
     # Calculate the activity factors to be multiplied onto the Kappas
     activity_factors_uid = activity_factors[uid]
+    decay_rate = config['activity'].get('decay_rate', 1.0)
+
     for book_id, roundtrip_volume in miner_roundtrip_volumes.items():
         if latest_roundtrip_volumes[book_id] > 0:
             activity_factors_uid[book_id] = min(1 + ((roundtrip_volume * volume_cap_inv) * activity_impact), 2.0)
         else:
+            if decay_rate == 0.0:
+                continue
             latest_time = latest_roundtrip_timestamps[book_id]
             
             if latest_time > 0:
@@ -168,10 +172,9 @@ def score_uid(validator_data: Dict, uid: int) -> float:
             else:
                 time_beyond_grace = inactive_time - decay_grace_period
                 time_ratio = time_beyond_grace * decay_window_ns_inv
-                time_acceleration = 1 + (time_ratio ** time_acceleration_power)
+                time_acceleration = 1 + (time_ratio ** time_acceleration_power) * decay_rate
             
             total_acceleration = activity_multiplier * time_acceleration
-            # Cap acceleration to prevent overflow
             total_acceleration = min(total_acceleration, 100.0)
             
             try:
@@ -263,14 +266,17 @@ def score_uids(validator_data: Dict) -> Dict:
     deregistered_uids = validator_data['deregistered_uids']
     simulation_config = validator_data['simulation_config']
     kappa_values = validator_data['kappa_values']
+    kappa_cache = validator_data['kappa_cache']
     realized_pnl_history = validator_data['realized_pnl_history']
     tau = config['kappa']['tau']
 
     if config['kappa']['parallel_workers'] == 0:
-        kappa_values.update({
-            uid: kappa_3(
+        cache_updates = {}
+        for uid in uids:
+            realized_pnl_value = realized_pnl_history.get(uid, {})
+            kappa_result = kappa_3(
                 uid,
-                realized_pnl_history.get(uid, {}),
+                realized_pnl_value,
                 tau,
                 config['kappa']['lookback'],
                 config['kappa']['normalization_min'],
@@ -278,10 +284,14 @@ def score_uids(validator_data: Dict) -> Dict:
                 config['kappa']['min_lookback'],
                 config['kappa']['min_realized_observations'],
                 simulation_config['grace_period'],
-                deregistered_uids
+                deregistered_uids,
+                simulation_config['book_count'],
+                cache=kappa_cache
             )
-            for uid in uids
-        })
+            kappa_values[uid] = kappa_result
+            fingerprint = _get_pnl_fingerprint(realized_pnl_value)
+            cache_updates[uid] = (fingerprint, kappa_result)
+        kappa_cache.update(cache_updates)        
     else:
         if config['kappa']['parallel_workers'] == -1:
             num_processes = len(config['kappa']['reward_cores'])
@@ -289,7 +299,7 @@ def score_uids(validator_data: Dict) -> Dict:
             num_processes = config['kappa']['parallel_workers']
         batch_size = int(256 / num_processes)
         batches = [uids[i:i+batch_size] for i in range(0, 256, batch_size)]
-        kappa_values.update(batch_kappa_3(
+        kappa_results, cache_updates = batch_kappa_3(
             realized_pnl_history,
             tau,
             batches,
@@ -300,8 +310,12 @@ def score_uids(validator_data: Dict) -> Dict:
             config['kappa']['min_realized_observations'],
             simulation_config['grace_period'],
             deregistered_uids,
+            simulation_config['book_count'],
+            cache=kappa_cache,
             cores=config['kappa']['reward_cores'][:num_processes]            
-        ))
+        )
+        kappa_values.update(kappa_results)
+        kappa_cache.update(cache_updates)
 
     validator_data['kappa_values'] = kappa_values
 
@@ -350,6 +364,7 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
     realized_pnl_history = self.realized_pnl_history
     validator_data = {
         'kappa_values': self.kappa_values,
+        'kappa_cache': self.kappa_cache,
         'activity_factors': self.activity_factors,
         'roundtrip_volumes': roundtrip_volumes,
         'realized_pnl_history': realized_pnl_history,
@@ -370,7 +385,8 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
                     'trade_volume_sampling_interval': self.config.scoring.activity.trade_volume_sampling_interval,
                     'trade_volume_assessment_period': self.config.scoring.activity.trade_volume_assessment_period,
                     'decay_grace_period': self.config.scoring.activity.decay_grace_period,
-                    'impact' : self.config.scoring.activity.impact
+                    'impact' : self.config.scoring.activity.impact,
+                    'decay_rate': self.config.scoring.activity.decay_rate
                 },
                 'interval': self.config.scoring.interval,
             },
@@ -387,6 +403,7 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
             'publish_interval': self.simulation.publish_interval,
             'volumeDecimals': self.simulation.volumeDecimals,
             'grace_period': self.simulation.grace_period,
+            'book_count': self.simulation.book_count, 
         },
         'simulation_timestamp': self.simulation_timestamp,
         'uids': [uid.item() for uid in self.metagraph.uids],

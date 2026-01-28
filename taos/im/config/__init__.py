@@ -131,15 +131,15 @@ def add_im_validator_args(cls, parser):
     parser.add_argument(
         "--scoring.kappa.min_lookback",
         type=int,
-        help="Minimum number of previous observations required for Kappa calculation.",
-        default=1800,
+        help="Minimum period of observations in simulation nanoseconds required for Kappa calculation.",
+        default=1800_000_000_000,
     )
 
     parser.add_argument(
         "--scoring.kappa.lookback",
         type=int,
-        help="Number of previous realized P&L observations to use for Kappa-3 ratio calculation.",
-        default=3600,
+        help="Window in simulation nanoseconds of realized P&L observations to use for Kappa-3 ratio calculation.",
+        default=3600_000_000_000,
     )
 
     parser.add_argument(
@@ -153,7 +153,7 @@ def add_im_validator_args(cls, parser):
         "--scoring.kappa.min_realized_observations",
         type=int,
         help="The minimum number of realized P&L observations (round-trips) required in the assessment window for Kappa-3 score to be assigned.",
-        default=6,
+        default=3,
     )
 
     parser.add_argument(
@@ -174,7 +174,7 @@ def add_im_validator_args(cls, parser):
         "--scoring.activity.trade_volume_sampling_interval",
         type=int,
         help="The simulation time interval at which miner agent trading volume history is sampled.",
-        default=600_000_000_000,
+        default=3600_000_000_000,
     )
     
     parser.add_argument(
@@ -188,7 +188,7 @@ def add_im_validator_args(cls, parser):
         "--scoring.activity.impact",
         type=float,
         help="Multiplied onto activity factors to modify the impact of volume weighting in scoring calculations.",
-        default=0.33,
+        default=0.0,
     )
     
     parser.add_argument(
@@ -197,12 +197,19 @@ def add_im_validator_args(cls, parser):
         help="The period in simulation timesteps for which the decay factor is unaccelerated. After this duration of not trading/round-tripping, activity factor decay accelerates.",
         default=600_000_000_000,
     )
+    
+    parser.add_argument(
+        "--scoring.activity.decay_rate",
+        type=float,
+        help="Rate of the decay applied to activity factor when no trading has occurred.",
+        default=0.0,
+    )
 
     parser.add_argument(
         "--scoring.activity.capital_turnover_cap",
         type=float,
         help="The number of times within each `trade_volume_assessment_period` that miner agents are able to trade the equivalent in volume to their initial capital allocation value before they are restricted from further activity.",
-        default=20.0,
+        default=10.0,
     )
 
     parser.add_argument(

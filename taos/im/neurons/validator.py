@@ -2707,6 +2707,30 @@ if __name__ != "__mp_main__":
                 'shared_state_rewarding': self.shared_state_rewarding,
                 'current_block': self.current_block,
                 'uid': self.uid,
+                'validator_config' : {
+                    'scoring': {
+                        'interval': self.config.scoring.interval,
+                        'max_instructions_per_book': self.config.scoring.max_instructions_per_book,
+                        'min_delay': self.config.scoring.min_delay,
+                        'max_delay': self.config.scoring.max_delay,
+                        'min_instruction_delay': self.config.scoring.min_instruction_delay,
+                        'max_instruction_delay': self.config.scoring.max_instruction_delay,
+                        'kappa_lookback': self.config.scoring.kappa.lookback,
+                        'kappa_min_lookback': self.config.scoring.kappa.min_lookback,
+                        'kappa_tau': self.config.scoring.kappa.tau,
+                        'kappa_min_realized_observations': self.config.scoring.kappa.min_realized_observations,
+                        'kappa_normalization_min': self.config.scoring.kappa.normalization_min,
+                        'kappa_normalization_max': self.config.scoring.kappa.normalization_max,
+                        'activity_impact': self.config.scoring.activity.impact,
+                        'activity_trade_volume_sampling_interval': self.config.scoring.activity.trade_volume_sampling_interval,
+                        'activity_trade_volume_assessment_period': self.config.scoring.activity.trade_volume_assessment_period,
+                        'activity_decay_grace_period': self.config.scoring.activity.decay_grace_period,
+                        'activity_decay_rate': self.config.scoring.activity.decay_rate,
+                        'activity_capital_turnover_cap': self.config.scoring.activity.capital_turnover_cap,
+                        'activity_max_volume': self.config.scoring.activity.capital_turnover_cap * self.simulation.miner_wealth,
+                        'activity_decay_rate': self.config.scoring.activity.decay_rate,
+                    }
+                }
             }
 
             bt.logging.debug(f"Assembled final structure ({time.time()-final_start:.4f}s)")

@@ -27,7 +27,8 @@ class prometheus:
         cls,
         config: "bt.Config" = None,
         port: int = None,
-        level: Union[str, "prometheus.level"] = None
+        level: Union[str, "prometheus.level"] = None,
+        start_server: bool = True
     ):
         """
         Instantiates a global prometheus DB which can be accessed by other processes.
@@ -55,6 +56,13 @@ class prometheus:
             )  # Convert str to upper case.
 
         cls.check_config(config)
+        
+        if not start_server:
+            prometheus.port = config.prometheus.port
+            bt.logging.success(
+                f"Prometheus: Configured for custom server on port {config.prometheus.port}"
+            )
+            return True
 
         return cls.serve(
             cls,

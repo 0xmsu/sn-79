@@ -132,14 +132,14 @@ def add_im_validator_args(cls, parser):
         "--scoring.kappa.min_lookback",
         type=int,
         help="Minimum period of observations in simulation nanoseconds required for Kappa calculation.",
-        default=1800_000_000_000,
+        default=2700_000_000_000,
     )
 
     parser.add_argument(
         "--scoring.kappa.lookback",
         type=int,
         help="Window in simulation nanoseconds of realized P&L observations to use for Kappa-3 ratio calculation.",
-        default=3600_000_000_000,
+        default=5400_000_000_000,
     )
 
     parser.add_argument(
@@ -174,7 +174,7 @@ def add_im_validator_args(cls, parser):
         "--scoring.activity.trade_volume_sampling_interval",
         type=int,
         help="The simulation time interval at which miner agent trading volume history is sampled.",
-        default=3600_000_000_000,
+        default=600_000_000_000,
     )
     
     parser.add_argument(

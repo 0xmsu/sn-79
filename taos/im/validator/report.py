@@ -23,7 +23,11 @@ from taos.im.protocol.events import TradeEvent
 
 from taos.common.utils.prometheus import prometheus
 from taos.im.utils import duration_from_timestamp
-from prometheus_client import Counter, Gauge, Info
+from prometheus_client import Counter, Gauge, Info, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+from fastapi import FastAPI
+from fastapi.responses import Response
+import uvicorn
+import threading
 
 class ReportingService:
     def __init__(self, config):
@@ -65,45 +69,109 @@ class ReportingService:
         self.thread_pool = ThreadPoolExecutor(max_workers=2)
         self.report_executor = ThreadPoolExecutor(max_workers=1)        
         self._init_prometheus()
+        
+    def _start_metrics_server(self):
+        app = FastAPI()
+
+        @app.get("/metrics")
+        def all_metrics():
+            """All metrics combined (backwards compatibility)"""
+            output = b''.join([generate_latest(r) for r in self.registries.values()])
+            return Response(content=output, media_type=CONTENT_TYPE_LATEST)
+
+        @app.get("/metrics/validator")
+        def validator_metrics():
+            """Validator-specific metrics: counters, validator_gauges, neuron_info"""
+            return Response(content=generate_latest(self.registry_validator), media_type=CONTENT_TYPE_LATEST)
+
+        @app.get("/metrics/simulation")
+        def simulation_metrics():
+            """Simulation metrics: simulation_gauges"""
+            return Response(content=generate_latest(self.registry_simulation), media_type=CONTENT_TYPE_LATEST)
+
+        @app.get("/metrics/miner")
+        def miner_metrics():
+            """Miner metrics: miner_gauges, miners"""
+            return Response(content=generate_latest(self.registry_miner), media_type=CONTENT_TYPE_LATEST)
+
+        @app.get("/metrics/agent")
+        def agent_metrics():
+            """Miner metrics: agent_gauges"""
+            return Response(content=generate_latest(self.registry_agent), media_type=CONTENT_TYPE_LATEST)
+
+        @app.get("/metrics/books")
+        def book_metrics():
+            """Book metrics: book_gauges, books"""
+            return Response(content=generate_latest(self.registry_books), media_type=CONTENT_TYPE_LATEST)
+
+        @app.get("/metrics/trades")
+        def trade_metrics():
+            """Trade metrics: trades, miner_trades"""
+            return Response(content=generate_latest(self.registry_trades), media_type=CONTENT_TYPE_LATEST)
+
+        def run_server():
+            uvicorn.run(app, host="0.0.0.0", port=self.config.prometheus.port, log_level="debug")
+
+        self.metrics_server_thread = threading.Thread(target=run_server, daemon=True)
+        self.metrics_server_thread.start()
+        bt.logging.success(f"Prometheus metrics server started on port {self.config.prometheus_port}")
     
     def _init_prometheus(self):
         prometheus(
             config=self.config,
-            port=self.config.prometheus_port,
-            level=None
+            port=self.config.prometheus.port,
+            level=None,
+            start_server=False
         )
-        self.prometheus_counters = Counter('counters', 'Counter summaries for the running validator.', ['wallet', 'netuid', 'timestamp', 'counter_name'])
-        self.prometheus_simulation_gauges = Gauge('simulation_gauges', 'Gauge summaries for global simulation metrics.', ['wallet', 'netuid', 'simulation_gauge_name'])
-        self.prometheus_validator_gauges = Gauge('validator_gauges', 'Gauge summaries for validator-related metrics.', ['wallet', 'netuid', 'validator_gauge_name'])
-        self.prometheus_miner_gauges = Gauge('miner_gauges', 'Gauge summaries for miner-related metrics.', ['wallet', 'netuid', 'agent_id', 'miner_gauge_name'])
-        self.prometheus_book_gauges = Gauge('book_gauges', 'Gauge summaries for book-related metrics.', ['wallet', 'netuid', 'book_id', 'level', 'book_gauge_name'])
-        self.prometheus_agent_gauges = Gauge('agent_gauges', 'Gauge summaries for agent-related metrics.', ['wallet', 'netuid', 'book_id', 'agent_id', 'agent_gauge_name'])
+        self.registry_validator = CollectorRegistry()
+        self.registry_simulation = CollectorRegistry()
+        self.registry_miner = CollectorRegistry()
+        self.registry_agent = CollectorRegistry()
+        self.registry_books = CollectorRegistry()
+        self.registry_trades = CollectorRegistry()
+
+        self.registries = {
+            'validator': self.registry_validator,
+            'simulation': self.registry_simulation,
+            'miner': self.registry_miner,
+            'agent': self.registry_agent,
+            'books': self.registry_books,
+            'trades': self.registry_trades,
+        }
+
+        self.prometheus_counters = Counter('counters', 'Counter summaries for the running validator.', ['wallet', 'netuid', 'timestamp', 'counter_name'], registry=self.registry_validator)
+        self.prometheus_simulation_gauges = Gauge('simulation_gauges', 'Gauge summaries for global simulation metrics.', ['wallet', 'netuid', 'simulation_gauge_name'], registry=self.registry_simulation)
+        self.prometheus_validator_gauges = Gauge('validator_gauges', 'Gauge summaries for validator-related metrics.', ['wallet', 'netuid', 'validator_gauge_name'], registry=self.registry_validator)
+        self.prometheus_miner_gauges = Gauge('miner_gauges', 'Gauge summaries for miner-related metrics.', ['wallet', 'netuid', 'agent_id', 'miner_gauge_name'], registry=self.registry_miner)
+        self.prometheus_book_gauges = Gauge('book_gauges', 'Gauge summaries for book-related metrics.', ['wallet', 'netuid', 'book_id', 'level', 'book_gauge_name'], registry=self.registry_books)
+        self.prometheus_agent_gauges = Gauge('agent_gauges', 'Gauge summaries for agent-related metrics.', ['wallet', 'netuid', 'book_id', 'agent_id', 'agent_gauge_name'], registry=self.registry_agent)
         self.prometheus_trades = Gauge('trades', 'Gauge summaries for trade metrics.', [
             'wallet', 'netuid', 'timestamp', 'timestamp_str', 'book_id', 'agent_id', 'trade_id',
             'aggressing_order_id', 'aggressing_agent_id', 'resting_order_id', 'resting_agent_id',
             'maker_fee', 'taker_fee',
-            'price', 'volume', 'side', 'trade_gauge_name'])
+            'price', 'volume', 'side', 'trade_gauge_name'], registry=self.registry_trades)
         self.prometheus_miner_trades = Gauge('miner_trades', 'Gauge summaries for agent trade metrics.', [
             'wallet', 'netuid', 'timestamp', 'timestamp_str', 'book_id', 'uid',
             'role', 'price', 'volume', 'side', 'fee',
-            'miner_trade_gauge_name'])
+            'miner_trade_gauge_name'], registry=self.registry_trades)
         self.prometheus_books = Gauge('books', 'Gauge summaries for book snapshot metrics.', [
             'wallet', 'netuid', 'timestamp', 'timestamp_str', 'book_id',
             'bid_5', 'bid_vol_5', 'bid_4', 'bid_vol_4', 'bid_3', 'bid_vol_3', 'bid_2', 'bid_vol_2', 'bid_1', 'bid_vol_1',
             'ask_5', 'ask_vol_5', 'ask_4', 'ask_vol_4', 'ask_3', 'ask_vol_3', 'ask_2', 'ask_vol_2', 'ask_1', 'ask_vol_1',
             'book_gauge_name'
-        ])
+        ], registry=self.registry_books)
         self.prometheus_miners = Gauge('miners', 'Gauge summaries for miner metrics.', [
             'wallet', 'netuid', 'timestamp', 'timestamp_str', 'agent_id',
             'placement', 'base_balance', 'base_loan', 'base_collateral', 'quote_balance', 'quote_loan', 'quote_collateral',
             'inventory_value', 'inventory_value_change', 'pnl', 'pnl_change', 'total_realized_pnl',
             'total_daily_volume', 'min_daily_volume', 'total_roundtrip_volume', 'min_roundtrip_volume',
             'activity_factor',
-            'kappa', 'kappa_penalty', 'kappa_score', 
+            'kappa', 'kappa_penalty', 'kappa_score',
             'unnormalized_score', 'score',
             'miner_gauge_name'
-        ])
-        self.prometheus_info = Info('neuron_info', "Info summaries for the running validator.", ['wallet', 'netuid'])
+        ], registry=self.registry_miner)
+        self.prometheus_info = Info('neuron_info', "Info summaries for the running validator.", ['wallet', 'netuid'], registry=self.registry_validator)
+        self._start_metrics_server()
         self.prometheus_initialized = True
     
     async def run(self):        
@@ -237,7 +305,7 @@ class ReportingService:
                     'unnormalized_scores', 'scores', 'miner_stats', 'initial_balances', 
                     'initial_balances_published', 'simulation_timestamp', 'step', 
                     'step_rates', 'fundamental_price', 'shared_state_rewarding', 
-                    'current_block', 'uid', 'metagraph_data']:
+                    'current_block', 'uid', 'metagraph_data', 'validator_config']:
             setattr(self, key, data[key])
         
         class SimpleState:
@@ -321,6 +389,9 @@ def publish_info(self: ReportingService) -> None:
         'coldkey_name': self.config.wallet.name,
         'hotkey': str(self.wallet.hotkey.ss58_address),
         'name': self.config.wallet.hotkey
+    } | {
+        f"config_scoring_{name}": str(value)
+        for name, value in self.validator_config['scoring'].items()
     } | {
          f"simulation_{name}" : str(value) for name, value in self.simulation.model_dump().items() if name != 'logDir' and name != 'fee_policy'
     } | self.simulation.fee_policy.to_prom_info()

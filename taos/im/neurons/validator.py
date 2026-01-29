@@ -1592,8 +1592,6 @@ if __name__ != "__mp_main__":
 
                 async def async_save_worker():
                     """Non-blocking async file I/O with atomic writes."""
-                    io_start = time.time()
-
                     try:
                         await wait_for_query_and_receive('serializing simulation state')
                         sim_serialize_start = time.time()
@@ -1653,7 +1651,7 @@ if __name__ != "__mp_main__":
                             'success': True,
                             'simulation_save_time': sim_time,
                             'validator_save_time': val_time,
-                            'io_time': time.time() - io_start,
+                            'io_time': sim_serialize_time + val_serialize_time + sim_time + val_time,
                             'sim_size_mb': sim_mb,
                             'val_size_mb': val_mb
                         }

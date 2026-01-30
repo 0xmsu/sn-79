@@ -132,14 +132,14 @@ def add_im_validator_args(cls, parser):
         "--scoring.kappa.min_lookback",
         type=int,
         help="Minimum period of observations in simulation nanoseconds required for Kappa calculation.",
-        default=3600_000_000_000,
+        default=5400_000_000_000,
     )
 
     parser.add_argument(
         "--scoring.kappa.lookback",
         type=int,
         help="Window in simulation nanoseconds of realized P&L observations to use for Kappa-3 ratio calculation.",
-        default=7200_000_000_000,
+        default=10800_000_000_000,
     )
 
     parser.add_argument(

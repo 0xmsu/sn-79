@@ -271,7 +271,7 @@ def rebuild_simulator(self : Validator) -> None:
         )
         raise
 
-def restart_simulator(self : Validator, end : bool) -> None:
+def restart_simulator(self : Validator, end : bool = False) -> None:
     """
     Restarts the C++ simulator process with timeout protection and checkpoint resume.
     """

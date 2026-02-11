@@ -43,6 +43,7 @@ if __name__ != "__mp_main__":
     import aiofiles.os
     import select
     import gc
+    import copy
     from datetime import datetime, timedelta
     from ypyjson import YpyObject
 
@@ -556,6 +557,7 @@ if __name__ != "__mp_main__":
             self.simulation = MarketSimulationConfig.from_xml(self.xml_config)
             self.validator_state_file = self.config.neuron.full_path + f"/validator.mp"
             self.simulation_state_file = self.config.neuron.full_path + f"/{self.simulation.label()}.mp"
+            self._initialize_all_structures()
             self.load_state()
 
         def __init__(self, config=None) -> None:
@@ -584,6 +586,16 @@ if __name__ != "__mp_main__":
             self.simulator_config_file = os.path.realpath(Path(self.config.simulation.xml_config))
             # Initialize subnet info and other basic validator/simulation properties
             self.subnet_info = self.subtensor.get_metagraph_info(self.config.netuid)
+            
+            self.benchmark_agents = []
+            self.benchmark_start_uid = self.subnet_info.max_uids
+            if self.config.benchmark.agents:
+                self._load_benchmark_agents()
+            self.effective_max_uids = self.subnet_info.max_uids + len(self.benchmark_agents)
+            self.scores = torch.zeros(
+                self.effective_max_uids, dtype=torch.float32, device=self.device
+            )      
+            
             self.last_state = None
             self.last_response = None
             self.msgpack_error_counter = 0
@@ -642,7 +654,7 @@ if __name__ != "__mp_main__":
             self._cleanup_done = False
             atexit.register(self.cleanup)
 
-            self.initial_balances_published = {uid : False for uid in range(self.subnet_info.max_uids)}
+            self.initial_balances_published = {uid : False for uid in range(self.effective_max_uids)}
             self.volume_sums = defaultdict(lambda: defaultdict(float))
             self.maker_volume_sums = defaultdict(lambda: defaultdict(float))
             self.taker_volume_sums = defaultdict(lambda: defaultdict(float))
@@ -651,11 +663,12 @@ if __name__ != "__mp_main__":
                 'longs': deque(),
                 'shorts': deque()
             }))
-            self.inventory_history = {uid : {} for uid in range(self.subnet_info.max_uids)}
+            self.inventory_history = {uid : {} for uid in range(self.effective_max_uids)}
             self.realized_pnl_history = defaultdict(lambda: defaultdict(dict))
             self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             self.roundtrip_volume_sums = defaultdict(lambda: defaultdict(float))
-            self.kappa_cache = {}
+            self.kappa_cache = {}            
+            self.pending_notices = {uid: [] for uid in range(self.effective_max_uids)}
 
             self.load_simulation_config()
 
@@ -667,7 +680,7 @@ if __name__ != "__mp_main__":
             self.repo = Repo(self.repo_path)
             self.update_repo()
 
-            self.miner_stats = {uid : {'requests' : 0, 'timeouts' : 0, 'failures' : 0, 'rejections' : 0, 'call_time' : []} for uid in range(self.subnet_info.max_uids)}
+            self.miner_stats = {uid : {'requests' : 0, 'timeouts' : 0, 'failures' : 0, 'rejections' : 0, 'call_time' : []} for uid in range(self.effective_max_uids)}
             self.query_process = None
             self.query_notify_read, self.query_notify_write = os.pipe()
             import fcntl
@@ -679,6 +692,119 @@ if __name__ != "__mp_main__":
             self._start_reporting_service()
             self.seed_process = None
             self._start_seed_service()
+            
+        def _load_benchmark_agents(self):
+            """Load benchmark agent configurations"""
+            try:
+                with open(self.config.benchmark.agents, 'r') as f:
+                    benchmark_config = json.load(f)                
+                for idx, agent in enumerate(benchmark_config['agents']):
+                    uid = self.benchmark_start_uid + idx                    
+                    self.benchmark_agents.append({
+                        'uid': uid,
+                        'name': agent['name'],
+                        'ip': agent['ip'],
+                        'port': agent['port'],
+                        'hotkey': agent['hotkey'],
+                        'axon': bt.AxonInfo(
+                            ip=agent['ip'],
+                            port=agent['port'],
+                            hotkey=agent['hotkey'],
+                            coldkey='benchmark',
+                            version=self.metagraph.axons[0].version,
+                            ip_type=self.metagraph.axons[0].ip_type,
+                            protocol=self.metagraph.axons[0].protocol,
+                        )
+                    })
+                    bt.logging.info(f"Loaded benchmark agent: {agent['name']} (UID {uid}) at {agent['ip']}:{agent['port']}")            
+            except Exception as ex:
+                bt.logging.error(f"Failed to load benchmark agents: {ex}")
+                bt.logging.error(traceback.format_exc())
+                self.benchmark_agents = []
+                
+        def _initialize_all_structures(self):
+            """
+            Initialize all UID-indexed structures to effective_max_uids.
+            """
+            bt.logging.info(
+                f"Initializing structures for {self.effective_max_uids} UIDs "
+                f"(network: {self.subnet_info.max_uids}, benchmarks: {len(self.benchmark_agents)}) "
+                f"with {self.simulation.book_count} books"
+            )
+            book_count = self.simulation.book_count
+            if not hasattr(self, 'activity_factors') or len(self.activity_factors) < self.effective_max_uids:
+                self.activity_factors = {
+                    uid: {bookId: 0.0 for bookId in range(book_count)}
+                    for uid in range(self.effective_max_uids)
+                }
+            if not hasattr(self, 'kappa_values') or len(self.kappa_values) < self.effective_max_uids:
+                self.kappa_values = {
+                    uid: {
+                        'books': {bookId: None for bookId in range(book_count)},
+                        'books_weighted': {bookId: 0.0 for bookId in range(book_count)},
+                        'total': None,
+                        'average': None,
+                        'median': None,
+                        'normalized_average': 0.0,
+                        'normalized_median': 0.0,
+                        'normalized_total': 0.0,
+                        'activity_weighted_normalized_median': 0.0,
+                        'penalty': 0.0,
+                        'score': 0.0,
+                    }
+                    for uid in range(self.effective_max_uids)
+                }
+            if not hasattr(self, 'unnormalized_scores') or len(self.unnormalized_scores) < self.effective_max_uids:
+                self.unnormalized_scores = {uid: 0.0 for uid in range(self.effective_max_uids)}
+            if not hasattr(self, 'trade_volumes') or len(self.trade_volumes) < self.effective_max_uids:
+                self.trade_volumes = {
+                    uid: {
+                        bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
+                        for bookId in range(book_count)
+                    }
+                    for uid in range(self.effective_max_uids)
+                }
+            if not hasattr(self, 'initial_balances') or len(self.initial_balances) < self.effective_max_uids:
+                self.initial_balances = {
+                    uid: {
+                        bookId: {'BASE': None, 'QUOTE': None, 'WEALTH': None}
+                        for bookId in range(book_count)
+                    }
+                    for uid in range(self.effective_max_uids)
+                }
+            if not hasattr(self, 'recent_miner_trades') or len(self.recent_miner_trades) < self.effective_max_uids:
+                self.recent_miner_trades = {
+                    uid: {bookId: [] for bookId in range(book_count)}
+                    for uid in range(self.effective_max_uids)
+                }
+            if not hasattr(self, 'miner_stats') or len(self.miner_stats) < self.effective_max_uids:
+                self.miner_stats = {
+                    uid: {'requests': 0, 'timeouts': 0, 'failures': 0, 'rejections': 0, 'call_time': []}
+                    for uid in range(self.effective_max_uids)
+                }
+            if not hasattr(self, 'recent_trades'):
+                self.recent_trades = {bookId: [] for bookId in range(book_count)}
+            if not hasattr(self, 'fundamental_price'):
+                self.fundamental_price = {bookId: None for bookId in range(book_count)}
+            
+            bt.logging.success(f"All structures initialized for {self.effective_max_uids} UIDs")
+                
+        def get_extended_metagraph(self):
+            """Get metagraph extended with benchmark agents"""
+            if not self.benchmark_agents:
+                return self.metagraph
+
+            extended_uids = list(range(self.effective_max_uids))
+            extended_hotkeys = list(self.metagraph.hotkeys) + [agent['hotkey'] for agent in self.benchmark_agents]
+            extended_axons = list(self.metagraph.axons) + [agent['axon'] for agent in self.benchmark_agents]
+
+            class ExtendedMetagraph:
+                def __init__(self, uids, hotkeys, axons):
+                    self.uids = torch.tensor(uids)
+                    self.hotkeys = hotkeys
+                    self.axons = axons
+            
+            return ExtendedMetagraph(extended_uids, extended_hotkeys, extended_axons)
 
         def __enter__(self):
             """
@@ -907,7 +1033,7 @@ if __name__ != "__mp_main__":
             # Shift trade volume timestamps
             bt.logging.info("Shifting trade volume timestamps...")
             shifted_trade_volumes = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid in self.trade_volumes:
                     shifted_trade_volumes[uid] = {}
                     for bookId in range(self.simulation.book_count):
@@ -942,7 +1068,7 @@ if __name__ != "__mp_main__":
                     }
                     for bookId in range(self.simulation.book_count)
                 }
-                for uid in range(self.subnet_info.max_uids)
+                for uid in range(self.effective_max_uids)
             }
 
             bt.logging.info("Adjusting volume sums for pruned data...")
@@ -982,7 +1108,7 @@ if __name__ != "__mp_main__":
 
             bt.logging.info("Shifting inventory history timestamps...")
             shifted_inventory = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid in self.inventory_history and self.inventory_history[uid]:
                     hist = self.inventory_history[uid]
                     if len(hist) > 3:
@@ -997,13 +1123,13 @@ if __name__ != "__mp_main__":
 
             self.inventory_history = {
                 uid: shifted_inventory.get(uid, {})
-                for uid in range(self.subnet_info.max_uids)
+                for uid in range(self.effective_max_uids)
             }
 
             bt.logging.info("Shifting realized P&L history timestamps...")
             shifted_pnl_history = {}
             self._last_prune_timestamp = None
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid in self.realized_pnl_history and self.realized_pnl_history[uid]:
                     hist = self.realized_pnl_history[uid]
                     shifted_pnl_history[uid] = {}
@@ -1023,7 +1149,7 @@ if __name__ != "__mp_main__":
 
             bt.logging.info("Shifting round-trip volume timestamps...")
             shifted_rt_volumes = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid in self.roundtrip_volumes:
                     shifted_rt_volumes[uid] = {}
                     for bookId in range(self.simulation.book_count):
@@ -1093,12 +1219,12 @@ if __name__ != "__mp_main__":
                 uid : {
                     bookId : {'BASE' : None, 'QUOTE' : None, 'WEALTH' : self.simulation.miner_wealth}
                     for bookId in range(self.simulation.book_count)
-                } for uid in range(self.subnet_info.max_uids)
+                } for uid in range(self.effective_max_uids)
             }
             self.recent_trades = {bookId : [] for bookId in range(self.simulation.book_count)}
             self.recent_miner_trades = {
                 uid : {bookId : [] for bookId in range(self.simulation.book_count)}
-                for uid in range(self.subnet_info.max_uids)
+                for uid in range(self.effective_max_uids)
             }
 
             asyncio.run_coroutine_threadsafe(self._save_state_sync(), self.main_loop).result()
@@ -1113,7 +1239,7 @@ if __name__ != "__mp_main__":
             self.simulation.logDir = None
             self._notify_seed_log_dir_change(None)
             self.fundamental_price = {bookId : None for bookId in range(self.simulation.book_count)}
-            self.pending_notices = {uid : [] for uid in range(self.subnet_info.max_uids)}
+            self.pending_notices = {uid : [] for uid in range(self.effective_max_uids)}
             asyncio.run_coroutine_threadsafe(self._save_state_sync(), self.main_loop).result()
             self.update_repo(end=True)
 
@@ -1159,7 +1285,7 @@ if __name__ != "__mp_main__":
                 dict: Nested dictionary mapping uid -> timestamp -> book_id -> inventory.
             """
             result = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid in self.inventory_history and self.inventory_history[uid]:
                     result[uid] = {}
                     for ts, books in self.inventory_history[uid].items():
@@ -1176,7 +1302,7 @@ if __name__ != "__mp_main__":
                 dict: Nested dictionary mapping uid -> timestamp -> book_id -> pnl.
             """
             result = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid in self.realized_pnl_history:
                     result[uid] = {}
                     for ts, books in self.realized_pnl_history[uid].items():
@@ -1196,7 +1322,7 @@ if __name__ != "__mp_main__":
                 dict: Snapshot with regular dict objects replacing defaultdicts.
             """
             result = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid in source_dict:
                     result[uid] = dict(source_dict[uid])
             return result
@@ -1229,7 +1355,7 @@ if __name__ != "__mp_main__":
                 dict: Nested dictionary mapping uid -> book_id -> role -> timestamp -> volume.
             """
             result = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid not in self.trade_volumes:
                     continue
                 result[uid] = {}
@@ -1249,7 +1375,7 @@ if __name__ != "__mp_main__":
                 dict: Nested dictionary mapping uid -> book_id -> timestamp -> volume.
             """
             result = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid not in self.roundtrip_volumes:
                     continue
                 result[uid] = {}
@@ -1267,7 +1393,7 @@ if __name__ != "__mp_main__":
                 dict: Nested dictionary mapping uid -> book_id -> {'longs': list, 'shorts': list}.
             """
             result = {}
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid not in self.open_positions:
                     continue
                 result[uid] = {}
@@ -1803,7 +1929,7 @@ if __name__ != "__mp_main__":
             migrated_rt_entries = 0
 
             bt.logging.info("Migrating trade_volumes...")
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid not in self.trade_volumes:
                     continue
                 for book_id in range(self.simulation.book_count):
@@ -1827,7 +1953,7 @@ if __name__ != "__mp_main__":
 
             bt.logging.info("Migrating roundtrip_volumes...")
             new_roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-            for uid in range(self.subnet_info.max_uids):
+            for uid in range(self.effective_max_uids):
                 if uid not in self.roundtrip_volumes:
                     continue
                 for book_id in range(self.simulation.book_count):
@@ -1866,6 +1992,7 @@ if __name__ != "__mp_main__":
                 - Loads simulation variables (balances, trades, notices, timestamps).
                 - Loads validator data (scores, activity, Kappa values, volumes).
                 - Reconstructs missing fields or reshapes data when schema versions differ.
+                - Handles changes in effective_max_uids (benchmark agent count changes).
                 - Reinitializes state when `neuron.reset=True` or files are absent.
 
             Returns:
@@ -1996,35 +2123,50 @@ if __name__ != "__mp_main__":
                     self.start_time = simulation_state["start_time"]
                     self.start_timestamp = simulation_state["start_timestamp"]
                     self.step_rates = simulation_state.get("step_rates", [])
-                    self.pending_notices = simulation_state["pending_notices"]
-                    self.initial_balances = simulation_state.get("initial_balances", {
+                    loaded_pending_notices = simulation_state.get("pending_notices", {})
+                    self.pending_notices = {uid: [] for uid in range(self.effective_max_uids)}
+                    for uid, notices in loaded_pending_notices.items():
+                        if uid < self.effective_max_uids:
+                            self.pending_notices[uid] = notices
+                        else:
+                            bt.logging.debug(f"Skipping pending_notices for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
+                    loaded_initial_balances = simulation_state.get("initial_balances", {})
+                    self.initial_balances = {
                         uid: {bookId: {'BASE': None, 'QUOTE': None, 'WEALTH': None}
                             for bookId in range(self.simulation.book_count)}
-                        for uid in range(self.subnet_info.max_uids)
-                    })
-                    for uid, initial_balances in self.initial_balances.items():
-                        if 'WEALTH' not in initial_balances[0]:
-                            self.initial_balances[uid] = {
-                                bookId: initial_balance | {'WEALTH': self.simulation.miner_wealth}
-                                for bookId, initial_balance in initial_balances.items()
-                            }
+                        for uid in range(self.effective_max_uids)
+                    }
+                    for uid, initial_balances in loaded_initial_balances.items():
+                        if uid < self.effective_max_uids:
+                            if 'WEALTH' not in initial_balances.get(0, {}):
+                                self.initial_balances[uid] = {
+                                    bookId: initial_balance | {'WEALTH': self.simulation.miner_wealth}
+                                    for bookId, initial_balance in initial_balances.items()
+                                }
+                            else:
+                                self.initial_balances[uid] = initial_balances
+                        else:
+                            bt.logging.debug(f"Skipping initial_balances for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
 
                     self.recent_trades = {
                         book_id: [TradeInfo.model_construct(**t) for t in book_trades]
                         for book_id, book_trades in simulation_state["recent_trades"].items()
                     }
-                    self.recent_miner_trades = simulation_state.get("recent_miner_trades", {
+                    loaded_recent_miner_trades = simulation_state.get("recent_miner_trades", {})
+                    self.recent_miner_trades = {
                         uid: {bookId: [] for bookId in range(self.simulation.book_count)}
-                        for uid in range(self.subnet_info.max_uids)
-                    })
-                    if self.recent_miner_trades:
-                        self.recent_miner_trades = {
-                            uid: {
-                                book_id: [[TradeEvent.model_construct(**t), r] for t, r in trades]
-                                for book_id, trades in uid_miner_trades.items()
-                            }
-                            for uid, uid_miner_trades in self.recent_miner_trades.items()
-                        }
+                        for uid in range(self.effective_max_uids)
+                    }
+                    if loaded_recent_miner_trades:
+                        for uid, uid_miner_trades in loaded_recent_miner_trades.items():
+                            if uid < self.effective_max_uids:
+                                self.recent_miner_trades[uid] = {
+                                    book_id: [[TradeEvent.model_construct(**t), r] for t, r in trades]
+                                    for book_id, trades in uid_miner_trades.items()
+                                }
+                            else:
+                                bt.logging.debug(f"Skipping recent_miner_trades for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
+                    
                     self.simulation.logDir = simulation_state["simulation.logDir"]
                     bt.logging.success(f"Loaded simulation state")
                 else:
@@ -2039,16 +2181,16 @@ if __name__ != "__mp_main__":
                 else:
                     bt.logging.info(f"No valid simulation state found, initializing new state")
 
-                self.pending_notices = {uid: [] for uid in range(self.subnet_info.max_uids)}
+                self.pending_notices = {uid: [] for uid in range(self.effective_max_uids)}
                 self.initial_balances = {
                     uid: {bookId: {'BASE': None, 'QUOTE': None, 'WEALTH': None}
                         for bookId in range(self.simulation.book_count)}
-                    for uid in range(self.subnet_info.max_uids)
+                    for uid in range(self.effective_max_uids)
                 }
                 self.recent_trades = {bookId: [] for bookId in range(self.simulation.book_count)}
                 self.recent_miner_trades = {
                     uid: {bookId: [] for bookId in range(self.simulation.book_count)}
-                    for uid in range(self.subnet_info.max_uids)
+                    for uid in range(self.effective_max_uids)
                 }
                 self.fundamental_price = {bookId: None for bookId in range(self.simulation.book_count)}
 
@@ -2072,20 +2214,47 @@ if __name__ != "__mp_main__":
                     self.simulation_timestamp = validator_state.get("simulation_timestamp", 0)
                     self.hotkeys = validator_state["hotkeys"]
                     self.deregistered_uids = list(validator_state.get("deregistered_uids", []))
-                    self.scores = torch.tensor(validator_state["scores"])
-                    self.activity_factors = validator_state.get("activity_factors", {
-                        uid: {bookId: 0.0 for bookId in range(self.simulation.book_count)}
-                        for uid in range(self.subnet_info.max_uids)
-                    })
-                    if isinstance(self.activity_factors[0], float):
-                        self.activity_factors = {
-                            uid: {bookId: self.activity_factors[uid] for bookId in range(self.simulation.book_count)}
-                            for uid in range(self.subnet_info.max_uids)
-                        }
+                    
+                    loaded_scores = validator_state["scores"]
+                    self.scores = torch.zeros(self.effective_max_uids, dtype=torch.float32, device=self.device)
+                    num_scores_to_copy = min(len(loaded_scores), self.effective_max_uids)
+                    self.scores[:num_scores_to_copy] = torch.tensor(loaded_scores[:num_scores_to_copy])
+                    
+                    if len(loaded_scores) > self.effective_max_uids:
+                        bt.logging.warning(
+                            f"Loaded state has {len(loaded_scores)} scores but current effective_max_uids is {self.effective_max_uids}. "
+                            f"Truncating scores for UIDs {self.effective_max_uids} onwards."
+                        )
+                    elif len(loaded_scores) < self.effective_max_uids:
+                        bt.logging.info(
+                            f"Loaded state has {len(loaded_scores)} scores but current effective_max_uids is {self.effective_max_uids}. "
+                            f"Initializing scores for UIDs {len(loaded_scores)} onwards as 0.0."
+                        )
 
-                    self.inventory_history = validator_state.get("inventory_history", {
-                        uid: {} for uid in range(self.subnet_info.max_uids)
-                    })
+                    loaded_activity = validator_state.get("activity_factors", {})
+                    if loaded_activity and isinstance(list(loaded_activity.values())[0], float):
+                        loaded_activity = {
+                            uid: {bookId: loaded_activity[uid] for bookId in range(self.simulation.book_count)}
+                            for uid in loaded_activity
+                        }
+                    
+                    self.activity_factors = {
+                        uid: {bookId: 0.0 for bookId in range(self.simulation.book_count)}
+                        for uid in range(self.effective_max_uids)
+                    }
+                    for uid, books in loaded_activity.items():
+                        if uid < self.effective_max_uids:
+                            self.activity_factors[uid] = books
+                        else:
+                            bt.logging.debug(f"Skipping activity_factors for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
+
+                    loaded_inventory = validator_state.get("inventory_history", {})
+                    self.inventory_history = {uid: {} for uid in range(self.effective_max_uids)}
+                    for uid, hist in loaded_inventory.items():
+                        if uid < self.effective_max_uids:
+                            self.inventory_history[uid] = hist
+                        else:
+                            bt.logging.debug(f"Skipping inventory_history for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
 
                     bt.logging.info(f"Processing inventory history...")
                     for uid in self.inventory_history:
@@ -2101,10 +2270,26 @@ if __name__ != "__mp_main__":
 
                     bt.logging.info(f"Processing kappa values...")
                     if 'kappa_values' in validator_state:
-                        self.kappa_values = validator_state['kappa_values']
-                        for uid in range(self.subnet_info.max_uids):
-                            if uid in self.kappa_values and self.kappa_values[uid] is not None:
-                                kappa = self.kappa_values[uid]
+                        loaded_kappa = validator_state['kappa_values']
+                        self.kappa_values = {
+                            uid: {
+                                'books': {bookId: None for bookId in range(self.simulation.book_count)},
+                                'books_weighted': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
+                                'total': None,
+                                'average': None,
+                                'median': None,
+                                'normalized_average': 0.0,
+                                'normalized_median': 0.0,
+                                'normalized_total': 0.0,
+                                'activity_weighted_normalized_median': 0.0,
+                                'penalty': 0.0,
+                                'score': 0.0,
+                            }
+                            for uid in range(self.effective_max_uids)
+                        }
+                        for uid, kappa_data in loaded_kappa.items():
+                            if uid < self.effective_max_uids and kappa_data is not None:
+                                kappa = kappa_data.copy()
                                 if 'books' in kappa:
                                     kappa['books'] = {
                                         book_id: val for book_id, val in kappa['books'].items()
@@ -2119,11 +2304,29 @@ if __name__ != "__mp_main__":
                                     }
                                     for book_id in range(len(kappa['books_weighted']), self.simulation.book_count):
                                         kappa['books_weighted'][book_id] = 0.0
+                                self.kappa_values[uid] = kappa
+                            elif uid >= self.effective_max_uids:
+                                bt.logging.debug(f"Skipping kappa_values for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
                     elif 'sharpe_values' in validator_state:
                         bt.logging.info("Converting sharpe_values to kappa_values format...")
-                        self.kappa_values = {}
+                        self.kappa_values = {
+                            uid: {
+                                'books': {bookId: None for bookId in range(self.simulation.book_count)},
+                                'books_weighted': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
+                                'total': None,
+                                'average': None,
+                                'median': None,
+                                'normalized_average': 0.0,
+                                'normalized_median': 0.0,
+                                'normalized_total': 0.0,
+                                'activity_weighted_normalized_median': 0.0,
+                                'penalty': 0.0,
+                                'score': 0.0,
+                            }
+                            for uid in range(self.effective_max_uids)
+                        }
                         for uid, sharpe_data in validator_state['sharpe_values'].items():
-                            if sharpe_data:
+                            if uid < self.effective_max_uids and sharpe_data:
                                 self.kappa_values[uid] = {
                                     'books': sharpe_data.get('books_realized', {bookId: None for bookId in range(self.simulation.book_count)}),
                                     'books_weighted': sharpe_data.get('books_weighted_realized', {bookId: 0.0 for bookId in range(self.simulation.book_count)}),
@@ -2137,45 +2340,93 @@ if __name__ != "__mp_main__":
                                     'penalty': sharpe_data.get('penalty_realized', 0.0),
                                     'score': sharpe_data.get('score_realized', 0.0),
                                 }
-                            else:
-                                self.kappa_values[uid] = None
+                            elif uid >= self.effective_max_uids:
+                                bt.logging.debug(f"Skipping sharpe_values conversion for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
                     else:
-                        self.kappa_values = {uid: None for uid in range(self.subnet_info.max_uids)}
-                    self.unnormalized_scores = validator_state["unnormalized_scores"]
+                        self.kappa_values = {
+                            uid: {
+                                'books': {bookId: None for bookId in range(self.simulation.book_count)},
+                                'books_weighted': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
+                                'total': None,
+                                'average': None,
+                                'median': None,
+                                'normalized_average': 0.0,
+                                'normalized_median': 0.0,
+                                'normalized_total': 0.0,
+                                'activity_weighted_normalized_median': 0.0,
+                                'penalty': 0.0,
+                                'score': 0.0,
+                            }
+                            for uid in range(self.effective_max_uids)
+                        }
+
+                    loaded_unnorm = validator_state.get("unnormalized_scores", {})
+                    self.unnormalized_scores = {uid: 0.0 for uid in range(self.effective_max_uids)}
+                    for uid, score in loaded_unnorm.items():
+                        if uid < self.effective_max_uids:
+                            self.unnormalized_scores[uid] = score
+                        else:
+                            bt.logging.debug(f"Skipping unnormalized_scores for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
 
                     bt.logging.info(f"Processing trade volumes...")
-                    self.trade_volumes = validator_state.get("trade_volumes", {
+                    loaded_trade_vols = validator_state.get("trade_volumes", {})
+                    self.trade_volumes = {
                         uid: {bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
                             for bookId in range(self.simulation.book_count)}
-                        for uid in range(self.subnet_info.max_uids)
-                    })
+                        for uid in range(self.effective_max_uids)
+                    }
+                    for uid, books in loaded_trade_vols.items():
+                        if uid < self.effective_max_uids:
+                            self.trade_volumes[uid] = books
+                        else:
+                            bt.logging.debug(f"Skipping trade_volumes for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
 
                     bt.logging.info(f"Processing trade volume histories...")
                     reorg = False
-                    for uid in self.trade_volumes:
+                    for uid in range(self.effective_max_uids):
+                        if uid not in self.trade_volumes:
+                            self.trade_volumes[uid] = {
+                                bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
+                                for bookId in range(self.simulation.book_count)
+                            }
+                            
                         for bookId in self.trade_volumes[uid]:
-                            if not 'total' in self.trade_volumes[uid][bookId]:
+                            if 'total' not in self.trade_volumes[uid][bookId]:
                                 if not reorg:
                                     bt.logging.info(f"Optimizing miner volume history structures...")
                                     reorg = True
-                                volumes = {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}}
+                                volumes = {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
                                 for time, role_volume in self.trade_volumes[uid][bookId].items():
                                     sampled_time = math.ceil(time / self.config.scoring.activity.trade_volume_sampling_interval) * self.config.scoring.activity.trade_volume_sampling_interval
                                     for role, volume in role_volume.items():
-                                        if not sampled_time in volumes[role]:
+                                        if sampled_time not in volumes[role]:
                                             volumes[role][sampled_time] = 0.0
                                         volumes[role][sampled_time] += volume
-                                self.trade_volumes[uid][bookId] = {role : {time : round(volumes[role][time], self.simulation.volumeDecimals) for time in volumes[role]} for role in volumes}
+                                self.trade_volumes[uid][bookId] = {
+                                    role: {time: round(volumes[role][time], self.simulation.volumeDecimals) for time in volumes[role]}
+                                    for role in volumes
+                                }
+                        
                         if len(self.trade_volumes[uid]) < self.simulation.book_count:
-                            for bookId in range(len(self.trade_volumes[uid]),self.simulation.book_count):
-                                self.trade_volumes[uid][bookId] = {'total' : {}, 'maker' : {}, 'taker' : {}, 'self' : {}}
+                            for bookId in range(len(self.trade_volumes[uid]), self.simulation.book_count):
+                                self.trade_volumes[uid][bookId] = {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
                         if len(self.trade_volumes[uid]) > self.simulation.book_count:
-                            self.trade_volumes[uid] = {k : v for k, v in self.trade_volumes[uid].items() if k < self.simulation.book_count}
+                            self.trade_volumes[uid] = {
+                                k: v for k, v in self.trade_volumes[uid].items()
+                                if k < self.simulation.book_count
+                            }
+                        
+                        if uid not in self.activity_factors:
+                            self.activity_factors[uid] = {bookId: 0.0 for bookId in range(self.simulation.book_count)}
+                            
                         if len(self.activity_factors[uid]) < self.simulation.book_count:
-                            for bookId in range(len(self.activity_factors[uid]),self.simulation.book_count):
+                            for bookId in range(len(self.activity_factors[uid]), self.simulation.book_count):
                                 self.activity_factors[uid][bookId] = 0.0
                         if len(self.activity_factors[uid]) > self.simulation.book_count:
-                            self.activity_factors[uid] = {k : v for k, v in self.activity_factors[uid].items() if k < self.simulation.book_count}
+                            self.activity_factors[uid] = {
+                                k: v for k, v in self.activity_factors[uid].items()
+                                if k < self.simulation.book_count
+                            }
 
                     def load_volume_sums(data, name, book_count):
                         """Load volume sums and prune books that exceed book_count."""
@@ -2194,7 +2445,7 @@ if __name__ != "__mp_main__":
                                 bt.logging.info(f"Converting {name} from old tuple-key format to nested dict...")
                                 for key, vol in volume_data.items():
                                     uid, book_id = key
-                                    if book_id < book_count:
+                                    if book_id < book_count and uid < self.effective_max_uids:
                                         result[uid][book_id] = vol
                                 bt.logging.debug(f"Converted {len(volume_data)} entries in {name}")
 
@@ -2204,12 +2455,15 @@ if __name__ != "__mp_main__":
                                 if isinstance(first_value, dict):
                                     bt.logging.debug(f"Loading {name} in nested dict format...")
                                     for uid, books in volume_data.items():
-                                        for book_id, vol in books.items():
-                                            if book_id < book_count:
-                                                result[uid][book_id] = vol
+                                        if uid < self.effective_max_uids:
+                                            for book_id, vol in books.items():
+                                                if book_id < book_count:
+                                                    result[uid][book_id] = vol
+                                        else:
+                                            bt.logging.debug(f"Skipping {name} for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
                                 else:
                                     bt.logging.warning(f"Unexpected format for {name}: single-level dict")
-                                    if 0 < book_count:
+                                    if 0 < book_count and first_key < self.effective_max_uids:
                                         result[first_key][0] = first_value
                             else:
                                 bt.logging.warning(f"Unknown format for {name}, initializing empty")
@@ -2227,23 +2481,29 @@ if __name__ != "__mp_main__":
                     self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
                     if "roundtrip_volumes" in validator_state:
                         for uid, books in validator_state["roundtrip_volumes"].items():
-                            for book_id, volumes in books.items():
-                                if book_id >= self.simulation.book_count:
-                                    continue
-                                for timestamp, volume in volumes.items():
-                                    self.roundtrip_volumes[uid][book_id][timestamp] = volume
+                            if uid < self.effective_max_uids:
+                                for book_id, volumes in books.items():
+                                    if book_id >= self.simulation.book_count:
+                                        continue
+                                    for timestamp, volume in volumes.items():
+                                        self.roundtrip_volumes[uid][book_id][timestamp] = volume
+                            else:
+                                bt.logging.debug(f"Skipping roundtrip_volumes for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
 
                     bt.logging.info(f"Processing realized PnL history...")
                     self.realized_pnl_history = defaultdict(lambda: defaultdict(dict))
                     if "realized_pnl_history" in validator_state:
                         for uid, hist in validator_state["realized_pnl_history"].items():
-                            for timestamp, books in hist.items():
-                                ts_pnl = {
-                                    book_id: round(pnl, self.simulation.volumeDecimals)
-                                    for book_id, pnl in books.items()
-                                    if book_id < self.simulation.book_count and round(pnl, self.simulation.volumeDecimals) != 0.0
-                                }
-                                self.realized_pnl_history[uid][timestamp] = ts_pnl
+                            if uid < self.effective_max_uids:
+                                for timestamp, books in hist.items():
+                                    ts_pnl = {
+                                        book_id: round(pnl, self.simulation.volumeDecimals)
+                                        for book_id, pnl in books.items()
+                                        if book_id < self.simulation.book_count and round(pnl, self.simulation.volumeDecimals) != 0.0
+                                    }
+                                    self.realized_pnl_history[uid][timestamp] = ts_pnl
+                            else:
+                                bt.logging.debug(f"Skipping realized_pnl_history for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
 
                     bt.logging.info(f"Processing open positions...")
                     self.open_positions = defaultdict(lambda: defaultdict(lambda: {
@@ -2253,25 +2513,28 @@ if __name__ != "__mp_main__":
                     if "open_positions" in validator_state:
                         legacy_count = 0
                         for uid, books in validator_state["open_positions"].items():
-                            for book_id, pos in books.items():
-                                if book_id >= self.simulation.book_count:
-                                    continue
-                                longs = []
-                                for p in pos['longs']:
-                                    if len(p) == 4:
-                                        longs.append(tuple(p))
-                                    elif len(p) == 3:
-                                        longs.append((*p, 0.0))
-                                        legacy_count += 1
-                                shorts = []
-                                for p in pos['shorts']:
-                                    if len(p) == 4:
-                                        shorts.append(tuple(p))
-                                    elif len(p) == 3:
-                                        shorts.append((*p, 0.0))
-                                        legacy_count += 1
-                                self.open_positions[uid][book_id]['longs'] = deque(longs)
-                                self.open_positions[uid][book_id]['shorts'] = deque(shorts)
+                            if uid < self.effective_max_uids:
+                                for book_id, pos in books.items():
+                                    if book_id >= self.simulation.book_count:
+                                        continue
+                                    longs = []
+                                    for p in pos['longs']:
+                                        if len(p) == 4:
+                                            longs.append(tuple(p))
+                                        elif len(p) == 3:
+                                            longs.append((*p, 0.0))
+                                            legacy_count += 1
+                                    shorts = []
+                                    for p in pos['shorts']:
+                                        if len(p) == 4:
+                                            shorts.append(tuple(p))
+                                        elif len(p) == 3:
+                                            shorts.append((*p, 0.0))
+                                            legacy_count += 1
+                                    self.open_positions[uid][book_id]['longs'] = deque(longs)
+                                    self.open_positions[uid][book_id]['shorts'] = deque(shorts)
+                            else:
+                                bt.logging.debug(f"Skipping open_positions for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
                         if legacy_count > 0:
                             bt.logging.info(f"Converted {legacy_count} legacy positions to new format")
 
@@ -2336,10 +2599,10 @@ if __name__ != "__mp_main__":
                         self.inventory_history[uid] = minimal_hist
                         downsampled_count += (old_size - 3)
                     bt.logging.info(
-                        f"Downsampled inventory_history: removed {downsampled_count} entries "
+                        f"Downsampled inventory_history: removed {downsampled_count} entries"
                     )
 
-                    bt.logging.success(f"Loaded validator state")
+                    bt.logging.success(f"Loaded validator state for {self.effective_max_uids} UIDs")
                 else:
                     bt.logging.warning("All validator state files corrupted, initializing fresh state")
                     validator_state = None
@@ -2352,31 +2615,32 @@ if __name__ != "__mp_main__":
                 else:
                     bt.logging.info(f"No valid validator state found, initializing new state")
 
-                    self.activity_factors = {
-                        uid: {bookId: 0.0 for bookId in range(self.simulation.book_count)}
-                        for uid in range(self.subnet_info.max_uids)
+                self.activity_factors = {
+                    uid: {bookId: 0.0 for bookId in range(self.simulation.book_count)}
+                    for uid in range(self.effective_max_uids)
+                }
+                self.inventory_history = {uid: {} for uid in range(self.effective_max_uids)}
+                self.kappa_values = {
+                    uid: {
+                        'books': {bookId: None for bookId in range(self.simulation.book_count)},
+                        'books_weighted': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
+                        'total': None,
+                        'average': None,
+                        'median': None,
+                        'normalized_average': 0.0,
+                        'normalized_median': 0.0,
+                        'normalized_total': 0.0,
+                        'activity_weighted_normalized_median': 0.0,
+                        'penalty': 0.0,
+                        'score': 0.0,
                     }
-                    self.inventory_history = {uid: {} for uid in range(self.subnet_info.max_uids)}
-                    self.kappa_values = {uid:
-                        {
-                            'books': {bookId: None for bookId in range(self.simulation.book_count)},
-                            'books_weighted': {bookId: 0.0 for bookId in range(self.simulation.book_count)},
-                            'total': None,
-                            'average': None,
-                            'median': None,
-                            'normalized_average': 0.0,
-                            'normalized_median': 0.0,
-                            'normalized_total': 0.0,
-                            'activity_weighted_normalized_median': 0.0,
-                            'penalty': 0.0,
-                            'score': 0.0,
-                        } for uid in range(self.subnet_info.max_uids)
-                    }
-                self.unnormalized_scores = {uid: 0.0 for uid in range(self.subnet_info.max_uids)}
+                    for uid in range(self.effective_max_uids)
+                }
+                self.unnormalized_scores = {uid: 0.0 for uid in range(self.effective_max_uids)}
                 self.trade_volumes = {
                     uid: {bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}}
                         for bookId in range(self.simulation.book_count)}
-                    for uid in range(self.subnet_info.max_uids)
+                    for uid in range(self.effective_max_uids)
                 }
                 self.volume_sums = defaultdict(lambda: defaultdict(float))
                 self.maker_volume_sums = defaultdict(lambda: defaultdict(float))
@@ -2476,7 +2740,88 @@ if __name__ != "__mp_main__":
                                 self.miner_stats[reset['a']] = {'requests': 0, 'timeouts': 0, 'failures': 0, 'rejections': 0, 'call_time': []}
                                 self.recent_miner_trades[reset['a']] = {bookId: [] for bookId in range(self.simulation.book_count)}
                         else:
-                            self.pagerduty_alert(f"Failed to Reset Agent {reset['a']} : {reset['m']}")
+                            self.pagerduty_alert(f"Failed to Reset Agent {reset['a']} : {reset['m']}")\
+                                
+        def resync_metagraph(self):
+            """
+            Resyncs the metagraph and updates the hotkeys and scores based on the new metagraph.
+            Extended to handle benchmark agents (UIDs >= subnet_info.max_uids).
+            """
+            bt.logging.trace("resync_metagraph()")
+            previous_metagraph = copy.deepcopy(self.metagraph)
+            bt.logging.debug("Syncing metagraph...")
+            self.metagraph.sync(subtensor=self.subtensor)
+            if previous_metagraph.axons == self.metagraph.axons and len(self.hotkeys) == len(self.metagraph.hotkeys):            
+                bt.logging.debug("No axon changes!")
+                return
+
+            bt.logging.info(
+                "Metagraph updated, re-syncing hotkeys, dendrite pool and moving averages"
+            )
+            for uid, hotkey in enumerate(self.hotkeys):
+                if uid < len(self.metagraph.hotkeys) and hotkey != self.metagraph.hotkeys[uid]:
+                    self.handle_deregistration(uid)
+
+            old_metagraph_size = len(self.hotkeys)
+            new_metagraph_size = len(self.metagraph.hotkeys)
+            
+            if old_metagraph_size != new_metagraph_size:
+                bt.logging.info(f"Metagraph size changed: {old_metagraph_size} -> {new_metagraph_size}")
+                old_effective_max_uids = self.effective_max_uids
+                self.benchmark_start_uid = new_metagraph_size
+                self.effective_max_uids = new_metagraph_size + len(self.benchmark_agents)
+                if old_effective_max_uids != self.effective_max_uids:
+                    bt.logging.info(
+                        f"Resizing scores tensor: {old_effective_max_uids} -> {self.effective_max_uids} "
+                        f"(network: {new_metagraph_size}, benchmarks: {len(self.benchmark_agents)})"
+                    )
+                    new_scores = torch.zeros(self.effective_max_uids, dtype=torch.float32, device=self.device)
+                    min_len = min(old_effective_max_uids, self.effective_max_uids)
+                    new_scores[:min_len] = self.scores[:min_len]
+                    
+                    self.scores = new_scores
+                    if self.benchmark_agents:
+                        bt.logging.info("Updating benchmark agent UIDs...")
+                        for idx, agent in enumerate(self.benchmark_agents):
+                            old_uid = agent['uid']
+                            new_uid = self.benchmark_start_uid + idx
+                            if old_uid != new_uid:
+                                bt.logging.info(f"Benchmark agent {agent['name']}: UID {old_uid} -> {new_uid}")
+                                agent['uid'] = new_uid
+                                for data_dict in [
+                                    self.miner_stats,
+                                    self.initial_balances,
+                                    self.activity_factors,
+                                    self.kappa_values,
+                                    self.unnormalized_scores,
+                                    self.inventory_history,
+                                    self.trade_volumes,
+                                    self.realized_pnl_history,
+                                    self.open_positions,
+                                ]:
+                                    if old_uid in data_dict and new_uid != old_uid:
+                                        data_dict[new_uid] = data_dict.pop(old_uid)
+                                for volume_dict in [
+                                    self.volume_sums,
+                                    self.maker_volume_sums,
+                                    self.taker_volume_sums,
+                                    self.self_volume_sums,
+                                    self.roundtrip_volume_sums,
+                                ]:
+                                    if old_uid in volume_dict:
+                                        volume_dict[new_uid] = volume_dict.pop(old_uid)
+                                if old_uid in self.roundtrip_volumes:
+                                    self.roundtrip_volumes[new_uid] = self.roundtrip_volumes.pop(old_uid)
+                                if old_uid < len(self.scores):
+                                    self.scores[new_uid] = self.scores[old_uid]
+                                    self.scores[old_uid] = 0.0
+
+            self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
+            bt.logging.success(
+                f"Metagraph resync complete: {len(self.hotkeys)} network hotkeys, "
+                f"{len(self.benchmark_agents)} benchmark agents, "
+                f"effective_max_uids={self.effective_max_uids}"
+            )
 
         async def _maintain(self) -> None:
             """
@@ -3051,8 +3396,7 @@ if __name__ != "__mp_main__":
             uids_to_round = set()
 
             uid_count = 0
-            for uid in self.metagraph.uids:
-                uid_item = uid.item()
+            for uid_item in range(self.effective_max_uids):
                 uid_count += 1
                 try:
                     # Initialize trade volumes structure if needed
@@ -3365,7 +3709,8 @@ if __name__ != "__mp_main__":
                         self.activity_factors = updated_data['activity_factors']
 
                         bt.logging.debug(f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n{rewards}")
-                        self.update_scores(rewards, self.metagraph.uids)
+                        all_uids = list(range(self.effective_max_uids))
+                        self.update_scores(rewards, all_uids)
                         bt.logging.info(f"Agent Scores Updated for {duration} ({time.time()-start:.4f}s)")
                         self._last_rewarded_sim_timestamp = timestamp
 

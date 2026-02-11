@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+from dataclasses import dataclass
 import os
 import msgpack
 import traceback
@@ -13,6 +14,74 @@ from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse, 
 from taos.im.protocol.events import *
 from taos.im.protocol.models import *
 from taos.im.utils import duration_from_timestamp, timestamp_from_duration
+
+@dataclass
+class RollingWindow:
+    """
+    Rolling window configuration for price sampling.
+    Attributes:
+        min (int): Minimum number of samples required before signals are considered reliable.
+        max (int): Maximum length of the rolling buffer (in samples).
+        samples (int): If max is not used or multi-scale approach
+        num_windows (int): Multi-scale approaches
+        sampling_interval (int): timestamps per sample (sec or nanosec)
+    
+    Parameter Tuning Guidelines:
+        - TODO
+    """
+    min: int
+    max: int
+    samples: int
+    num_windows: int
+    sampling_interval: int = 1
+
+@dataclass
+class Thresholds:
+    """
+    Threshold configuration for generating trading signals.
+
+    Attributes:
+        signal (float): 
+        tolerance (float): 
+        model (float): 
+
+    Parameter Tuning Guidelines:
+        - Increase signal_threshold to reduce trading frequency, focus on strong trends.
+        - Increase tolerance to reduce overtrading in noisy markets.
+        - Adjust model_threshold to filter out unreliable signals.
+    """
+    signal: float
+    tolerance: float
+    model: float
+
+@dataclass
+class TimestampedPrice:
+    """Container for midquote prices with timestamps."""
+    price: float
+    timestamp: int = 0
+
+@dataclass
+class Positions:
+    """Container for positions for different books"""
+    open: bool = False
+    direction: OrderDirection = OrderDirection.BUY
+    amount: int = 0
+    qty: float = 0
+    
+class Signals(IntEnum):
+    """
+    Enum to represent signals coming from the model
+
+    Attributes:
+        ENTRY (int): Open a new position
+        EXIT (int): Close current position 
+        HOLD (int): Hold or extend current position
+        NOISE (int): Ignore
+    """
+    ENTRY=0
+    EXIT=1
+    HOLD=3
+    NOISE=4
 
 # Base class for agents operating in intelligent market simulations
 class FinanceSimulationAgent(SimulationAgent):

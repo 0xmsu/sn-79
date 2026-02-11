@@ -177,18 +177,19 @@ class BaseValidatorNeuron(BaseNeuron):
         
         If burn_uid and burn_ratio are configured, automatically allocates a percentage of emissions to the burn address.
         """
+        network_scores = self.scores[:self.metagraph.n]
         # Check if self.scores contains any NaN values and log a warning if it does.
-        if torch.isnan(self.scores).any():
+        if torch.isnan(network_scores).any():
             bt.logging.warning(
                 f"Scores contain NaN values. This may be due to a lack of responses from miners, or a bug in the reward function."
             )
 
-        bt.logging.debug(f"Processing Scores: {self.scores}")
+        bt.logging.debug(f"Processing Scores: {network_scores}")
         # Calculate the average reward for each uid across non-zero values.
         # Replace any NaN values with 0.
-        weight_scores = self.scores
-        if min(self.scores) < 0:
-            weight_scores = self.scores - min(self.scores)
+        weight_scores = network_scores
+        if min(network_scores) < 0:
+            weight_scores = network_scores - min(network_scores)
         raw_weights = torch.nn.functional.normalize(weight_scores, p=1, dim=0)
 
         # Apply burn mechanism if configured
@@ -314,7 +315,6 @@ class BaseValidatorNeuron(BaseNeuron):
 
     def update_scores(self, rewards: torch.FloatTensor, uids: List[int]):
         """Performs exponential moving average on the scores based on the rewards received from the miners."""
-
         bt.logging.debug("Updating Scores...")
         # Check if rewards contains NaN values.
         if torch.isnan(rewards).any():

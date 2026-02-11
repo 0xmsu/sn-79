@@ -121,7 +121,7 @@ class QueryService:
                 os.write(self.notify_fd, b'R')
                 bt.logging.info("Query service sent ready signal")
             except Exception as e:
-                bt.logging.error(f"Query service failed to send ready signal: {e}")
+                bt.logging.error(f"Query service failed to send ready signal: {e}\n{traceback.format_exc()}")
         bt.logging.info("Query service initialized")
 
     def validate_responses(self, synapses: dict, request_data: dict, deregistered_uids: set) -> dict:
@@ -248,7 +248,7 @@ class QueryService:
                             valid_instructions.append(instruction)
                             
                     except Exception as ex:
-                        bt.logging.warning(f"Error processing instruction by agent {uid}: {ex}\n{instruction}")
+                        bt.logging.warning(f"Error processing instruction by agent {uid}: {ex}\n{instruction}\n{traceback.format_exc()}")
                 
                 if invalid_agent_id:
                     valid_instructions = []
@@ -408,7 +408,7 @@ class QueryService:
                     axon_synapses[uid].dendrite.status_code = 408
                     return uid, axon_synapses[uid]
                 except Exception as e:
-                    bt.logging.debug(f"Error querying UID {uid}: {e}")
+                    bt.logging.debug(f"Error querying UID {uid}: {e}\n{traceback.format_exc()}")
                     axon_synapses[uid] = self.dendrite.preprocess_synapse_for_request(
                         self.metagraph.axons[uid],
                         axon_synapses[uid],
@@ -447,7 +447,7 @@ class QueryService:
                     synapse_responses[uid] = response
                     completed_count += 1
                 except Exception as e:
-                    bt.logging.debug(f"Task failed: {e}")
+                    bt.logging.debug(f"Task failed: {e}\n{traceback.format_exc()}")
 
             if pending:
                 bt.logging.warning(f"Cancelling {len(pending)} pending tasks")
@@ -506,8 +506,7 @@ class QueryService:
             }
 
         except Exception as e:
-            bt.logging.error(f"Error in query_miners: {e}")
-            import traceback
+            bt.logging.error(f"Error in query_miners: {e}\n{traceback.format_exc()}")
             return {
                 'success': False,
                 'error': str(e),
@@ -586,7 +585,7 @@ class QueryService:
                             os.write(self.notify_fd, b'1')
                             bt.logging.info("Sent query completion notification")
                         except Exception as e:
-                            bt.logging.error(f"Failed to send notification: {e}")
+                            bt.logging.error(f"Failed to send notification: {e}\n{traceback.format_exc()}")
                     else:
                         bt.logging.error("Cannot send notification - notify_fd is None!")
                     
@@ -600,7 +599,7 @@ class QueryService:
             except posix_ipc.BusyError:
                 await asyncio.sleep(0.01)
             except Exception as e:
-                bt.logging.error(f"Error in main loop: {e}")
+                bt.logging.error(f"Error in main loop: {e}\n{traceback.format_exc()}")
                 import traceback
                 bt.logging.error(traceback.format_exc())
 
@@ -638,7 +637,7 @@ class QueryService:
                 self.response_queue.close()
                 self.response_queue.unlink()
         except Exception as e:
-            bt.logging.error(f"Error cleaning up IPC: {e}")
+            bt.logging.error(f"Error cleaning up IPC: {e}\n{traceback.format_exc()}")
 
 
 if __name__ == '__main__':
@@ -675,6 +674,6 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         bt.logging.info("Query service interrupted")
     except Exception as e:
-        bt.logging.error(f"Query service crashed: {e}")
+        bt.logging.error(f"Query service crashed: {e}\n{traceback.format_exc()}")
         import traceback
         bt.logging.error(traceback.format_exc())

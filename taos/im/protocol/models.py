@@ -63,6 +63,7 @@ class MarketSimulationConfig(BaseModel):
         simulation_id (str | None): Unique identifier for the simulation instance.
         logDir (str | None): Directory where simulation logs are saved.
 
+        remoteAgentCount (int | None): Number of remote agents in simulation
         block_count (int): Number of parallel "blocks" of simulation runs (related to parallelization implementation).
 
         time_unit (str): Unit of time used in the simulation (e.g., 'ns' for nanoseconds). Default is 'ns'.
@@ -188,7 +189,8 @@ class MarketSimulationConfig(BaseModel):
     """
     simulation_id : str | None = None
     logDir : str | None = None
-
+    
+    remoteAgentCount : int | None = None
     block_count : int
 
     time_unit : str = 'ns'
@@ -321,6 +323,7 @@ class MarketSimulationConfig(BaseModel):
         Futures_config = xml.find('Agents').find('FuturesTraderAgent')
         Futures_balances_config = Futures_config.find("Balances") if Futures_config.find("Balances") != None else balances_config
         return MarketSimulationConfig(
+            remoteAgentCount=int(MBE_config.attrib['remoteAgentCount']),
             block_count=int(xml.attrib['blockCount']),
 
             time_unit = str(xml.attrib['timescale']),

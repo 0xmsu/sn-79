@@ -38,6 +38,20 @@ def add_im_validator_args(cls, parser):
     )
     
     parser.add_argument(
+        '--benchmark.enabled',
+        type=bool,
+        default=False,
+        help='Enable benchmark agents'
+    )
+
+    parser.add_argument(
+        '--benchmark.agents',
+        type=str,
+        default='../config/benchmark_agents.json',
+        help='JSON file path with benchmark agent configurations'
+    )
+    
+    parser.add_argument(
         "--simulation.seeding.fundamental.symbol.coinbase",
         type=str,
         help="Coinbase spot market symbol price to be used to seed simulation price.",
@@ -119,6 +133,13 @@ def add_im_validator_args(cls, parser):
         type=int,
         help="Maximum number of instructions that can be submitted by miners for each book in a single response.",
         default=5,
+    )
+    
+    parser.add_argument(
+        "--scoring.max_inactive_books",
+        type=int,
+        help="Maximum number of books that can be neglected without affecting score.  This number of books will be excluded from the scoring calculation (selected as lowest performing).",
+        default=24,
     )
 
     parser.add_argument(

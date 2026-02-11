@@ -1,0 +1,11 @@
+{
+  "agents": [
+    {
+      "uid": 256,
+      "name": "benchmark_0",
+      "ip": "13.59.11.82",
+      "port": 8200,
+      "hotkey": "5ECK3B8TenJ5eYc5CFLxhYotwn4eRL7ZtNxeKTHrnCZh9HEH"
+    }
+  ]
+}

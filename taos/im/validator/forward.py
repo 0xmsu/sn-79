@@ -134,6 +134,7 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
         bt.logging.debug(f"Session configured ({time.time() - session_start:.4f}s)")
 
         data_start = time.time()
+        extended_metagraph = self.get_extended_metagraph()
         request_data = {
             'books': synapse.books,
             'accounts': synapse.accounts,
@@ -150,7 +151,7 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
                     'ip_type': axon.ip_type,
                     'protocol': axon.protocol,
                 }
-                for axon in self.metagraph.axons
+                for axon in extended_metagraph.axons
             ],
             'deregistered_uids': list(self.deregistered_uids),
             'uid': self.uid,
@@ -304,6 +305,7 @@ async def notify(self : Validator, notices : List[FinanceEventNotification]) -> 
 
     Uses the validator's dendrite to dispatch each event to the miner responsible
     for the associated agent, or to all miners if the event is broadcast.
+    Handles both network UIDs and benchmark agent UIDs.
 
     Args:
         self (Validator): The intelligent markets simulation validator.
@@ -313,8 +315,21 @@ async def notify(self : Validator, notices : List[FinanceEventNotification]) -> 
         None
     """
     responses = []
+    extended_metagraph = self.get_extended_metagraph()
+    
     for notice in notices:
-        axons = [self.metagraph.axons[notice.event.agentId]] if notice.event.agentId else self.metagraph.axons
+        if notice.event.agentId is not None:
+            agent_id = notice.event.agentId
+            if agent_id < len(extended_metagraph.axons):
+                axons = [extended_metagraph.axons[agent_id]]
+            else:
+                bt.logging.error(
+                    f"Invalid agentId {agent_id} in notice (max: {len(extended_metagraph.axons)-1}), "
+                    f"broadcasting to all agents instead"
+                )
+                axons = extended_metagraph.axons
+        else:
+            axons = extended_metagraph.axons
         responses.extend(await self.dendrite(
             axons=axons,
             synapse=notice,

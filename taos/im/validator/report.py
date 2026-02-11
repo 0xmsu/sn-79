@@ -164,7 +164,8 @@ class ReportingService:
             'wallet', 'netuid', 'timestamp', 'timestamp_str', 'agent_id',
             'placement', 'base_balance', 'base_loan', 'base_collateral', 'quote_balance', 'quote_loan', 'quote_collateral',
             'inventory_value', 'inventory_value_change', 'pnl', 'pnl_change', 'total_realized_pnl',
-            'total_daily_volume', 'min_daily_volume', 'total_roundtrip_volume', 'min_roundtrip_volume',
+            'total_daily_volume', 'min_daily_volume', 'average_daily_volume',
+            'total_roundtrip_volume', 'min_roundtrip_volume', 'average_roundtrip_volume',
             'activity_factor',
             'kappa', 'kappa_penalty', 'kappa_score',
             'unnormalized_score', 'score',
@@ -870,7 +871,7 @@ async def report(self: ReportingService) -> None:
         for agentId, accounts in self.last_state.accounts.items():
             initial_balance_publish_status = {bookId: False for bookId in range(self.simulation.book_count)}
             for bookId, account in accounts.items():
-                if self.initial_balances[agentId][bookId]['BASE'] is not None and not self.initial_balances_published[agentId]:
+                if agentId in self.initial_balances and self.initial_balances[agentId][bookId]['BASE'] is not None and not self.initial_balances_published[agentId]:
                     updates.append((agent_gauges, self.initial_balances[agentId][bookId]['BASE'],
                         wallet_addr, netuid, bookId, agentId, "base_balance_initial"))
                     updates.append((agent_gauges, self.initial_balances[agentId][bookId]['QUOTE'],
@@ -1066,8 +1067,10 @@ async def report(self: ReportingService) -> None:
                 total_realized_pnl=m['total_realized_pnl'],
                 total_daily_volume=m['total_daily_volume']['total'],
                 min_daily_volume=m['min_daily_volume']['total'],
+                average_daily_volume=m['average_daily_volume']['total'],
                 total_roundtrip_volume=m['total_roundtrip_volume'],
                 min_roundtrip_volume=m['min_roundtrip_volume'], 
+                average_roundtrip_volume=m['average_roundtrip_volume'],
                 activity_factor=m['activity_factor'],
                 kappa=m['kappa'],
                 kappa_penalty=m['kappa_penalty'],

@@ -143,6 +143,13 @@ def add_im_validator_args(cls, parser):
     )
 
     parser.add_argument(
+        "--scoring.kappa.weight",
+        type=int,
+        help="Weight applied to Kappa evaluation in final score calculation",
+        default=1.0,
+    )
+
+    parser.add_argument(
         "--scoring.kappa.parallel_workers",
         type=int,
         help="Number of parallel workers to use in Kappa-3 calculation. (0 => no parallelization, -1 => auto [half available cores])",
@@ -189,6 +196,41 @@ def add_im_validator_args(cls, parser):
         type=float,
         help="Kappa-3 values are normalized to fall within a range so as to produce non-negative value and facilitate scoring calculations. This is the maximum value in the normalization range.",
         default=10.0,
+    )
+    
+    parser.add_argument(
+        "--scoring.kappa.pnl.impact",
+        type=float,
+        help="Multiplied onto normalized Kappa-3 values to modify the impact of realized PnL in scoring calculations.",
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--scoring.pnl.weight",
+        type=int,
+        help="Weight applied to Realized PnL evaluation in final score calculation",
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--scoring.pnl.normalization.method",
+        type=str,
+        help="Method for normalizing P&L: 'daily_return'",
+        default="daily_return",
+    )
+
+    parser.add_argument(
+        "--scoring.pnl.normalization.min_daily_return",
+        type=float,
+        help="Floor for daily return ratio.",
+        default=-1.0,
+    )
+
+    parser.add_argument(
+        "--scoring.pnl.normalization.max_daily_return",
+        type=float,
+        help="Cap for daily return ratio.",
+        default=1.0,
     )
     
     parser.add_argument(

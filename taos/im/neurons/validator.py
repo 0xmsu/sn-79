@@ -667,7 +667,7 @@ if __name__ != "__mp_main__":
             self.realized_pnl_history = defaultdict(lambda: defaultdict(dict))
             self.roundtrip_volumes = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
             self.roundtrip_volume_sums = defaultdict(lambda: defaultdict(float))
-            self.kappa_cache = {}            
+            self.kappa_cache = {}
             self.pending_notices = {uid: [] for uid in range(self.effective_max_uids)}
 
             self.load_simulation_config()
@@ -737,6 +737,11 @@ if __name__ != "__mp_main__":
                     uid: {bookId: 0.0 for bookId in range(book_count)}
                     for uid in range(self.effective_max_uids)
                 }
+            if not hasattr(self, 'pnl_factors') or len(self.pnl_factors) < self.effective_max_uids:
+                self.pnl_factors = {
+                    uid: {bookId: 1.0 for bookId in range(book_count)}
+                    for uid in range(self.effective_max_uids)
+                }
             if not hasattr(self, 'kappa_values') or len(self.kappa_values) < self.effective_max_uids:
                 self.kappa_values = {
                     uid: {
@@ -794,17 +799,46 @@ if __name__ != "__mp_main__":
             if not self.benchmark_agents:
                 return self.metagraph
 
-            extended_uids = list(range(self.effective_max_uids))
-            extended_hotkeys = list(self.metagraph.hotkeys) + [agent['hotkey'] for agent in self.benchmark_agents]
-            extended_axons = list(self.metagraph.axons) + [agent['axon'] for agent in self.benchmark_agents]
+            extended_axons = [None] * self.effective_max_uids
+            extended_hotkeys = [None] * self.effective_max_uids
 
+            for uid, axon in enumerate(self.metagraph.axons):
+                extended_axons[uid] = axon
+                extended_hotkeys[uid] = self.metagraph.hotkeys[uid]
+
+            for i, agent in enumerate(self.benchmark_agents):
+                uid = self.benchmark_start_uid + i
+                extended_axons[uid] = agent['axon']
+                extended_hotkeys[uid] = agent['hotkey']
+
+            placeholder_axon = bt.AxonInfo(
+                version=self.metagraph.axons[0].version if self.metagraph.axons else 0,
+                hotkey="",
+                coldkey="",
+                ip="0.0.0.0",
+                port=0,
+                ip_type=4,
+                protocol=4,
+                placeholder1=0,
+                placeholder2=0,
+            )
+            
+            for uid in range(self.effective_max_uids):
+                if extended_axons[uid] is None:
+                    extended_axons[uid] = placeholder_axon
+                    extended_hotkeys[uid] = placeholder_axon.hotkey
+            
             class ExtendedMetagraph:
                 def __init__(self, uids, hotkeys, axons):
                     self.uids = torch.tensor(uids)
                     self.hotkeys = hotkeys
                     self.axons = axons
             
-            return ExtendedMetagraph(extended_uids, extended_hotkeys, extended_axons)
+            return ExtendedMetagraph(
+                list(range(self.effective_max_uids)),
+                extended_hotkeys,
+                extended_axons
+            )
 
         def __enter__(self):
             """
@@ -1428,7 +1462,7 @@ if __name__ != "__mp_main__":
                 
             Returns:
                 dict: Complete validator state containing step, simulation_timestamp, hotkeys,
-                    scores, activity_factors, and all snapshot data.
+                    scores, activity_factors, pnl_factors, and all snapshot data.
             """
             return {
                 "step": self.step,
@@ -1436,6 +1470,7 @@ if __name__ != "__mp_main__":
                 "hotkeys": self.hotkeys,
                 "scores": [score.item() for score in self.scores],
                 "activity_factors": self.activity_factors,
+                "pnl_factors": self.pnl_factors,
                 "inventory_history": inventory_snapshot,
                 "kappa_values": self.kappa_values,
                 "realized_pnl_history": realized_pnl_snapshot,
@@ -2247,6 +2282,23 @@ if __name__ != "__mp_main__":
                             self.activity_factors[uid] = books
                         else:
                             bt.logging.debug(f"Skipping activity_factors for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
+                    
+                    loaded_pnl = validator_state.get("pnl_factors", {})
+                    if loaded_pnl and isinstance(list(loaded_pnl.values())[0], float):
+                        loaded_pnl = {
+                            uid: {bookId: loaded_pnl[uid] for bookId in range(self.simulation.book_count)}
+                            for uid in loaded_pnl
+                        }
+
+                    self.pnl_factors = {
+                        uid: {bookId: 1.0 for bookId in range(self.simulation.book_count)}
+                        for uid in range(self.effective_max_uids)
+                    }
+                    for uid, books in loaded_pnl.items():
+                        if uid < self.effective_max_uids:
+                            self.pnl_factors[uid] = books
+                        else:
+                            bt.logging.debug(f"Skipping pnl_factors for UID {uid} (exceeds effective_max_uids={self.effective_max_uids})")
 
                     loaded_inventory = validator_state.get("inventory_history", {})
                     self.inventory_history = {uid: {} for uid in range(self.effective_max_uids)}
@@ -2425,6 +2477,18 @@ if __name__ != "__mp_main__":
                         if len(self.activity_factors[uid]) > self.simulation.book_count:
                             self.activity_factors[uid] = {
                                 k: v for k, v in self.activity_factors[uid].items()
+                                if k < self.simulation.book_count
+                            }
+
+                        if uid not in self.pnl_factors:
+                            self.pnl_factors[uid] = {bookId: 1.0 for bookId in range(self.simulation.book_count)}
+                        
+                        if len(self.pnl_factors[uid]) < self.simulation.book_count:
+                            for bookId in range(len(self.pnl_factors[uid]), self.simulation.book_count):
+                                self.pnl_factors[uid][bookId] = 1.0
+                        if len(self.pnl_factors[uid]) > self.simulation.book_count:
+                            self.pnl_factors[uid] = {
+                                k: v for k, v in self.pnl_factors[uid].items()
                                 if k < self.simulation.book_count
                             }
 
@@ -2619,6 +2683,10 @@ if __name__ != "__mp_main__":
                     uid: {bookId: 0.0 for bookId in range(self.simulation.book_count)}
                     for uid in range(self.effective_max_uids)
                 }
+                self.pnl_factors = {
+                    uid: {bookId: 1.0 for bookId in range(self.simulation.book_count)}
+                    for uid in range(self.effective_max_uids)
+                }
                 self.inventory_history = {uid: {} for uid in range(self.effective_max_uids)}
                 self.kappa_values = {
                     uid: {
@@ -2716,6 +2784,7 @@ if __name__ != "__mp_main__":
                                 }
                                 self.unnormalized_scores[reset['a']] = 0.0
                                 self.activity_factors[reset['a']] = {bookId: 0.0 for bookId in range(self.simulation.book_count)}
+                                self.pnl_factors[reset['a']] = {bookId: 1.0 for bookId in range(self.simulation.book_count)}
                                 self.inventory_history[reset['a']] = {}
                                 self.trade_volumes[reset['a']] = {bookId: {'total': {}, 'maker': {}, 'taker': {}, 'self': {}} for bookId in range(self.simulation.book_count)}
 
@@ -2792,6 +2861,7 @@ if __name__ != "__mp_main__":
                                     self.miner_stats,
                                     self.initial_balances,
                                     self.activity_factors,
+                                    self.pnl_factors,
                                     self.kappa_values,
                                     self.unnormalized_scores,
                                     self.inventory_history,
@@ -3038,6 +3108,7 @@ if __name__ != "__mp_main__":
                 'realized_pnl_by_book': realized_pnl_by_book,
                 'book_count': book_count,
                 'activity_factors': self.activity_factors,
+                'pnl_factors': self.pnl_factors,
                 'kappa_values': self.kappa_values,
                 'unnormalized_scores': self.unnormalized_scores,
                 'scores': {i: score.item() for i, score in enumerate(self.scores)},
@@ -3707,6 +3778,7 @@ if __name__ != "__mp_main__":
 
                         self.kappa_values = updated_data['kappa_values']
                         self.activity_factors = updated_data['activity_factors']
+                        self.pnl_factors = updated_data['pnl_factors']
 
                         bt.logging.debug(f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n{rewards}")
                         all_uids = list(range(self.effective_max_uids))

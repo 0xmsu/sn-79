@@ -139,39 +139,39 @@ class ReportingService:
             'trades': self.registry_trades,
         }
 
-        self.prometheus_counters = Counter('counters', 'Counter summaries for the running validator.', ['wallet', 'netuid', 'timestamp', 'counter_name'], registry=self.registry_validator)
-        self.prometheus_simulation_gauges = Gauge('simulation_gauges', 'Gauge summaries for global simulation metrics.', ['wallet', 'netuid', 'simulation_gauge_name'], registry=self.registry_simulation)
-        self.prometheus_validator_gauges = Gauge('validator_gauges', 'Gauge summaries for validator-related metrics.', ['wallet', 'netuid', 'validator_gauge_name'], registry=self.registry_validator)
-        self.prometheus_miner_gauges = Gauge('miner_gauges', 'Gauge summaries for miner-related metrics.', ['wallet', 'netuid', 'agent_id', 'miner_gauge_name'], registry=self.registry_miner)
-        self.prometheus_book_gauges = Gauge('book_gauges', 'Gauge summaries for book-related metrics.', ['wallet', 'netuid', 'book_id', 'level', 'book_gauge_name'], registry=self.registry_books)
-        self.prometheus_agent_gauges = Gauge('agent_gauges', 'Gauge summaries for agent-related metrics.', ['wallet', 'netuid', 'book_id', 'agent_id', 'agent_gauge_name'], registry=self.registry_agent)
+        self.prometheus_counters = Counter('counters', 'Counter summaries for the running validator.', ['wallet', 'netuid', 'sim_id', 'timestamp', 'counter_name'], registry=self.registry_validator)
+        self.prometheus_simulation_gauges = Gauge('simulation_gauges', 'Gauge summaries for global simulation metrics.', ['wallet', 'netuid', 'sim_id', 'simulation_gauge_name'], registry=self.registry_simulation)
+        self.prometheus_validator_gauges = Gauge('validator_gauges', 'Gauge summaries for validator-related metrics.', ['wallet', 'netuid', 'sim_id', 'validator_gauge_name'], registry=self.registry_validator)
+        self.prometheus_miner_gauges = Gauge('miner_gauges', 'Gauge summaries for miner-related metrics.', ['wallet', 'netuid', 'sim_id', 'agent_id', 'miner_gauge_name'], registry=self.registry_miner)
+        self.prometheus_book_gauges = Gauge('book_gauges', 'Gauge summaries for book-related metrics.', ['wallet', 'netuid', 'sim_id', 'book_id', 'level', 'book_gauge_name'], registry=self.registry_books)
+        self.prometheus_agent_gauges = Gauge('agent_gauges', 'Gauge summaries for agent-related metrics.', ['wallet', 'netuid', 'sim_id', 'book_id', 'agent_id', 'agent_gauge_name'], registry=self.registry_agent)
         self.prometheus_trades = Gauge('trades', 'Gauge summaries for trade metrics.', [
-            'wallet', 'netuid', 'timestamp', 'timestamp_str', 'book_id', 'agent_id', 'trade_id',
+            'wallet', 'netuid', 'sim_id', 'timestamp', 'timestamp_str', 'book_id', 'agent_id', 'trade_id',
             'aggressing_order_id', 'aggressing_agent_id', 'resting_order_id', 'resting_agent_id',
             'maker_fee', 'taker_fee',
             'price', 'volume', 'side', 'trade_gauge_name'], registry=self.registry_trades)
         self.prometheus_miner_trades = Gauge('miner_trades', 'Gauge summaries for agent trade metrics.', [
-            'wallet', 'netuid', 'timestamp', 'timestamp_str', 'book_id', 'uid',
+            'wallet', 'netuid', 'sim_id', 'timestamp', 'timestamp_str', 'book_id', 'uid',
             'role', 'price', 'volume', 'side', 'fee',
             'miner_trade_gauge_name'], registry=self.registry_trades)
         self.prometheus_books = Gauge('books', 'Gauge summaries for book snapshot metrics.', [
-            'wallet', 'netuid', 'timestamp', 'timestamp_str', 'book_id',
+            'wallet', 'netuid', 'sim_id', 'timestamp', 'timestamp_str', 'book_id',
             'bid_5', 'bid_vol_5', 'bid_4', 'bid_vol_4', 'bid_3', 'bid_vol_3', 'bid_2', 'bid_vol_2', 'bid_1', 'bid_vol_1',
             'ask_5', 'ask_vol_5', 'ask_4', 'ask_vol_4', 'ask_3', 'ask_vol_3', 'ask_2', 'ask_vol_2', 'ask_1', 'ask_vol_1',
             'book_gauge_name'
         ], registry=self.registry_books)
         self.prometheus_miners = Gauge('miners', 'Gauge summaries for miner metrics.', [
-            'wallet', 'netuid', 'timestamp', 'timestamp_str', 'agent_id',
+            'wallet', 'netuid', 'sim_id', 'timestamp', 'timestamp_str', 'agent_id',
             'placement', 'base_balance', 'base_loan', 'base_collateral', 'quote_balance', 'quote_loan', 'quote_collateral',
             'inventory_value', 'inventory_value_change', 'pnl', 'pnl_change', 'total_realized_pnl',
             'total_daily_volume', 'min_daily_volume', 'average_daily_volume',
             'total_roundtrip_volume', 'min_roundtrip_volume', 'average_roundtrip_volume',
-            'activity_factor',
+            'activity_factor', 'pnl_factor',
             'kappa', 'kappa_penalty', 'kappa_score',
             'unnormalized_score', 'score',
             'miner_gauge_name'
         ], registry=self.registry_miner)
-        self.prometheus_info = Info('neuron_info', "Info summaries for the running validator.", ['wallet', 'netuid'], registry=self.registry_validator)
+        self.prometheus_info = Info('neuron_info', "Info summaries for the running validator.", ['wallet', 'netuid', 'sim_id'], registry=self.registry_validator)
         self._start_metrics_server()
         self.prometheus_initialized = True
     
@@ -302,7 +302,7 @@ class ReportingService:
             for uid, books in data['realized_pnl_by_book'].items()
         }
 
-        for key in ['activity_factors', 'kappa_values', 
+        for key in ['activity_factors', 'pnl_factors', 'kappa_values', 
                     'unnormalized_scores', 'scores', 'miner_stats', 'initial_balances', 
                     'initial_balances_published', 'simulation_timestamp', 'step', 
                     'step_rates', 'fundamental_price', 'shared_state_rewarding', 
@@ -357,21 +357,21 @@ def publish_validator_gauges(self: ReportingService):
     """
     bt.logging.debug(f"Publishing validator metrics...")
     start = time.time()
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="uid").set( self.uid )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="stake").set( self.metagraph.stake[self.uid] )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="validator_trust").set( self.metagraph.validator_trust[self.uid] )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="dividends").set( self.metagraph.dividends[self.uid] )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="emission").set( self.metagraph.emission[self.uid] )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="last_update").set( self.current_block - self.metagraph.last_update[self.uid] )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="active").set( self.metagraph.active[self.uid] )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="uid").set( self.uid )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="stake").set( self.metagraph.stake[self.uid] )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="validator_trust").set( self.metagraph.validator_trust[self.uid] )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="dividends").set( self.metagraph.dividends[self.uid] )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="emission").set( self.metagraph.emission[self.uid] )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="last_update").set( self.current_block - self.metagraph.last_update[self.uid] )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="active").set( self.metagraph.active[self.uid] )
     cpu_usage = psutil.cpu_percent()
     memory_info = psutil.virtual_memory()
     memory_usage = memory_info.percent
     disk_info = psutil.disk_usage('/')
     disk_usage = disk_info.percent
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="cpu_usage_percent").set( cpu_usage )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="ram_usage_percent").set( memory_usage )
-    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, validator_gauge_name="disk_usage_percent").set( disk_usage )    
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="cpu_usage_percent").set( cpu_usage )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="ram_usage_percent").set( memory_usage )
+    self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="disk_usage_percent").set( disk_usage )    
     bt.logging.debug(f"Validator metrics published ({time.time()-start:.4f}s).")
 
 def publish_info(self: ReportingService) -> None:
@@ -396,7 +396,7 @@ def publish_info(self: ReportingService) -> None:
     } | {
          f"simulation_{name}" : str(value) for name, value in self.simulation.model_dump().items() if name != 'logDir' and name != 'fee_policy'
     } | self.simulation.fee_policy.to_prom_info()
-    self.prometheus_info.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid ).info (prometheus_info)
+    self.prometheus_info.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id ).info (prometheus_info)
     publish_validator_gauges(self)
 
 def _set_if_changed(gauge, value, *labels):
@@ -580,7 +580,10 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
                 sum(validator_data['activity_factors'][agentId].values()) /
                 len(validator_data['activity_factors'][agentId])
             )
-
+            pnl_factor = (
+                sum(validator_data['pnl_factors'][agentId].values()) /
+                len(validator_data['pnl_factors'][agentId])
+            )
             kappa_values = validator_data['kappa_values'][agentId] if agentId in validator_data['kappa_values'] else None
 
             miner_metrics[agentId] = {
@@ -608,6 +611,7 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
                 'average_roundtrip_volume': average_roundtrip_volume,
                 'min_roundtrip_volume': min_roundtrip_volume,
                 'activity_factor': activity_factor,
+                'pnl_factor': pnl_factor,
                 'kappa': kappa_values['median'] if kappa_values else None,
                 'kappa_penalty': kappa_values.get('penalty') if kappa_values else None,
                 'activity_weighted_normalized_median': kappa_values.get('activity_weighted_normalized_median') if kappa_values else None,
@@ -658,12 +662,14 @@ async def report(self: ReportingService) -> None:
         miner_gauges = self.prometheus_miner_gauges
         wallet_addr = self.wallet.hotkey.ss58_address
         netuid = self.config.netuid
+        simid = self.simulation.simulation_id
 
         updates.append((
             self.prometheus_simulation_gauges,
             self.simulation_timestamp,
             wallet_addr,
             netuid,
+            simid,
             "timestamp"
         ))
 
@@ -672,6 +678,7 @@ async def report(self: ReportingService) -> None:
             sum(self.step_rates) / len(self.step_rates) if len(self.step_rates) > 0 else 0,
             wallet_addr,
             netuid,
+            simid,
             "step_rate"
         ))
         bt.logging.debug(f"Simulation metrics collected ({time.time()-start:.4f}s).")
@@ -688,28 +695,28 @@ async def report(self: ReportingService) -> None:
                 bid_cumsum = 0
                 for i, level in enumerate(book['b']):
                     updates.append((book_gauges, level['p'],
-                        wallet_addr, netuid, bookId, i, "bid"))
+                        wallet_addr, netuid, simid, bookId, i, "bid"))
                     updates.append((book_gauges, level['q'],
-                        wallet_addr, netuid, bookId, i, "bid_vol"))
+                        wallet_addr, netuid, simid, bookId, i, "bid_vol"))
                     bid_cumsum += level['q']
                     updates.append((book_gauges, bid_cumsum,
-                        wallet_addr, netuid, bookId, i, "bid_vol_sum"))
+                        wallet_addr, netuid, simid, bookId, i, "bid_vol_sum"))
                     if i == 20: break
             if book['a']:
                 ask_cumsum = 0
                 for i, level in enumerate(book['a']):
                     updates.append((book_gauges, level['p'],
-                        wallet_addr, netuid, bookId, i, "ask"))
+                        wallet_addr, netuid, simid, bookId, i, "ask"))
                     updates.append((book_gauges, level['q'],
-                        wallet_addr, netuid, bookId, i, "ask_vol"))
+                        wallet_addr, netuid, simid, bookId, i, "ask_vol"))
                     ask_cumsum += level['q']
                     updates.append((book_gauges, ask_cumsum,
-                        wallet_addr, netuid, bookId, i, "ask_vol_sum"))
+                        wallet_addr, netuid, simid, bookId, i, "ask_vol_sum"))
                     if i == 20: break
             if book['b'] and book['a']:
                 mid = (book['b'][0]['p'] + book['a'][0]['p']) / 2
                 updates.append((book_gauges, mid,
-                    wallet_addr, netuid, bookId, 0, "mid"))
+                    wallet_addr, netuid, simid, bookId, 0, "mid"))
 
                 def get_price(side, idx):
                     if side == 'bid':
@@ -724,7 +731,7 @@ async def report(self: ReportingService) -> None:
                         return book['a'][idx]['q'] if len(book['a']) > idx else 0
 
                 updates.append((self.prometheus_books, 1.0,
-                    wallet_addr, netuid, self.simulation_timestamp, simulation_duration, bookId,
+                    wallet_addr, netuid, simid, self.simulation_timestamp, simulation_duration, bookId,
                     get_price('bid',4), get_vol('bid',4), get_price('bid',3), get_vol('bid',3), get_price('bid',2), get_vol('bid',2),
                     get_price('bid',1), get_vol('bid',1), get_price('bid',0), get_vol('bid',0),
                     get_price('ask',4), get_vol('ask',4), get_price('ask',3), get_vol('ask',3), get_price('ask',2), get_vol('ask',2),
@@ -738,26 +745,26 @@ async def report(self: ReportingService) -> None:
                     if isinstance(self.fundamental_price[0], pd.Series):
                         updates.append((book_gauges,
                             self.fundamental_price[bookId].iloc[-1],
-                            wallet_addr, netuid, bookId, 0, "fundamental_price"))
+                            wallet_addr, netuid, simid, bookId, 0, "fundamental_price"))
                     else:
                         if self.fundamental_price[bookId]:
                             updates.append((book_gauges,
                                 self.fundamental_price[bookId],
-                                wallet_addr, netuid, bookId, 0, "fundamental_price"))
+                                wallet_addr, netuid, simid, bookId, 0, "fundamental_price"))
                         else:
                             try:
-                                book_gauges.remove(wallet_addr, netuid, bookId, 0, "fundamental_price")
+                                book_gauges.remove(wallet_addr, netuid, simid, bookId, 0, "fundamental_price")
                             except KeyError:
                                 pass
 
                     updates.append((book_gauges, last_trade['p'],
-                        wallet_addr, netuid, bookId, 0, "trade_price"))
+                        wallet_addr, netuid, simid, bookId, 0, "trade_price"))
                     updates.append((book_gauges, sum([trade['q'] for trade in trades]),
-                        wallet_addr, netuid, bookId, 0, "trade_volume"))
+                        wallet_addr, netuid, simid, bookId, 0, "trade_volume"))
                     updates.append((book_gauges, sum([trade['q'] for trade in trades if trade['s'] == 0]),
-                        wallet_addr, netuid, bookId, 0, "trade_buy_volume"))
+                        wallet_addr, netuid, simid, bookId, 0, "trade_buy_volume"))
                     updates.append((book_gauges, sum([trade['q'] for trade in trades if trade['s'] == 1]),
-                        wallet_addr, netuid, bookId, 0, "trade_sell_volume"))
+                        wallet_addr, netuid, simid, bookId, 0, "trade_sell_volume"))
 
                     has_new_trades = True
             if self.simulation.fee_policy.fee_type == 'dynamic':
@@ -765,11 +772,11 @@ async def report(self: ReportingService) -> None:
                 DISmakerRate = self.last_state.accounts[0][bookId]['f']['m']
                 DIStakerRate = self.last_state.accounts[0][bookId]['f']['t']
                 updates.append((book_gauges, DISmakerRate,
-                        wallet_addr, netuid, bookId, 0, "dynamic_maker_rate"))
+                        wallet_addr, netuid, simid, bookId, 0, "dynamic_maker_rate"))
                 updates.append((book_gauges, DIStakerRate,
-                        wallet_addr, netuid, bookId, 0, "dynamic_taker_rate"))
+                        wallet_addr, netuid, simid, bookId, 0, "dynamic_taker_rate"))
                 updates.append((book_gauges, DISMTR,
-                        wallet_addr, netuid, bookId, 0, "maker_taker_ratio"))
+                        wallet_addr, netuid, simid, bookId, 0, "maker_taker_ratio"))
         bt.logging.debug(f"Book metrics collected ({time.time()-book_start:.4f}s).")
 
         if has_new_trades:
@@ -778,7 +785,7 @@ async def report(self: ReportingService) -> None:
             for bookId, trades in self.recent_trades.items():
                 for trade in trades:
                     updates.append((self.prometheus_trades, 1.0,
-                        wallet_addr, netuid, trade.timestamp, duration_from_timestamp(trade.timestamp),
+                        wallet_addr, netuid, simid, trade.timestamp, duration_from_timestamp(trade.timestamp),
                         bookId, trade.taker_agent_id, trade.id, trade.taker_id, trade.taker_agent_id, trade.maker_id, trade.maker_agent_id,
                         trade.maker_fee, trade.taker_fee, trade.price, trade.quantity, trade.side, "trades"))
 
@@ -812,6 +819,7 @@ async def report(self: ReportingService) -> None:
             'total_realized_pnl': self.total_realized_pnl,
             'realized_pnl_by_book': self.realized_pnl_by_book,
             'activity_factors': self.activity_factors,
+            'pnl_factors': self.pnl_factors,
             'kappa_values': self.kappa_values,
             'unnormalized_scores': self.unnormalized_scores,
             'scores': self.scores,
@@ -873,11 +881,11 @@ async def report(self: ReportingService) -> None:
             for bookId, account in accounts.items():
                 if agentId in self.initial_balances and self.initial_balances[agentId][bookId]['BASE'] is not None and not self.initial_balances_published[agentId]:
                     updates.append((agent_gauges, self.initial_balances[agentId][bookId]['BASE'],
-                        wallet_addr, netuid, bookId, agentId, "base_balance_initial"))
+                        wallet_addr, netuid, simid, bookId, agentId, "base_balance_initial"))
                     updates.append((agent_gauges, self.initial_balances[agentId][bookId]['QUOTE'],
-                        wallet_addr, netuid, bookId, agentId, "quote_balance_initial"))
+                        wallet_addr, netuid, simid, bookId, agentId, "quote_balance_initial"))
                     updates.append((agent_gauges, self.initial_balances[agentId][bookId]['WEALTH'],
-                        wallet_addr, netuid, bookId, agentId, "wealth_initial"))
+                        wallet_addr, netuid, simid, bookId, agentId, "wealth_initial"))
                     initial_balance_publish_status[bookId] = True
             if all(initial_balance_publish_status.values()):
                 self.initial_balances_published[agentId] = True
@@ -890,51 +898,52 @@ async def report(self: ReportingService) -> None:
             kappas = kappa_data[agentId]
 
             for bookId, account in accounts.items():
-                updates.append((agent_gauges, account['bb']['t'], wallet_addr, netuid, bookId, agentId, "base_balance_total"))
-                updates.append((agent_gauges, account['bb']['f'], wallet_addr, netuid, bookId, agentId, "base_balance_free"))
-                updates.append((agent_gauges, account['bb']['r'], wallet_addr, netuid, bookId, agentId, "base_balance_reserved"))
-                updates.append((agent_gauges, account['qb']['t'], wallet_addr, netuid, bookId, agentId, "quote_balance_total"))
-                updates.append((agent_gauges, account['qb']['f'], wallet_addr, netuid, bookId, agentId, "quote_balance_free"))
-                updates.append((agent_gauges, account['qb']['r'], wallet_addr, netuid, bookId, agentId, "quote_balance_reserved"))
-                updates.append((agent_gauges, account['bl'], wallet_addr, netuid, bookId, agentId, "base_loan"))
-                updates.append((agent_gauges, account['bc'], wallet_addr, netuid, bookId, agentId, "base_collateral"))
-                updates.append((agent_gauges, account['ql'], wallet_addr, netuid, bookId, agentId, "quote_loan"))
-                updates.append((agent_gauges, account['qc'], wallet_addr, netuid, bookId, agentId, "quote_collateral"))
+                updates.append((agent_gauges, account['bb']['t'], wallet_addr, netuid, simid, bookId, agentId, "base_balance_total"))
+                updates.append((agent_gauges, account['bb']['f'], wallet_addr, netuid, simid, bookId, agentId, "base_balance_free"))
+                updates.append((agent_gauges, account['bb']['r'], wallet_addr, netuid, simid, bookId, agentId, "base_balance_reserved"))
+                updates.append((agent_gauges, account['qb']['t'], wallet_addr, netuid, simid, bookId, agentId, "quote_balance_total"))
+                updates.append((agent_gauges, account['qb']['f'], wallet_addr, netuid, simid, bookId, agentId, "quote_balance_free"))
+                updates.append((agent_gauges, account['qb']['r'], wallet_addr, netuid, simid, bookId, agentId, "quote_balance_reserved"))
+                updates.append((agent_gauges, account['bl'], wallet_addr, netuid, simid, bookId, agentId, "base_loan"))
+                updates.append((agent_gauges, account['bc'], wallet_addr, netuid, simid, bookId, agentId, "base_collateral"))
+                updates.append((agent_gauges, account['ql'], wallet_addr, netuid, simid, bookId, agentId, "quote_loan"))
+                updates.append((agent_gauges, account['qc'], wallet_addr, netuid, simid, bookId, agentId, "quote_collateral"))
                 if account['f']['v']:
-                    updates.append((agent_gauges, account['f']['v'], wallet_addr, netuid, bookId, agentId, "fees_traded_volume"))
-                updates.append((agent_gauges, account['f']['m'], wallet_addr, netuid, bookId, agentId, "fees_maker_rate"))
-                updates.append((agent_gauges, account['f']['t'], wallet_addr, netuid, bookId, agentId, "fees_taker_rate"))
-                updates.append((agent_gauges, last_inv[bookId], wallet_addr, netuid, bookId, agentId, "inventory_value"))
-                updates.append((agent_gauges, last_inv[bookId] - start_inv[bookId], wallet_addr, netuid, bookId, agentId, "pnl"))
+                    updates.append((agent_gauges, account['f']['v'], wallet_addr, netuid, simid, bookId, agentId, "fees_traded_volume"))
+                updates.append((agent_gauges, account['f']['m'], wallet_addr, netuid, simid, bookId, agentId, "fees_maker_rate"))
+                updates.append((agent_gauges, account['f']['t'], wallet_addr, netuid, simid, bookId, agentId, "fees_taker_rate"))
+                updates.append((agent_gauges, last_inv[bookId], wallet_addr, netuid, simid, bookId, agentId, "inventory_value"))
+                updates.append((agent_gauges, last_inv[bookId] - start_inv[bookId], wallet_addr, netuid, simid, bookId, agentId, "pnl"))
                 if agentId in self.realized_pnl_by_book:
                     book_realized_pnl = self.realized_pnl_by_book[agentId].get(bookId, 0.0)
-                    updates.append((agent_gauges, book_realized_pnl, wallet_addr, netuid, bookId, agentId, "realized_pnl"))
+                    updates.append((agent_gauges, book_realized_pnl, wallet_addr, netuid, simid, bookId, agentId, "realized_pnl"))
                 else:
-                    updates.append((agent_gauges, 0.0, wallet_addr, netuid, bookId, agentId, "realized_pnl"))
-                updates.append((agent_gauges, daily_volumes[agentId][bookId]['total'], wallet_addr, netuid, bookId, agentId, "daily_volume"))
-                updates.append((agent_gauges, daily_volumes[agentId][bookId]['maker'], wallet_addr, netuid, bookId, agentId, "daily_maker_volume"))
-                updates.append((agent_gauges, daily_volumes[agentId][bookId]['taker'], wallet_addr, netuid, bookId, agentId, "daily_taker_volume"))
-                updates.append((agent_gauges, daily_volumes[agentId][bookId]['self'], wallet_addr, netuid, bookId, agentId, "daily_self_volume"))
-                updates.append((agent_gauges, daily_roundtrip_volumes[agentId][bookId], wallet_addr, netuid, bookId, agentId, "daily_roundtrip_volume"))
-                updates.append((agent_gauges, self.activity_factors[agentId][bookId], wallet_addr, netuid, bookId, agentId, "activity_factor"))
+                    updates.append((agent_gauges, 0.0, wallet_addr, netuid, simid, bookId, agentId, "realized_pnl"))
+                updates.append((agent_gauges, daily_volumes[agentId][bookId]['total'], wallet_addr, netuid, simid, bookId, agentId, "daily_volume"))
+                updates.append((agent_gauges, daily_volumes[agentId][bookId]['maker'], wallet_addr, netuid, simid, bookId, agentId, "daily_maker_volume"))
+                updates.append((agent_gauges, daily_volumes[agentId][bookId]['taker'], wallet_addr, netuid, simid, bookId, agentId, "daily_taker_volume"))
+                updates.append((agent_gauges, daily_volumes[agentId][bookId]['self'], wallet_addr, netuid, simid, bookId, agentId, "daily_self_volume"))
+                updates.append((agent_gauges, daily_roundtrip_volumes[agentId][bookId], wallet_addr, netuid, simid, bookId, agentId, "daily_roundtrip_volume"))
+                updates.append((agent_gauges, self.activity_factors[agentId][bookId], wallet_addr, netuid, simid, bookId, agentId, "activity_factor"))
+                updates.append((agent_gauges, self.pnl_factors[agentId][bookId], wallet_addr, netuid, simid, bookId, agentId, "pnl_factor"))
                 if kappas:
                     if kappas['books'][bookId] is not None:
-                        updates.append((agent_gauges, kappas['books'][bookId], wallet_addr, netuid, bookId, agentId, "kappa"))
+                        updates.append((agent_gauges, kappas['books'][bookId], wallet_addr, netuid, simid, bookId, agentId, "kappa"))
                     else:
                         try:
-                            agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "kappa")
+                            agent_gauges.remove(wallet_addr, netuid, simid, bookId, agentId, "kappa")
                         except KeyError:
                             pass
                     if 'books_weighted' in kappas and kappas['books_weighted'][bookId] is not None:
-                        updates.append((agent_gauges, kappas['books_weighted'][bookId], wallet_addr, netuid, bookId, agentId, "weighted_kappa"))
+                        updates.append((agent_gauges, kappas['books_weighted'][bookId], wallet_addr, netuid, simid, bookId, agentId, "weighted_kappa"))
                     else:
                         try:
-                            agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "weighted_kappa")
+                            agent_gauges.remove(wallet_addr, netuid, simid, bookId, agentId, "weighted_kappa")
                         except KeyError:
                             pass
                 else:
                     try:
-                        agent_gauges.remove(wallet_addr, netuid, bookId, agentId, "kappa")
+                        agent_gauges.remove(wallet_addr, netuid, simid, bookId, agentId, "kappa")
                     except KeyError:
                         pass       
         bt.logging.debug(f"Agent book metrics collected ({time.time()-start:.4f}s).")
@@ -958,7 +967,7 @@ async def report(self: ReportingService) -> None:
                         last_taker_trade = None
                         for miner_trade, role in self.recent_miner_trades[uid][bookId]:
                             updates.append((self.prometheus_miner_trades, 1.0,
-                                wallet_addr, netuid,
+                                wallet_addr, netuid, simid,
                                 miner_trade.timestamp, duration_from_timestamp(miner_trade.timestamp),
                                 miner_trade.bookId, uid, role,
                                 miner_trade.price, miner_trade.quantity,
@@ -971,9 +980,9 @@ async def report(self: ReportingService) -> None:
                             if role == 'taker':
                                 last_taker_trade = miner_trade
                         if last_maker_trade:
-                            updates.append((agent_gauges, last_maker_trade.makerFeeRate, wallet_addr, netuid, bookId, uid, "fees_last_maker_rate"))
+                            updates.append((agent_gauges, last_maker_trade.makerFeeRate, wallet_addr, netuid, simid, bookId, uid, "fees_last_maker_rate"))
                         if last_taker_trade:
-                            updates.append((agent_gauges, last_taker_trade.takerFeeRate, wallet_addr, netuid, bookId, uid, "fees_last_taker_rate"))
+                            updates.append((agent_gauges, last_taker_trade.takerFeeRate, wallet_addr, netuid, simid, bookId, uid, "fees_last_taker_rate"))
         bt.logging.debug(f"Miner trade metrics collected ({time.time()-start:.4f}s).")
 
         bt.logging.debug(f"Collecting miner metrics...")
@@ -982,67 +991,68 @@ async def report(self: ReportingService) -> None:
         for agentId in miner_metrics:
             m = miner_metrics[agentId]
 
-            updates.append((miner_gauges, m['total_base_balance'], wallet_addr, netuid, agentId, "total_base_balance"))
-            updates.append((miner_gauges, m['total_base_loan'], wallet_addr, netuid, agentId, "total_base_loan"))
-            updates.append((miner_gauges, m['total_base_collateral'], wallet_addr, netuid, agentId, "total_base_collateral"))
-            updates.append((miner_gauges, m['total_quote_balance'], wallet_addr, netuid, agentId, "total_quote_balance"))
-            updates.append((miner_gauges, m['total_quote_loan'], wallet_addr, netuid, agentId, "total_quote_loan"))
-            updates.append((miner_gauges, m['total_quote_collateral'], wallet_addr, netuid, agentId, "total_quote_collateral"))
-            updates.append((miner_gauges, m['total_inventory_value'], wallet_addr, netuid, agentId, "total_inventory_value"))
-            updates.append((miner_gauges, m['pnl'], wallet_addr, netuid, agentId, "pnl"))
-            updates.append((miner_gauges, m['total_realized_pnl'], wallet_addr, netuid, agentId, "total_realized_pnl"))
+            updates.append((miner_gauges, m['total_base_balance'], wallet_addr, netuid, simid, agentId, "total_base_balance"))
+            updates.append((miner_gauges, m['total_base_loan'], wallet_addr, netuid, simid, agentId, "total_base_loan"))
+            updates.append((miner_gauges, m['total_base_collateral'], wallet_addr, netuid, simid, agentId, "total_base_collateral"))
+            updates.append((miner_gauges, m['total_quote_balance'], wallet_addr, netuid, simid, agentId, "total_quote_balance"))
+            updates.append((miner_gauges, m['total_quote_loan'], wallet_addr, netuid, simid, agentId, "total_quote_loan"))
+            updates.append((miner_gauges, m['total_quote_collateral'], wallet_addr, netuid, simid, agentId, "total_quote_collateral"))
+            updates.append((miner_gauges, m['total_inventory_value'], wallet_addr, netuid, simid, agentId, "total_inventory_value"))
+            updates.append((miner_gauges, m['pnl'], wallet_addr, netuid, simid, agentId, "pnl"))
+            updates.append((miner_gauges, m['total_realized_pnl'], wallet_addr, netuid, simid, agentId, "total_realized_pnl"))
 
-            updates.append((miner_gauges, m['total_daily_volume']['total'], wallet_addr, netuid, agentId, "total_daily_volume"))
-            updates.append((miner_gauges, m['total_daily_volume']['maker'], wallet_addr, netuid, agentId, "total_daily_maker_volume"))
-            updates.append((miner_gauges, m['total_daily_volume']['taker'], wallet_addr, netuid, agentId, "total_daily_taker_volume"))
-            updates.append((miner_gauges, m['total_daily_volume']['self'], wallet_addr, netuid, agentId, "total_daily_self_volume"))
+            updates.append((miner_gauges, m['total_daily_volume']['total'], wallet_addr, netuid, simid, agentId, "total_daily_volume"))
+            updates.append((miner_gauges, m['total_daily_volume']['maker'], wallet_addr, netuid, simid, agentId, "total_daily_maker_volume"))
+            updates.append((miner_gauges, m['total_daily_volume']['taker'], wallet_addr, netuid, simid, agentId, "total_daily_taker_volume"))
+            updates.append((miner_gauges, m['total_daily_volume']['self'], wallet_addr, netuid, simid, agentId, "total_daily_self_volume"))
 
-            updates.append((miner_gauges, m['average_daily_volume']['total'], wallet_addr, netuid, agentId, "average_daily_volume"))
-            updates.append((miner_gauges, m['average_daily_volume']['maker'], wallet_addr, netuid, agentId, "average_daily_maker_volume"))
-            updates.append((miner_gauges, m['average_daily_volume']['taker'], wallet_addr, netuid, agentId, "average_daily_taker_volume"))
-            updates.append((miner_gauges, m['average_daily_volume']['self'], wallet_addr, netuid, agentId, "average_daily_self_volume"))
+            updates.append((miner_gauges, m['average_daily_volume']['total'], wallet_addr, netuid, simid, agentId, "average_daily_volume"))
+            updates.append((miner_gauges, m['average_daily_volume']['maker'], wallet_addr, netuid, simid, agentId, "average_daily_maker_volume"))
+            updates.append((miner_gauges, m['average_daily_volume']['taker'], wallet_addr, netuid, simid, agentId, "average_daily_taker_volume"))
+            updates.append((miner_gauges, m['average_daily_volume']['self'], wallet_addr, netuid, simid, agentId, "average_daily_self_volume"))
 
-            updates.append((miner_gauges, m['min_daily_volume']['total'], wallet_addr, netuid, agentId, "min_daily_volume"))
-            updates.append((miner_gauges, m['min_daily_volume']['maker'], wallet_addr, netuid, agentId, "min_daily_maker_volume"))
-            updates.append((miner_gauges, m['min_daily_volume']['taker'], wallet_addr, netuid, agentId, "min_daily_taker_volume"))
-            updates.append((miner_gauges, m['min_daily_volume']['self'], wallet_addr, netuid, agentId, "min_daily_self_volume"))
+            updates.append((miner_gauges, m['min_daily_volume']['total'], wallet_addr, netuid, simid, agentId, "min_daily_volume"))
+            updates.append((miner_gauges, m['min_daily_volume']['maker'], wallet_addr, netuid, simid, agentId, "min_daily_maker_volume"))
+            updates.append((miner_gauges, m['min_daily_volume']['taker'], wallet_addr, netuid, simid, agentId, "min_daily_taker_volume"))
+            updates.append((miner_gauges, m['min_daily_volume']['self'], wallet_addr, netuid, simid, agentId, "min_daily_self_volume"))
             
-            updates.append((miner_gauges, m['total_roundtrip_volume'], wallet_addr, netuid, agentId, "total_roundtrip_volume"))
-            updates.append((miner_gauges, m['average_roundtrip_volume'], wallet_addr, netuid, agentId, "average_roundtrip_volume"))
-            updates.append((miner_gauges, m['min_roundtrip_volume'], wallet_addr, netuid, agentId, "min_roundtrip_volume"))
+            updates.append((miner_gauges, m['total_roundtrip_volume'], wallet_addr, netuid, simid, agentId, "total_roundtrip_volume"))
+            updates.append((miner_gauges, m['average_roundtrip_volume'], wallet_addr, netuid, simid, agentId, "average_roundtrip_volume"))
+            updates.append((miner_gauges, m['min_roundtrip_volume'], wallet_addr, netuid, simid, agentId, "min_roundtrip_volume"))
 
-            updates.append((miner_gauges, m['activity_factor'], wallet_addr, netuid, agentId, "activity_factor"))
+            updates.append((miner_gauges, m['activity_factor'], wallet_addr, netuid, simid, agentId, "activity_factor"))
+            updates.append((miner_gauges, m['pnl_factor'], wallet_addr, netuid, simid, agentId, "pnl_factor"))
 
             if m['kappa'] is not None:
-                updates.append((miner_gauges, m['kappa'], wallet_addr, netuid, agentId, "kappa"))
+                updates.append((miner_gauges, m['kappa'], wallet_addr, netuid, simid, agentId, "kappa"))
                 if m['activity_weighted_normalized_median'] is not None:
-                    updates.append((miner_gauges, m['activity_weighted_normalized_median'], wallet_addr, netuid, agentId, "activity_weighted_normalized_median_kappa"))
+                    updates.append((miner_gauges, m['activity_weighted_normalized_median'], wallet_addr, netuid, simid, agentId, "activity_weighted_normalized_median_kappa"))
                 if m['kappa_penalty'] is not None:
-                    updates.append((miner_gauges, m['kappa_penalty'], wallet_addr, netuid, agentId, "kappa_penalty"))
+                    updates.append((miner_gauges, m['kappa_penalty'], wallet_addr, netuid, simid, agentId, "kappa_penalty"))
                 if m['kappa_score'] is not None:
-                    updates.append((miner_gauges, m['kappa_score'], wallet_addr, netuid, agentId, "kappa_score"))
+                    updates.append((miner_gauges, m['kappa_score'], wallet_addr, netuid, simid, agentId, "kappa_score"))
             else:
                 try:
-                    miner_gauges.remove(wallet_addr, netuid, agentId, "kappa")
+                    miner_gauges.remove(wallet_addr, netuid, simid, agentId, "kappa")
                 except KeyError:
                     pass
 
-            updates.append((miner_gauges, m['unnormalized_score'], wallet_addr, netuid, agentId, "unnormalized_score"))
-            updates.append((miner_gauges, m['score'], wallet_addr, netuid, agentId, "score"))
-            updates.append((miner_gauges, m['placement'], wallet_addr, netuid, agentId, "placement"))
+            updates.append((miner_gauges, m['unnormalized_score'], wallet_addr, netuid, simid, agentId, "unnormalized_score"))
+            updates.append((miner_gauges, m['score'], wallet_addr, netuid, simid, agentId, "score"))
+            updates.append((miner_gauges, m['placement'], wallet_addr, netuid, simid, agentId, "placement"))
 
-            updates.append((miner_gauges, (self.metagraph.trust[agentId] if len(self.metagraph.trust) > agentId else 0.0), wallet_addr, netuid, agentId, "trust"))
-            updates.append((miner_gauges, (self.metagraph.consensus[agentId] if len(self.metagraph.consensus) > agentId else 0.0), wallet_addr, netuid, agentId, "consensus"))
-            updates.append((miner_gauges, (self.metagraph.incentive[agentId] if len(self.metagraph.incentive) > agentId else 0.0), wallet_addr, netuid, agentId, "incentive"))
-            updates.append((miner_gauges, (self.metagraph.emission[agentId] if len(self.metagraph.emission) > agentId else 0.0), wallet_addr, netuid, agentId, "emission"))
+            updates.append((miner_gauges, (self.metagraph.trust[agentId] if len(self.metagraph.trust) > agentId else 0.0), wallet_addr, netuid, simid, agentId, "trust"))
+            updates.append((miner_gauges, (self.metagraph.consensus[agentId] if len(self.metagraph.consensus) > agentId else 0.0), wallet_addr, netuid, simid, agentId, "consensus"))
+            updates.append((miner_gauges, (self.metagraph.incentive[agentId] if len(self.metagraph.incentive) > agentId else 0.0), wallet_addr, netuid, simid, agentId, "incentive"))
+            updates.append((miner_gauges, (self.metagraph.emission[agentId] if len(self.metagraph.emission) > agentId else 0.0), wallet_addr, netuid, simid, agentId, "emission"))
 
             if self.miner_stats[agentId]['requests'] >= 100:
-                updates.append((miner_gauges, self.miner_stats[agentId]['requests'], wallet_addr, netuid, agentId, "requests"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['requests'] - self.miner_stats[agentId]['failures'] - self.miner_stats[agentId]['timeouts'] - self.miner_stats[agentId]['rejections'], wallet_addr, netuid, agentId, "success"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['failures'], wallet_addr, netuid, agentId, "failures"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['timeouts'], wallet_addr, netuid, agentId, "timeouts"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['rejections'], wallet_addr, netuid, agentId, "rejections"))
-                updates.append((miner_gauges, (sum(self.miner_stats[agentId]['call_time']) / len(self.miner_stats[agentId]['call_time']) if len(self.miner_stats[agentId]['call_time']) > 0 else 0), wallet_addr, netuid, agentId, "call_time"))
+                updates.append((miner_gauges, self.miner_stats[agentId]['requests'], wallet_addr, netuid, simid, agentId, "requests"))
+                updates.append((miner_gauges, self.miner_stats[agentId]['requests'] - self.miner_stats[agentId]['failures'] - self.miner_stats[agentId]['timeouts'] - self.miner_stats[agentId]['rejections'], wallet_addr, netuid, simid, agentId, "success"))
+                updates.append((miner_gauges, self.miner_stats[agentId]['failures'], wallet_addr, netuid, simid, agentId, "failures"))
+                updates.append((miner_gauges, self.miner_stats[agentId]['timeouts'], wallet_addr, netuid, simid, agentId, "timeouts"))
+                updates.append((miner_gauges, self.miner_stats[agentId]['rejections'], wallet_addr, netuid, simid, agentId, "rejections"))
+                updates.append((miner_gauges, (sum(self.miner_stats[agentId]['call_time']) / len(self.miner_stats[agentId]['call_time']) if len(self.miner_stats[agentId]['call_time']) > 0 else 0), wallet_addr, netuid, simid, agentId, "call_time"))
                 self.miner_stats[agentId] = {'requests': 0, 'timeouts': 0, 'failures': 0, 'rejections': 0, 'call_time': []}
 
             _set_if_changed_metric(
@@ -1050,6 +1060,7 @@ async def report(self: ReportingService) -> None:
                 1.0,
                 wallet=wallet_addr,
                 netuid=netuid,
+                sim_id=simid,
                 agent_id=agentId,
                 timestamp=self.simulation_timestamp,
                 timestamp_str=duration_from_timestamp(self.simulation_timestamp),
@@ -1072,6 +1083,7 @@ async def report(self: ReportingService) -> None:
                 min_roundtrip_volume=m['min_roundtrip_volume'], 
                 average_roundtrip_volume=m['average_roundtrip_volume'],
                 activity_factor=m['activity_factor'],
+                pnl_factor=m['pnl_factor'],
                 kappa=m['kappa'],
                 kappa_penalty=m['kappa_penalty'],
                 kappa_score=m['kappa_score'],

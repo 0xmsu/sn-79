@@ -77,11 +77,17 @@ class Signals(IntEnum):
         EXIT (int): Close current position 
         HOLD (int): Hold or extend current position
         NOISE (int): Ignore
+        -- Simplified
+        BULLISH (int): Rising
+        BEARISH (int): Falling
     """
     ENTRY=0
     EXIT=1
     HOLD=3
     NOISE=4
+    BULLISH=5
+    BEARISH=6
+
 
 # Base class for agents operating in intelligent market simulations
 class FinanceSimulationAgent(SimulationAgent):
@@ -426,7 +432,7 @@ class FinanceSimulationAgent(SimulationAgent):
                                 f"FOR {event.quantity}@{event.price} AT {duration_from_timestamp(event.timestamp)} (T={event.timestamp})"
                             debug_text += f"{trade_text}" + "\n"
                             update_text += f"BOOK {book_id} : {trade_text}" + "\n"
-                            self.onTrade(event)
+                            self.onTrade(event,state.dendrite.hotkey)
                             self.log_trade_event(event, state)
                         case _:
                             bt.logging.warning(f"Unknown event : {event}")
@@ -561,13 +567,13 @@ class FinanceSimulationAgent(SimulationAgent):
         """
         pass
 
-    def onTrade(self, event : TradeEvent) -> None:
+    def onTrade(self, event : TradeEvent, validator: str = None) -> None:
         """
         Handler for event where an order is traded in the simulator.  To be implemented by subclasses.
 
         Args:
             event (taos.im.protocol.events.TradeEvent): The event class representing a trade.
-
+            validator: Validator identifier (optional)
         Returns:
             None
         """

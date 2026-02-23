@@ -579,8 +579,27 @@ if __name__ != "__mp_main__":
                 Exception: If the simulation config XML file is missing.
             """
             super(Validator, self).__init__(config=config)
-            # Load the simulator config XML file data in order to make context and parameters accessible for reporting and output location.
+            
+            # Validate scoring weights sum to 1.0
+            scoring_weights = {
+                'kappa': self.config.scoring.kappa.weight,
+                'pnl': self.config.scoring.pnl.weight,
+            }
 
+            total_weight = sum(scoring_weights.values())
+            tolerance = 1e-6  # Allow for floating point precision
+
+            if abs(total_weight - 1.0) > tolerance:
+                error_msg = (
+                    f"Scoring weights must sum to 1.0, got {total_weight:.6f}. "
+                    f"Current weights: {scoring_weights}"
+                )
+                bt.logging.error(error_msg)
+                raise ValueError(error_msg)
+
+            bt.logging.info(f"Scoring weights validated: {scoring_weights} (sum={total_weight:.6f})")
+
+            # Load the simulator config XML file data in order to make context and parameters accessible for reporting and output location.
             if not os.path.exists(self.config.simulation.xml_config):
                 raise Exception(f"Simulator config does not exist at {self.config.simulation.xml_config}!")
             self.simulator_config_file = os.path.realpath(Path(self.config.simulation.xml_config))
@@ -3130,12 +3149,17 @@ if __name__ != "__mp_main__":
                         'max_delay': self.config.scoring.max_delay,
                         'min_instruction_delay': self.config.scoring.min_instruction_delay,
                         'max_instruction_delay': self.config.scoring.max_instruction_delay,
+                        'kappa_weight': self.config.scoring.kappa.weight,
                         'kappa_lookback': self.config.scoring.kappa.lookback,
                         'kappa_min_lookback': self.config.scoring.kappa.min_lookback,
                         'kappa_tau': self.config.scoring.kappa.tau,
                         'kappa_min_realized_observations': self.config.scoring.kappa.min_realized_observations,
                         'kappa_normalization_min': self.config.scoring.kappa.normalization_min,
                         'kappa_normalization_max': self.config.scoring.kappa.normalization_max,
+                        'kappa_pnl_impact': self.config.scoring.kappa.pnl.impact,
+                        'pnl_weight': self.config.scoring.pnl.weight,
+                        'pnl_normalization_min_daily_return': self.config.scoring.pnl.min_daily_return,
+                        'pnl_normalization_max_daily_return': self.config.scoring.pnl.max_daily_return,
                         'activity_impact': self.config.scoring.activity.impact,
                         'activity_trade_volume_sampling_interval': self.config.scoring.activity.trade_volume_sampling_interval,
                         'activity_trade_volume_assessment_period': self.config.scoring.activity.trade_volume_assessment_period,

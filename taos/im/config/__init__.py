@@ -137,9 +137,9 @@ def add_im_validator_args(cls, parser):
     
     parser.add_argument(
         "--scoring.max_inactive_books",
-        type=int,
-        help="Maximum number of books that can be neglected without affecting score.  This number of books will be excluded from the scoring calculation (selected as lowest performing).",
-        default=24,
+        type=float,
+        help="Maximum ratio of books that can be neglected without affecting score.  This number of books will be excluded from the scoring calculation (selected as lowest performing).",
+        default=0.375,
     )
 
     parser.add_argument(

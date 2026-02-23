@@ -39,6 +39,7 @@ class ReportingService:
         )
         self.running = True
         self.prometheus_initialized = False
+        self.current_sim_id = None
         
         self.request_queue = posix_ipc.MessageQueue(
             "/validator-report-req",
@@ -168,12 +169,40 @@ class ReportingService:
             'total_roundtrip_volume', 'min_roundtrip_volume', 'average_roundtrip_volume',
             'activity_factor', 'pnl_factor',
             'kappa', 'kappa_penalty', 'kappa_score',
+            'pnl_score', 'combined_score',
             'unnormalized_score', 'score',
             'miner_gauge_name'
         ], registry=self.registry_miner)
         self.prometheus_info = Info('neuron_info', "Info summaries for the running validator.", ['wallet', 'netuid', 'sim_id'], registry=self.registry_validator)
         self._start_metrics_server()
         self.prometheus_initialized = True
+        
+    def clear_all_metrics(self):
+        """
+        Clear all Prometheus metrics across all registries.
+        
+        This is called when a new simulation starts to prevent stale metrics
+        from the previous simulation from persisting in graphs.
+        """
+        bt.logging.info(f"Clearing all metrics for simulation changeover...")
+        start = time.time()
+        
+        try:
+            # Clear all gauge metrics
+            self.prometheus_simulation_gauges.clear()
+            self.prometheus_validator_gauges.clear()
+            self.prometheus_miner_gauges.clear()
+            self.prometheus_book_gauges.clear()
+            self.prometheus_agent_gauges.clear()
+            self.prometheus_trades.clear()
+            self.prometheus_miner_trades.clear()
+            self.prometheus_books.clear()
+            self.prometheus_miners.clear()
+            self.prometheus_info.clear()            
+            bt.logging.success(f"All metrics cleared ({time.time()-start:.4f}s)")
+        except Exception as e:
+            bt.logging.error(f"Error clearing metrics: {e}")
+            bt.logging.error(traceback.format_exc())
     
     async def run(self):        
         bt.logging.info("Reporting service started")
@@ -263,7 +292,26 @@ class ReportingService:
         
         self.cleanup()
     
-    async def publish_metrics(self, data):        
+    async def publish_metrics(self, data):
+        new_sim_id = data['simulation']['simulation_id']
+        
+        if self.current_sim_id is None:
+            # First run after startup - clear any stale metrics from previous validator instance
+            bt.logging.info(
+                f"First metrics publish after startup (sim_id={new_sim_id}). "
+                f"Clearing all metrics to ensure clean slate..."
+            )
+            self.clear_all_metrics()
+        elif new_sim_id != self.current_sim_id:
+            # Simulation ID changed during runtime
+            bt.logging.warning(
+                f"Simulation ID changed: {self.current_sim_id} → {new_sim_id}. "
+                f"Clearing all metrics..."
+            )
+            self.clear_all_metrics()
+        
+        self.current_sim_id = new_sim_id
+        
         def deserialize_to_nested_dict(d):
             """Convert flat string keys back to nested dict."""
             result = defaultdict(lambda: defaultdict(float))
@@ -616,6 +664,8 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
                 'kappa_penalty': kappa_values.get('penalty') if kappa_values else None,
                 'activity_weighted_normalized_median': kappa_values.get('activity_weighted_normalized_median') if kappa_values else None,
                 'kappa_score': kappa_values.get('score') if kappa_values else None,
+                'pnl_score': kappa_values.get('pnl_score') if kappa_values else None,
+                'combined_score': kappa_values.get('final_score') if kappa_values else None,
                 'unnormalized_score': validator_data['unnormalized_scores'][agentId],
                 'score': scores[agentId].item(),
                 'placement': placements[agentId].item(),
@@ -1031,6 +1081,20 @@ async def report(self: ReportingService) -> None:
                     updates.append((miner_gauges, m['kappa_penalty'], wallet_addr, netuid, simid, agentId, "kappa_penalty"))
                 if m['kappa_score'] is not None:
                     updates.append((miner_gauges, m['kappa_score'], wallet_addr, netuid, simid, agentId, "kappa_score"))
+                if m['pnl_score'] is not None:
+                    updates.append((miner_gauges, m['pnl_score'], wallet_addr, netuid, simid, agentId, "pnl_score"))
+                else:
+                    try:
+                        miner_gauges.remove(wallet_addr, netuid, simid, agentId, "pnl_score")
+                    except KeyError:
+                        pass
+                if m['combined_score'] is not None:
+                    updates.append((miner_gauges, m['combined_score'], wallet_addr, netuid, simid, agentId, "combined_score"))
+                else:
+                    try:
+                        miner_gauges.remove(wallet_addr, netuid, simid, agentId, "combined_score")
+                    except KeyError:
+                        pass
             else:
                 try:
                     miner_gauges.remove(wallet_addr, netuid, simid, agentId, "kappa")
@@ -1087,6 +1151,8 @@ async def report(self: ReportingService) -> None:
                 kappa=m['kappa'],
                 kappa_penalty=m['kappa_penalty'],
                 kappa_score=m['kappa_score'],
+                pnl_score=m['pnl_score'],
+                combined_score=m['combined_score'],
                 unnormalized_score=m['unnormalized_score'],
                 score=m['score'],
                 miner_gauge_name='miners'

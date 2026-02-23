@@ -81,8 +81,8 @@ class Signals(IntEnum):
         BULLISH (int): Rising
         BEARISH (int): Falling
     """
-    ENTRY=0
-    EXIT=1
+    REVERSION=0
+    MOMENTUM=1
     HOLD=3
     NOISE=4
     BULLISH=5

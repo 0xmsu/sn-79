@@ -340,7 +340,9 @@ def calculate_kappa_score(
     
     # ===== STEP 7: HANDLE INACTIVE BOOKS =====
     # Miners are allowed a certain number of inactive books without penalty
-    max_inactive_books = config.get('max_inactive_books', 24)
+    max_inactive_books_ratio = config['max_inactive_books_ratio']
+    total_books = len(normalized_kappas)
+    max_inactive_books = int(max_inactive_books_ratio * total_books)
     
     # Separate books into: valid kappa vs no kappa (None)
     books_with_scores = []
@@ -363,7 +365,8 @@ def calculate_kappa_score(
         uid_kappa['penalty_books'] = []
         
         bt.logging.trace(
-            f"UID {uid}: Ignoring {num_books_no_kappa} books with no kappa (≤ max_inactive_books={max_inactive_books})"
+            f"UID {uid}: Ignoring {num_books_no_kappa} books with no kappa "
+            f"(≤ max_inactive_books={max_inactive_books}, {max_inactive_books_ratio*100:.1f}% of {total_books} books)"
         )
     else:
         # More than max_inactive_books have no kappa - excess contribute 0.0
@@ -376,7 +379,8 @@ def calculate_kappa_score(
         uid_kappa['penalty_books'] = books_with_no_kappa[max_inactive_books:]
         
         bt.logging.debug(
-            f"UID {uid}: {num_books_no_kappa} books with no kappa (> max_inactive_books={max_inactive_books}). "
+            f"UID {uid}: {num_books_no_kappa} books with no kappa "
+            f"(> max_inactive_books={max_inactive_books}, {max_inactive_books_ratio*100:.1f}% of {total_books} books). "
             f"Ignoring {max_inactive_books}, penalizing {excess_inactive} as 0.0"
         )
     
@@ -427,22 +431,27 @@ def calculate_pnl_score(
     interval: int,
     lookback_threshold: int,
     miner_wealth: float,
+    book_count: int,
+    max_inactive_books_ratio: float,
     config: Dict
 ) -> float:
     """
-    Calculate normalized P&L score using daily return normalization.
+    Calculate normalized P&L score using per-book daily returns with median aggregation.
     
-    This function measures absolute profitability independent of risk considerations.
-    
-    The score represents aggregate profitability:
-    - Sums ALL realized P&L across ALL books over the lookback window
-    - Normalizes to equivalent daily return rate (makes comparable across time windows)
-    - Maps to [0, 1] with 0.5 as neutral (breakeven)
+    This function measures absolute profitability per book:
+    - Calculates daily return for EACH book independently
+    - Uses per-book capital allocation (miner_wealth / book_count) as reference
+    - Allows up to max_inactive_books to have zero P&L without penalty
+    - Excess inactive books contribute 0.0 to the median calculation
+    - Takes MEDIAN across scored books (consistent with Kappa methodology)
+    - Maps to [-0.5, 0.5] with 0.0 as neutral (breakeven)
     
     Scoring Philosophy:
-    - Kappa component: "Quality WHERE you traded" (per-book, activity-weighted)
-    - P&L component: "Total profit made" (aggregate, no activity weighting)
-    - Combination: Balances risk-adjusted quality with absolute returns
+    - Per-book calculation: Prevents one profitable book from masking losses elsewhere
+    - Inactive book tolerance: Miners can focus on subset of books without penalty
+    - Excess inactive penalty: Too many inactive books dilute the score toward 0.0
+    - Median aggregation: Robust to outliers, represents "typical" book performance
+    - Consistent with Kappa: Both use per-book → median with inactive tolerance
     
     Args:
         realized_pnl_history: P&L history from completed trades
@@ -451,64 +460,125 @@ def calculate_pnl_score(
         lookback: Lookback period in intervals
         interval: Interval duration in nanoseconds
         lookback_threshold: Minimum timestamp to include (pre-calculated)
-        miner_wealth: Initial capital for normalization
+        miner_wealth: Total initial capital across all books
+        book_count: Number of books in simulation
+        max_inactive_books_ratio: Ratio of books allowed to be inactive (e.g., 0.375)
         config: Normalization config with optional keys:
             - min_daily_return: Floor for daily return (default: -1.0 = -100%)
             - max_daily_return: Cap for daily return (default: 1.0 = +100%)
         
     Returns:
-        float: P&L score in [0, 1] range
+        float: P&L score in [-0.5, 0.5] range where:
+            -0.5 = worst possible (median book lost 100% daily)
+             0.0 = neutral (median book breakeven)
+            +0.5 = best possible (median book gained 100% daily)
     """
     # Early exit if no P&L data
     if uid not in realized_pnl_history:
-        return 0.5  # Neutral score for no P&L data
+        return 0.0  # Neutral score for no P&L data
     
-    # ===== STEP 1: SUM TOTAL REALIZED P&L =====
-    # Aggregate ALL realized P&L across ALL books within lookback window
-    total_realized_pnl = 0.0
+    # ===== STEP 1: CALCULATE REALIZED P&L PER BOOK =====
+    # Aggregate realized P&L per book over lookback window
+    book_realized_pnl = {}
     for timestamp, books_dict in realized_pnl_history[uid].items():
         if timestamp >= lookback_threshold:
-            for book_pnl in books_dict.values():
-                total_realized_pnl += book_pnl
+            for book_id, pnl in books_dict.items():
+                if book_id not in book_realized_pnl:
+                    book_realized_pnl[book_id] = 0.0
+                book_realized_pnl[book_id] += pnl
     
-    # ===== STEP 2: NORMALIZE TO DAILY RETURN RATE =====
-    # Convert absolute P&L to daily return percentage for fair comparison
-    # This makes P&L scores comparable across different assessment windows
-    #
-    # Formula: daily_return_ratio = (total_pnl) / (capital × days)
-    # Where days = assessment_window / 24_hours
+    # If no realized P&L in lookback window, return neutral
+    if not book_realized_pnl:
+        return 0.0
+    
+    # ===== STEP 2: CALCULATE DAILY RETURN RATIO PER BOOK =====
+    # Per-book capital allocation
     DAILY_NS = 86400_000_000_000  # 24 hours in nanoseconds
     assessment_window_ns = lookback * interval
-    window_fraction = assessment_window_ns / DAILY_NS  # Fraction of a day
-    pnl_reference = miner_wealth * window_fraction
+    window_fraction = assessment_window_ns / DAILY_NS
     
-    if pnl_reference == 0:
-        bt.logging.warning(f"UID {uid}: P&L reference is zero (lookback={lookback}, interval={interval})")
-        return 0.5
+    # Capital per book (equal allocation across books)
+    capital_per_book = miner_wealth / book_count
+    pnl_reference_per_book = capital_per_book * window_fraction
     
-    # Calculate daily return ratio
-    daily_return_ratio = total_realized_pnl / pnl_reference
+    if pnl_reference_per_book == 0:
+        bt.logging.warning(
+            f"UID {uid}: Per-book P&L reference is zero "
+            f"(miner_wealth={miner_wealth}, book_count={book_count})"
+        )
+        return 0.0
     
-    # ===== STEP 3: CLIP TO EXPECTED BOUNDS =====
-    # Get normalization bounds from config (defaults: ±100% daily)
-    # Clipping prevents extreme outliers from dominating the score distribution
+    # Get normalization bounds
     min_daily = config.get('min_daily_return', -1.0)
     max_daily = config.get('max_daily_return', 1.0)
-    daily_return_ratio = max(min_daily, min(max_daily, daily_return_ratio))
     
-    # ===== STEP 4: MAP TO [0, 1] SCORE =====
-    # Map daily return to score with 0% return at 0.5 (neutral)
-    # Formula: score = 0.5 + (daily_return / 2.0)
-    pnl_score = 0.5 + (daily_return_ratio / 2.0)
+    # Calculate daily return ratio per book
+    books_with_pnl = []  # Books that traded
+    books_inactive = []  # Books with no P&L
     
-    # Ensure strict [0, 1] bounds (safety check)
-    pnl_score = max(0.0, min(1.0, pnl_score))
+    for book_id in range(book_count):
+        book_pnl = book_realized_pnl.get(book_id, 0.0)
+        
+        if book_pnl == 0.0:
+            # No P&L on this book (inactive)
+            books_inactive.append(book_id)
+        else:
+            # Normalize to daily return for this book
+            daily_return_ratio = book_pnl / pnl_reference_per_book
+            
+            # Clip to expected bounds
+            daily_return_ratio = max(min_daily, min(max_daily, daily_return_ratio))
+            
+            books_with_pnl.append(daily_return_ratio)
+    
+    # ===== STEP 3: HANDLE INACTIVE BOOKS =====
+    # Calculate max allowed inactive books
+    max_inactive_books = int(max_inactive_books_ratio * book_count)
+    num_inactive = len(books_inactive)
+    
+    # Determine which books to include in scoring
+    if num_inactive <= max_inactive_books:
+        # Can ignore all inactive books (within allowed limit)
+        scoring_data = books_with_pnl
+        
+        bt.logging.trace(
+            f"UID {uid} P&L: Ignoring {num_inactive} inactive books "
+            f"(≤ max_inactive_books={max_inactive_books}, "
+            f"{max_inactive_books_ratio*100:.1f}% of {book_count} books)"
+        )
+    else:
+        # More than max_inactive_books are inactive - excess contribute 0.0
+        excess_inactive = num_inactive - max_inactive_books
+        
+        # Include active books + zeros for excess inactive books
+        scoring_data = books_with_pnl + [0.0] * excess_inactive
+        
+        bt.logging.debug(
+            f"UID {uid} P&L: {num_inactive} inactive books "
+            f"(> max_inactive_books={max_inactive_books}, "
+            f"{max_inactive_books_ratio*100:.1f}% of {book_count} books). "
+            f"Ignoring {max_inactive_books}, penalizing {excess_inactive} as 0.0"
+        )
+    
+    # ===== STEP 4: TAKE MEDIAN ACROSS SCORED BOOKS =====
+    # If no books to score, return neutral
+    if not scoring_data:
+        return 0.0
+    
+    # Median is robust to outliers and represents "typical" book performance
+    median_daily_return = np.median(scoring_data)
+    
+    # ===== STEP 5: MAP TO [-0.5, 0.5] SCORE =====
+    # Map median daily return to P&L score
+    pnl_score = median_daily_return / 2.0
     
     bt.logging.trace(
         f"UID {uid}: P&L score calculation - "
-        f"total_pnl={total_realized_pnl:.2f}, "
-        f"daily_return={daily_return_ratio*100:.1f}%, "
-        f"score={pnl_score:.4f}"
+        f"active_books={len(books_with_pnl)}, "
+        f"inactive_books={num_inactive}, "
+        f"scored_books={len(scoring_data)}, "
+        f"median_return={median_daily_return*100:.1f}%, "
+        f"pnl_score={pnl_score:.4f}"
     )
     
     return pnl_score
@@ -592,7 +662,7 @@ def score_uid(validator_data: Dict, uid: int) -> float:
     
     # ===== STEP 2: CHECK IF P&L SCORE COMPONENT IS ENABLED =====
     pnl_config = config.get('pnl', {})
-    pnl_score_weight = pnl_config.get('score_weight', 0.0)
+    pnl_score_weight = pnl_config.get('weight', 0.0)
     
     if pnl_score_weight > 0:
         # P&L SCORE ENABLED: Calculate and combine both components        
@@ -608,18 +678,21 @@ def score_uid(validator_data: Dict, uid: int) -> float:
             interval=config['interval'],
             lookback_threshold=lookback_threshold,
             miner_wealth=simulation_config['miner_wealth'],
+            book_count=simulation_config['book_count'],
+            max_inactive_books_ratio=config['max_inactive_books_ratio'],
             config=pnl_config.get('normalization', {})
         )
         
         # ===== STEP 3: COMBINE COMPONENTS WITH WEIGHTED AVERAGE =====
         # Kappa weight is the complement of P&L weight
         # This ensures weights sum to 1.0
-        kappa_weight = config['kappa'].get('score_weight', 0.0)
+        kappa_weight = config['kappa'].get('weight', 0.0)
         
         # Weighted combination: final = (w_k × kappa) + (w_p × pnl)
         final_score = (kappa_weight * kappa_score) + (pnl_score_weight * pnl_score)
         
-        # Store metadata for debugging/reporting
+        # Safety clamp to [0, 1]
+        final_score = max(0.0, min(1.0, final_score))        
         if kappa_values[uid]:
             uid_kappa = kappa_values[uid]
             uid_kappa['pnl_score'] = pnl_score
@@ -629,8 +702,8 @@ def score_uid(validator_data: Dict, uid: int) -> float:
         
         bt.logging.trace(
             f"UID {uid}: Combined score - "
-            f"kappa={kappa_score:.4f} (w={kappa_weight:.2f}, has activity), "
-            f"pnl={pnl_score:.4f} (w={pnl_score_weight:.2f}, no activity), "
+            f"kappa={kappa_score:.4f} (w={kappa_weight:.2f}), "
+            f"pnl={pnl_score:.4f} (w={pnl_score_weight:.2f}), "
             f"final={final_score:.4f}"
         )
         
@@ -792,6 +865,7 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
         'config': {
             'scoring': {
                 'kappa': {
+                    'weight': self.config.scoring.kappa.weight,
                     'normalization_min': self.config.scoring.kappa.normalization_min,
                     'normalization_max': self.config.scoring.kappa.normalization_max,
                     'min_lookback': self.config.scoring.kappa.min_lookback,
@@ -800,7 +874,14 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
                     'parallel_workers': self.config.scoring.kappa.parallel_workers,
                     'reward_cores': self.reward_cores,
                     'tau': self.config.scoring.kappa.tau,
-                    'pnl_impact' : self.config.scoring.kappa.pnl.impact
+                    'pnl_impact': self.config.scoring.kappa.pnl.impact
+                },
+                'pnl': {
+                    'weight': self.config.scoring.pnl.weight,
+                    'normalization': {
+                        'min_daily_return': self.config.scoring.pnl.normalization.min_daily_return,
+                        'max_daily_return': self.config.scoring.pnl.normalization.max_daily_return,
+                    }
                 },
                 'activity': {
                     'capital_turnover_cap': self.config.scoring.activity.capital_turnover_cap,
@@ -810,6 +891,7 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
                     'impact' : self.config.scoring.activity.impact,
                     'decay_rate': self.config.scoring.activity.decay_rate
                 },
+                'max_inactive_books_ratio': self.config.scoring.max_inactive_books,
                 'interval': self.config.scoring.interval,
             },
             'rewarding': {

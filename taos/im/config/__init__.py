@@ -146,7 +146,7 @@ def add_im_validator_args(cls, parser):
         "--scoring.kappa.weight",
         type=int,
         help="Weight applied to Kappa evaluation in final score calculation",
-        default=1.0,
+        default=0.79,
     )
 
     parser.add_argument(
@@ -209,7 +209,7 @@ def add_im_validator_args(cls, parser):
         "--scoring.pnl.weight",
         type=int,
         help="Weight applied to Realized PnL evaluation in final score calculation",
-        default=0.0,
+        default=0.21,
     )
 
     parser.add_argument(
